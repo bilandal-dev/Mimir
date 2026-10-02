@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Mimir-Icon: die Rune Mannr aus dem älteren Futhark – ᛗ.
+
+  Zwei senkrechte Stäbe, dazwischen ein X, das sie in der Mitte verbindet. Genau
+  dieses Kreuz unterscheidet die Rune vom jüngeren Futhark, wo die Diagonalen
+  nicht durchkreuzen, sondern nur einmal die Stäbe treffen. Beide Formen heißen M;
+  die ältere ist die, an die man zuerst denkt.
+
+  Gezeichnet als Strichzeichnung, nicht als gefüllte Kontur: Bei 16 Pixeln in der
+  Taskleiste überleben nur Kanten, keine Flächen. Runde Enden, weil eine gehauene
+  Rune keine eckigen Ansätze hat.
+
+  Die Farben stehen absichtlich als Literale drin und nicht als Verweise: Das Icon
+  wird ohne die Oberfläche gerendert, es gibt kein :root.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect x="0" y="0" width="512" height="512" rx="96" fill="#000000"/>
+  <!-- Strichstärke 48 statt 15: Bei 16 Pixeln ist ein 512er Bild nur 1/32 so
+       groß, und 15 Einheiten wären ein halbes Pixel. Danach verschwinden die
+       Stäbe und übrig bleibt ein Kratzer. 48 überlebt bis 16 Pixeln und ist bei
+       512 noch kein Klecks. -->
+  <g stroke="#00ffff" stroke-width="48" stroke-linecap="round" fill="none">
+    <!-- Linker Stab -->
+    <line x1="150" y1="118" x2="150" y2="394"/>
+    <!-- Rechter Stab -->
+    <line x1="362" y1="118" x2="362" y2="394"/>
+    <!-- Das Kreuz zwischen den Stäben: die beiden Diagonalen laufen gegeneinander
+         und treffen sich auf halber Höhe. -->
+    <line x1="150" y1="216" x2="362" y2="320"/>
+    <line x1="150" y1="320" x2="362" y2="216"/>
+  </g>
+</svg>

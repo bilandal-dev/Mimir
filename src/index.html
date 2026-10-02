@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mimir</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <header>
+        <h2>Mimir</h2>
+        <div class="header-controls">
+            <div class="server-actions">
+                <span id="server-status" class="server-status checking" aria-live="polite">Server: Prüfe ...</span>
+                <button type="button" id="check-server-btn" class="header-button">Prüfen</button>
+                <!-- Sichtbar, sobald der Server nicht antwortet. Ohne diesen Knopf
+                     gab es nur „SSH starten", und der verlangt ein SSH-Ziel – das
+                     hat jemand ohne Fernzugriff auf den Ollama-Rechner nicht. Die
+                     Adresse lässt sich dann aber nicht ändern, und der Server
+                     bleibt unerreichbar. -->
+                <button type="button" id="server-url-btn" class="header-button" hidden>Adresse</button>
+                <button type="button" id="start-server-btn" class="header-button" hidden disabled>SSH starten</button>
+            </div>
+            <div class="model-control">
+                <button type="button" id="calendar-toggle-btn" class="header-button" aria-pressed="true" title="Kalenderleiste am rechten Rand ein- oder ausblenden">Kalender: an</button>
+                <label for="model-select">Modell: </label>
+                <select id="model-select" disabled>
+                    <option>Modelle werden geladen ...</option>
+                </select>
+                <span id="context-usage" class="context-usage" title="Grobe Schätzung der Kontextbelegung">Kontext: –</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="main-area">
+        <div class="chat-area">
+            <div id="chat-container">
+                <!-- Nachrichten werden hier dynamisch eingefügt -->
+            </div>
+
+            <!-- Rein visuell: die Anzeige für Tastatur und Screenreader läuft
+                 über aria-busy an der Antwortblase (main.js:runChatAttempt). -->
+            <div class="chat-activity" aria-hidden="true">
+                <span class="activity-spinner"></span>
+                <span class="activity-label">Antwort wird erzeugt</span>
+            </div>
+        </div>
+
+        <aside id="calendar-panel" class="calendar-panel" aria-label="Nächste Termine">
+            <div class="calendar-head">
+                <h3>Kalender</h3>
+                <div class="calendar-head-actions">
+                    <button type="button" id="calendar-toggle-list" class="calendar-icon-button" title="Alle Termine oder nur die nächsten anzeigen">Alle</button>
+                    <button type="button" id="calendar-choose" class="calendar-icon-button" title="Kalender auswählen">Auswahl</button>
+                    <button type="button" id="calendar-refresh" class="calendar-icon-button" title="Termine neu laden">Neu laden</button>
+                </div>
+            </div>
+            <div id="calendar-picker" class="calendar-picker" hidden>
+                <p class="calendar-state" id="calendar-picker-note">Welche Kalender in der Leiste erscheinen sollen.</p>
+                <div id="calendar-picker-list"></div>
+                <button type="button" id="calendar-picker-save">Auswahl merken</button>
+            </div>
+            <p id="calendar-state" class="calendar-state">Noch keine Instanz eingetragen.</p>
+            <ul id="calendar-list" class="calendar-list"></ul>
+            <p id="calendar-foot" class="calendar-foot"></p>
+        </aside>
+    </div>
+
+    <div class="input-container">
+        <!-- Die Kandidaten beim Ergänzen mit TAB. Über der Eingabe statt neben
+             den Knöpfen: Im Fluss müsste die Zeile umbrechen und würde die Leiste
+             verschieben. `position: absolute` im Stilblatt hebt sie aus dem Fluss
+             heraus, `bottom: 100%` legt sie darüber. Ein Systemeintrag im Chat
+             wäre noch schlimmer – ein TAB ist keine Unterhaltung. -->
+        <div id="command-hint" class="command-hint" hidden>
+            <ul id="command-hint-list" class="command-hint-list" role="listbox" aria-label="Befehle"></ul>
+            <p class="command-hint-foot">TAB weiter · Umschalt+TAB zurück · ENTER übernimmt · Esc schließt</p>
+        </div>
+
+        <button type="button" id="agent-toggle-btn" class="agent-toggle" aria-pressed="false" title="Agentenmodus mit lesenden Werkzeugen einschalten">Agent: aus</button>
+        <button type="button" id="write-toggle-btn" class="agent-toggle write-toggle" aria-pressed="false" title="Schreibende Werkzeuge freigeben (nur mit Agentenmodus)">Schreiben: aus</button>
+        <!-- maxlength = MAX_PROMPT_BYTES (512 KiB) im Backend: die Eingabe kann
+             nie allein eine Anfrage blockieren. -->
+        <textarea id="prompt-input" maxlength="524288" placeholder="Nachricht eingeben oder /help für Befehle ... (Enter zum Senden)" rows="1"></textarea>
+        <input type="file" id="attachment-input" class="visually-hidden" multiple>
+        <button type="button" id="attach-btn" class="attach-button" title="Textdatei an diese Nachricht anhängen">Datei</button>
+        <button id="send-btn" disabled>Senden</button>
+        <button id="cancel-chat-btn" type="button" hidden disabled>Abbrechen</button>
+    </div>
+
+    <!-- Die Server-Adresse. Steht bewusst als eigener Dialog und nicht als
+         weiterer Chat-Befehl: Solange der Server nicht erreichbar ist, ist der
+         Chat der einzige Ort, an dem man etwas eingeben kann – ein Befehl, den man
+         dort tippen muss, um die Adresse zu erreichen, hilft niemandem, dessen
+         Server falsch eingestellt ist. Genau das war der Fall: Nach dem ersten
+         Start war der Server nicht erreichbar und die Adresse nicht änderbar. -->
+    <dialog id="server-url-dialog">
+        <form id="server-url-form">
+            <h3>Ollama-Server</h3>
+            <p>Adresse des Servers, auf dem Ollama läuft.</p>
+            <label for="server-url-input">Adresse</label>
+            <input
+                type="text"
+                id="server-url-input"
+                placeholder="ollama.example.org:11434"
+                autocomplete="off"
+                spellcheck="false"
+                required
+            >
+            <p class="field-hint">
+                Ohne Angabe läuft Mimir gegen <code>localhost:11434</code>. Mit einem
+                Doppelpunkt angegebener Port, ohne <code>http://</code> auch gültig.
+            </p>
+            <p id="server-url-status" class="field-status" role="status"></p>
+            <div class="dialog-actions">
+                <button type="button" id="server-url-cancel">Abbrechen</button>
+                <button type="submit" id="server-url-save">Übernehmen</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="ssh-password-dialog">
+        <form id="ssh-password-form">
+            <h3>SSH-Passwort</h3>
+            <p id="ssh-password-target"></p>
+            <p>Das Passwort wird nur für diese Sitzung im Arbeitsspeicher verwendet und nicht gespeichert.</p>
+            <input type="password" id="ssh-password-input" autocomplete="off" spellcheck="false" required>
+            <div class="dialog-actions">
+                <button type="button" id="ssh-password-cancel">Abbrechen</button>
+                <button type="submit">Verbinden</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="tool-dialog">
+        <form id="tool-form">
+            <h3>Werkzeugaufruf bestätigen</h3>
+            <p>Das Modell möchte <strong id="tool-name">unbekannt</strong> aufrufen. Es wird ausschließlich gelesen, nichts verändert.</p>
+            <p id="tool-scope">Arbeitsverzeichnis: unbekannt</p>
+            <pre id="tool-arguments"></pre>
+            <div class="dialog-actions">
+                <button type="button" id="tool-cancel">Ablehnen</button>
+                <button type="submit">Ausführen</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Der Termin im Fenster. Zwei Schritte: „Speichern" zeigt zuerst den
+         Unterschied, und erst der zweite Klick schreibt. Der Unterschied kommt
+         aus derselben Planung wie das Schreiben, er kann also nicht etwas anderes
+         zeigen, als gespeichert würde. -->
+    <dialog id="event-dialog">
+        <form id="event-form">
+            <h3 id="event-heading">Termin</h3>
+            <p class="event-scope" id="event-scope"></p>
+            <p class="event-blocked" id="event-blocked" hidden></p>
+
+            <div class="event-fields">
+                <label for="event-summary">Titel</label>
+                <input type="text" id="event-summary" maxlength="524288" autocomplete="off">
+
+                <div class="event-row">
+                    <div>
+                        <label for="event-start">Beginn</label>
+                        <input type="datetime-local" id="event-start" step="60">
+                    </div>
+                    <div>
+                        <label for="event-end">Ende</label>
+                        <input type="datetime-local" id="event-end" step="60">
+                    </div>
+                </div>
+
+                <label class="event-check">
+                    <input type="checkbox" id="event-all-day">
+                    <span>Ganztägig</span>
+                </label>
+                <p class="event-hint" id="event-floating-hint" hidden></p>
+
+                <label for="event-reminder">Erinnerung</label>
+                <input type="text" id="event-reminder" autocomplete="off"
+                       placeholder="z. B. 15 Minuten vorher – oder „keine Erinnerung“">
+                <p class="event-hint">Wird in den Werten unten als Dauer gespeichert. Eine Erinnerung zum genauen Beginn gibt es nicht.</p>
+
+                <label for="event-location">Ort</label>
+                <input type="text" id="event-location" autocomplete="off">
+
+                <label for="event-categories">Kategorien</label>
+                <input type="text" id="event-categories" autocomplete="off"
+                       placeholder="Arbeit, privat">
+
+                <label for="event-description">Beschreibung</label>
+                <textarea id="event-description" rows="4"></textarea>
+            </div>
+
+            <p class="event-hint">Teilnehmer, Anlagen und Serientermine lassen sich hier nicht ändern. Steht ein Termin im Kalender, bleibt das so – dafür gibt es in Nextcloud eine Oberfläche.</p>
+
+            <div id="event-diff-wrap" hidden>
+                <p class="event-diff-head" id="event-diff-head"></p>
+                <div class="diff" id="event-diff"></div>
+            </div>
+
+            <p id="event-error" class="calendar-dialog-error" hidden></p>
+
+            <div class="dialog-actions">
+                <button type="button" id="event-cancel">Abbrechen</button>
+                <button type="submit" id="event-save">Speichern</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="calendar-dialog">
+        <form id="calendar-form">
+            <h3>Mit Nextcloud anmelden</h3>
+            <p>Für den Kalender wird ein <strong>App-Passwort</strong> gebraucht, nicht das Hauptpasswort. In Nextcloud unter Einstellungen, Sicherheit ganz unten ein App-Passwort erzeugen und hier eintragen. Es bleibt nur im Arbeitsspeicher, außer „Passwort merken" ist gewählt.</p>
+            <label for="calendar-url-input">Adresse der Instanz</label>
+            <input type="text" id="calendar-url-input" placeholder="https://cloud.example.org" autocomplete="off">
+            <label for="calendar-user-input">Benutzername</label>
+            <input type="text" id="calendar-user-input" autocomplete="username">
+            <label for="calendar-password-input">App-Passwort</label>
+            <input type="password" id="calendar-password-input" autocomplete="off">
+            <label class="calendar-remember">
+                <input type="checkbox" id="calendar-remember-input">
+                <span>Passwort merken, damit die Anmeldung nach einem Neustart erhalten bleibt</span>
+            </label>
+            <p class="calendar-hint">Gespeichert wird nur das App-Passwort, in der Datei <code>calendar-secret.json</code> mit den Rechten 0600. Das Hauptpasswort des Kontos gehört nicht hierher.</p>
+            <p id="calendar-dialog-error" class="calendar-dialog-error" hidden></p>
+            <div class="dialog-actions">
+                <button type="button" id="calendar-cancel">Abbrechen</button>
+                <button type="submit" id="calendar-login-btn">Anmelden</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="certificate-dialog">
+        <div id="certificate-body">
+            <h3>Zertifikat der Instanz</h3>
+            <p>Die Instanz liefert ein selbstsigniertes Zertifikat. Mimir prüft die Zertifikatskette nicht, sondern merkt sich dieses eine Zertifikat und vergleicht es bei jedem Zugriff. Stimmt es nicht mehr, wird der Zugriff verweigert.</p>
+            <p class="certificate-host">Instanz: <code id="certificate-host"></code></p>
+            <p class="certificate-fingerprint-label">Fingerabdruck (SHA-256)</p>
+            <p class="certificate-fingerprint" id="certificate-fingerprint"></p>
+            <p class="certificate-hint" id="certificate-hint"></p>
+            <p class="calendar-hint">Zum Nachsehen auf dem Rechner:
+                <code>openssl s_client -connect HOST:443 &lt; /dev/null 2&gt;/dev/null | openssl x509 -noout -fingerprint -sha256</code></p>
+            <div class="dialog-actions">
+                <button type="button" id="certificate-cancel">Abbrechen</button>
+                <!-- Das ist die eigentliche Freigabe des Zertifikats und damit
+                     der ausführende Knopf des Fensters. Das Fenster hat kein
+                     Formular, deshalb wird die Füllung über die Kennung
+                     gesteuert und nicht über type="submit". -->
+                <button type="button" id="certificate-trust">Zertifikat bestätigen</button>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog id="system-dialog">
+        <form id="system-form">
+            <h3>Systemanweisung</h3>
+            <p>Diese Anweisung steht bei jeder Anfrage vor deinen Nachrichten, zum Beispiel „Antworte immer auf Deutsch und kurz". Sie wird nicht im Chatverlauf gespeichert und ist nur für dieses Gerät bestimmt.</p>
+            <textarea id="system-input" rows="6" maxlength="8192" placeholder="z. B. Antworte auf Deutsch, nenne zuerst das Ergebnis und dann die Begründung."></textarea>
+            <div class="dialog-actions">
+                <button type="button" id="system-cancel">Abbrechen</button>
+                <button type="button" id="system-clear">Leeren</button>
+                <button type="submit">Speichern</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="write-dialog">
+        <form id="write-form">
+            <h3>Schreibvorgang bestätigen</h3>
+            <p id="write-target">unbekannt</p>
+            <p id="write-scope">Arbeitsverzeichnis: unbekannt</p>
+            <p id="write-summary"></p>
+            <div class="diff" id="write-diff"></div>
+            <div class="dialog-actions">
+                <button type="button" id="write-cancel">Ablehnen</button>
+                <button type="submit">Schreiben</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Statisches Skript, kein Build-Schritt: main.js erwartet window.__TAURI__ aus der WebView. -->
+    <script type="module" src="main.js"></script>
+</body>
+</html>

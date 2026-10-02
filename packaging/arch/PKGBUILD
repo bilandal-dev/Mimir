@@ -1,0 +1,75 @@
+# Maintainer: bilandal-dev
+pkgname=mimir
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server"
+arch=('x86_64')
+url="https://github.com/bilandal-dev/Mimir"
+license=('MIT')
+# Das Repository, aus dem die Binary geladen wird. Solange das nicht existiert,
+# ist `mimir` im AUR nicht benutzbar – die PKGBUILD lädt von hier und findet
+# nichts. Vor dem Einreihen also das Repository anlegen und ein Release mit dem
+# Archiv hochladen.
+_release_url="https://github.com/bilandal-dev/Mimir/releases/download/v$pkgver"
+# WebKitGTK ist keine gewöhnliche Abhängigkeit: Ohne sie startet das Programm
+# nicht. Sie ist in Archlinux fast überall vorhanden, muss aber genannt werden –
+# sonst beschwert sich pacman nicht, und der Start scheitert mit einer
+# Meldung, die nichts mit dem Paket zu tun hat.
+depends=('webkit2gtk-4.1' 'gtk3')
+# `rust` und `cargo` stehen hier bewusst **nicht**. Die Binary wird heruntergeladen
+# und nicht gebaut: Sie hängt an 143 Systembibliotheken, und ein Nutzer, der nur
+# ein Chat-Programm möchte, soll dafür keine 20-minütige Toolchain-Kette
+# installieren. Wer selbst bauen will, nutzt das Repository.
+makedepends=()
+provides=()
+conflicts=()
+replaces=()
+# Ohne das findet `strip` nichts, und pacman meldet einen Fehler beim Bauen des
+# Pakets, obwohl das Programm korrekt ist.
+options=('!strip')
+source=("mimir-$pkgver-$ARCH.tar.gz::$_release_url")
+# Erzeugt von `packaging/arch/erzeuge-archiv.sh`. Steht hier `SKIP`, meldet pacman
+# bei jedem Bau eine Warnung und `makepkg -si` verweigert die Installation ohne
+# zusätzliches `--noconfirm`. Nach dem Hochladen also eintragen:
+#   sha256sum -b packaging/arch/mimir-<version>-x86_64.tar.gz
+sha256sums=('88ce2ea73a54394840a802f58ca441763283b30d563020cb566d288f6d5dafea')
+
+# Arch-Bezeichnung: Das Programm heisst Mimir, das Paket mimir, und die Binary
+# liegt als mimir im Archiv. Nichts umzubenennen wäre falsch – der Name im
+# Prozessbild muss zu dem passen, was `hyprctl clients` anzeigt.
+pkgver() {
+  # Die Prüfsumme wird unten aus der heruntergeladenen Datei gebildet, wenn
+  # `SKIP` gesetzt war. Hier nur der Teil vor einem möglichen Suffix.
+  echo "$pkgver"
+}
+
+prepare() {
+  # Nichts zu tun: Es gibt keinen Quelltext, der entpackt und gebaut würde.
+  :
+}
+
+build() {
+  # Nichts zu bauen. `build` muss existieren, sonst beschwert sich makepkg.
+  :
+}
+
+package() {
+  # Das Archiv enthält die Binary unter `mimir` und das 128er-Icon.
+  install -Dm755 mimir "$pkgdir/usr/bin/mimir"
+  install -Dm644 mimir.png \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/mimir.png"
+
+  # Freie Desktop-Datei. `Categories=Development` ist der Wert, den Tauri selbst
+  # erzeugt; `Development` steht in der Spezifikation, `DeveloperTool` in der
+  # Tauri-Liste – die sind nicht dasselbe, und eine ungültige Kategorie blendet
+  # den Eintrag in manchen Menüs aus.
+  install -Dm644 mimir.desktop "$pkgdir/usr/share/applications/mimir.desktop"
+
+  # Übersetzung: pacman, nicht gettext.
+  install -Dm644 mimir.license \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# Die Prüfsumme prüft makepkg selbst gegen `sha256sums`. Eine eigene Funktion
+# dafür wäre doppelt: Sie liefe nur, wenn sie aufgerufen wird, und makepkg
+# vergisst sie ohnehin eher – `makepkg -C` überspringt sie.

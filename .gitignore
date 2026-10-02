@@ -1,0 +1,37 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Von `cargo tauri icon` erzeugte Bilddaten für mobile Plattformen. Sie sind ohne
+# Android-SDK und ohne Xcode nutzlos und blähen das Repository auf. Neu erzeugen:
+#   cargo tauri icon src-tauri/icons/source.svg
+/src-tauri/icons/android/
+/src-tauri/icons/ios/
+
+# Das Release-Archiv entsteht aus `erzeuge-archiv.sh` und wird als Release
+# hochgeladen, nicht committet. Eine 3,7-MB-Binary im Repository wächst mit jedem
+# Release, und die gehört auf die Release-Seite, nicht in den Quelltext.
+/packaging/arch/mimir-*.tar.gz
+/packaging/arch/mimir.desktop
+/packaging/arch/mimir.license

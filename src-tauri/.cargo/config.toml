@@ -1,0 +1,31 @@
+# Der Pfad des Baurechners soll nicht im ausgelieferten Binary stehen.
+#
+# Rust backt standardmäßig den vollständigen Quellpfad in jede Panik-Meldung – und
+# mit dem Präfix des Entwicklers liegt er als Zeichenkette im Binary, sichtbar für
+# jeden mit `strings`. `--remap-path-prefix` schreibt stattdessen einen neutralen
+# Pfad. Das ist die einzige Stelle, an der sich der Pfad verstecken lässt: Es gibt
+# kein `env!` im eigenen Code, der ihn benötigt, und `panic = "abort"` lässt ohnehin
+# keine Meldung mehr beim Anwender ankommen.
+#
+# Hinweis: Eine `rustflags`-Angabe hier lässt Cargo eine gesetzte Umgebungsvariable
+# `RUSTFLAGS` übergehen. Wer beim Bauen etwas zusätzlich übergeben will, trägt es in
+# dieser Datei ein.
+#
+# Die beiden Präfixe hier beziehen sich auf **deinen** Rechner. Auf einem anderen
+# greifen sie nicht, und das Binary enthält dann den Pfad des jeweiligen Baurechners
+# – was genau vermieden werden sollte. Wer das vermeiden will, trägt vor dem Bauen
+# seinen eigenen Pfad ein:
+#
+#   RUSTFLAGS="--remap-path-prefix=$PWD=Mimir --remap-path-prefix=$HOME/.cargo/registry=registry" \
+#     cargo build --release
+#
+# So baut jeder Rechner in ein Binary, das seinen Pfad nicht nennt.
+#
+# Wichtig dabei: `RUSTFLAGS` wird von einer `rustflags`-Angabe hier **übergangen**.
+# Deshalb ist der Weg über die Umgebung der einfachere, sobald man sie kennt.
+[build]
+rustflags = [
+    "--remap-path-prefix=/home/bilandal/Documents/Mimir=Mimir",
+    "--remap-path-prefix=/home/bilandal/.cargo/registry=registry",
+]
+

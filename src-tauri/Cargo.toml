@@ -1,0 +1,59 @@
+[package]
+name = "mimir"
+version = "0.1.0"
+description = "Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server"
+# `authors` landet im `Maintainer`-Feld des Debian-Pakets. Mit dem Vorgabewert
+# "you" erzeugte `cargo tauri build` ein Paket, das als Betreiber „you" führt –
+# sichtbar in jeder Paketverwaltung, die es installiert.
+authors = ["bilandal-dev <noreply@github.com>"]
+# `license` wird von Cargo verlangt, sobald die Anwendung veröffentlicht werden
+# soll. Die Angabe hier und die LICENSE-Datei im Wurzelverzeichnis müssen
+# übereinstimmen.
+license = "MIT"
+edition = "2021"
+repository = "https://github.com/bilandal-dev/Mimir"
+keywords = ["ollama", "chat", "tauri"]
+categories = ["gui"]
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mimir_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Für Ollama im LAN genügt Klartext-HTTP, für die Nextcloud-Instanz nicht: Sie
+# liefert HTTPS mit einem selbstsignierten Zertifikat. Deshalb kommt ein
+# TLS-Stack dazu, der ohne systemweites OpenSSL auskommt. Die Gültigkeit wird
+# nicht dem System überlassen, sondern gegen das in der Konfiguration
+# bestätigte Zertifikat geprüft.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+# Für den Fingerabdruck, mit dem ein selbstsigniertes Zertifikat bestätigt wird.
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+ammonia = "4.2"
+pulldown-cmark = "0.13.4"
+zeroize = "1.8"
+# Kalender: CalDAV antwortet mit WebDAV-Multistatus in XML, und Termine brauchen
+# echte Zeitpunkte samt Zeitzone. DieICS- und RRULE-Aufbereitung ist bewusst
+# selbst geschrieben, damit nur diese Abhängigkeiten dazukommen.
+quick-xml = "0.42"
+chrono = "0.4"
+chrono-tz = "0.10"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
