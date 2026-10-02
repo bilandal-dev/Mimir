@@ -7341,7 +7341,7 @@ mod tests {
     #[test]
     fn the_port_is_read_out_of_the_address() {
         assert_eq!(port_of("http://192.168.178.42:11434/api/chat"), "11434");
-        assert_eq!(port_of("https://nextcloud.local:8080/x"), "8080");
+        assert_eq!(port_of("https://cloud.example.org:8080/x"), "8080");
         assert_eq!(port_of("http://127.0.0.1/api/chat"), "der angegebenen");
     }
 
@@ -7805,7 +7805,7 @@ mod tests {
             r#"{
                 "server_url": "http://192.168.178.42:11434",
                 "calendar": {
-                    "server_url": "https://nextcloud.local/remote.php/dav/principals/users/Kai",
+                    "server_url": "https://cloud.example.org/remote.php/dav/principals/users/benutzer",
                     "username": ""
                 }
             }"#,
@@ -7818,11 +7818,11 @@ mod tests {
 
         // Die Adresse wird auf die Instanz zurückgeführt und der Name steckt im
         // kopierten Pfad, ist aber noch nicht eingetragen.
-        assert_eq!(calendar.server_url, "https://nextcloud.local");
+        assert_eq!(calendar.server_url, "https://cloud.example.org");
         assert!(calendar.username.is_empty());
         assert_eq!(
             calendar.dav_root().unwrap(),
-            "https://nextcloud.local/remote.php/dav"
+            "https://cloud.example.org/remote.php/dav"
         );
 
         // Auch eine völlig unbrauchbare Adresse darf den Start nicht verhindern.
@@ -7839,13 +7839,13 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"{ "server_url": "http://192.168.178.42:11434",
-                "calendar": { "server_url": "https://nextcloud.local", "username": "../../admin" } }"#,
+                "calendar": { "server_url": "https://cloud.example.org", "username": "../../admin" } }"#,
         )
         .unwrap();
         let settings = OllamaSettings::load(config_path.clone())
             .expect("ein kaputter Benutzername hat den Start verhindert");
         let calendar = settings.get_config().await.calendar;
-        assert_eq!(calendar.server_url, "https://nextcloud.local");
+        assert_eq!(calendar.server_url, "https://cloud.example.org");
         assert!(calendar.username.is_empty());
 
         std::fs::remove_file(&config_path).ok();
@@ -7863,12 +7863,12 @@ mod tests {
         let settings = OllamaSettings::load(config_path.clone()).unwrap();
 
         settings
-            .set_calendar_certificate("https://nextcloud.local", "MIIBadenFqADAg".to_string())
+            .set_calendar_certificate("https://cloud.example.org", "MIIBadenFqADAg".to_string())
             .await
             .expect("das Zertifikat ließ sich ohne Benutzernamen nicht merken");
 
         let config = settings.get_config().await.calendar;
-        assert_eq!(config.server_url, "https://nextcloud.local");
+        assert_eq!(config.server_url, "https://cloud.example.org");
         assert!(
             config.uses_tls(),
             "die Adresse sollte als https erkannt sein"
@@ -7880,7 +7880,7 @@ mod tests {
         // Und die Auswahl der Kalender ist unberührt geblieben.
         settings
             .set_calendar_config(crate::calendar::CalendarConfig {
-                server_url: "https://nextcloud.local".to_string(),
+                server_url: "https://cloud.example.org".to_string(),
                 username: "kai".to_string(),
                 calendars: vec!["persoenlich".to_string()],
                 server_certificate: config.server_certificate.clone(),
