@@ -1,14 +1,17 @@
 // Prüft das **gebaute** Binary auf Angaben des Entwicklers.
 //
-// Nicht der Quelltext wird geprüft, sondern das Artefakt, das andere installieren.
+// Nicht der Quelltext wird geprüft, sondern das Artefakt, das jemand installiert.
 // Ein Blick auf den Quelltext genügt nicht: Eine Konstante, die im Quelltext
 // harmlos aussieht, landet als Zeichenkette im Binary und ist mit `strings`
 // sichtbar – so ging die Adresse des Ollama-Servers in die Welt, ohne dass
 // irgendein Test etwas gemerkt hätte.
 //
-// Zwei Klassen von Funden:
-//   1. Fremde Netzadressen, die auf einen fremden Server zeigen.
-//   2. Pfade des Baurechners, aus denen sein Benutzername hervorgeht.
+// Geprüft wird deshalb nur noch eine Klasse von Funden: fremde Netzadressen, die
+// auf einen fremden Server zeigen. Pfade des Baurechners werden nicht mehr
+// gemeldet. Wer Mimir baut, baut auf seinem eigenen Rechner; Tauri bettet den
+// Pfad des Bauenden einmal als Asset-Präfix ein, und der ist seins. Das war erst
+// ein Problem, als eine Binary an Fremde ging – siehe die Notiz in
+// `src-tauri/build.rs`.
 //
 // Aufruf:  cargo build --release --manifest-path src-tauri/Cargo.toml
 //          node src/tests/binary-pruefen.mjs [pfad/zum/binary]
@@ -28,9 +31,6 @@ if (!existsSync(binär)) {
   console.error('Zuerst bauen: cargo build --release --manifest-path src-tauri/Cargo.toml');
   process.exit(2);
 }
-
-/** Der Benutzername, unter dem dieses Repository liegt. */
-const BENUTZER = process.env.USER || os.userInfo().username;
 
 /**
  * Netzadressen, die auf einen fremden Rechner zeigen.
@@ -70,43 +70,6 @@ const FREMDE_ADRESSEN = [
       const adresse = treffer.split(':')[0];
       return adresse === '0.0.0.0' || adresse === '127.0.0.1';
     },
-  },
-];
-
-/** Pfade, aus denen der Benutzername des Baurechners hervorgeht. */
-const BAURECHNER_PFADE = [
-  { muster: new RegExp(`/home/${BENUTZER}/`, 'g'), begruendung: 'Home-Verzeichnis des Baurechners' },
-  { muster: new RegExp(`/Users/${BENUTZER}/`, 'g'), begruendung: 'Home-Verzeichnis auf macOS' },
-  { muster: /\/home\/[a-z][a-z0-9_-]{2,20}\//gi, begruendung: 'irgendein Home-Verzeichnis' },
-  { muster: new RegExp(`${WURZEL}/`, 'g'), begruendung: 'Pfad dieses Projekts' },
-];
-
-/**
- * Was sich nicht entfernen lässt, aber auch nichts verrät.
- *
- * Tauri verbindet einen relativen `frontendDist` mit `CARGO_MANIFEST_DIR` und
- * bettet das Ergebnis als **absoluten** Pfad in das Binary, als Präfix der
- * Asset-Schlüssel. Es steht genau einmal, direkt hinter dem `__TAURI__`-Skript.
- *
- * Beides lässt sich nicht trennen: `tauri::generate_context!` braucht dieselbe
- * Variable, um `tauri.conf.json` zu finden. Auf einen neutralen Wert gesetzt,
- * schlägt der Build mit
- *
- *     error: unable to read Tauri config file at /mimir/tauri.conf.json
- *
- * fehl. `--remap-path-prefix` greift nicht, weil der Pfad zur Bauzeit als
- * Zeichenkette entsteht. Siehe die Notiz in `src-tauri/build.rs`.
- *
- * Der Pfad nennt den Benutzernamen des Baurechners und sein Projektverzeichnis.
- * Beides steht schon im Namen der Anwendung, und auf einem fremden Rechner ist es
- * ohnehin ein anderer. Gemeldet wird es trotzdem – aber nicht als Fehler.
- */
-const UNVERMEIDBAR = [
-  {
-    // Genau diese eine Stelle, erkennbar am direkt folgenden Tauri-Kontext.
-    muster: new RegExp(`${WURZEL}/src-tauri(?=cacheTauri)`, 'g'),
-    begruendung: 'Asset-Präfix von Tauri selbst, nicht entfernbar',
-    unvermeidbar: true,
   },
 ];
 
@@ -250,25 +213,12 @@ console.log();
 
 const funde = [];
 
-// Das Asset-Präfix von Tauri zuerst prüfen: Es ist ein Teil des Pfads des
-// Baurechners, aber keine eigene Fundstelle. Ohne diesen Ausschluss meldet
-// dieselbe Stelle zweimal – einmal harmlos, einmal als zu entfernen.
-const assetPraefix = new RegExp(`${WURZEL}/src-tauri(?=cacheTauri)`, 'g').test(text);
-
-for (const { muster, begruendung, ausgenommen, unvermeidbar } of [
-  ...FREMDE_ADRESSEN,
-  ...BAURECHNER_PFADE,
-  ...UNVERMEIDBAR,
-]) {
+for (const { muster, begruendung, ausgenommen } of FREMDE_ADRESSEN) {
   const treffer = text.match(muster);
   if (!treffer) continue;
 
   for (const wert of [...new Set(treffer)]) {
     if (ausgenommen && ausgenommen(wert)) continue;
-    // Dasselbe Vorkommen, das oben schon als Asset-Präfix gemeldet wurde: Der
-    // Treffer ist ein Teil des Wurzelverzeichnisses, wird aber von zwei Mustern
-    // erfasst. Einmal gemeldet genügt.
-    if (assetPraefix && (wert.startsWith(WURZEL) || WURZEL.startsWith(wert))) continue;
 
     // Wo steht es? Ein Fund im Code ist etwas anderes als einer im eingebetteten
     // Oberflächentext – beides wird gemeldet, weil beides auffällt.
@@ -278,46 +228,28 @@ for (const { muster, begruendung, ausgenommen, unvermeidbar } of [
       .toString('latin1')
       .replace(/[^\x20-\x7eäöüÄÖÜß]/g, ' ');
 
-    funde.push({ wert, begruendung, umgebung, unvermeidbar });
+    funde.push({ wert, begruendung, umgebung });
   }
 }
 
-const echteFunde = funde.filter((fund) => !fund.unvermeidbar);
-const harmlose = funde.filter((fund) => fund.unvermeidbar);
-
-if (echteFunde.length === 0) {
-  console.log('Keine fremde Adresse und kein Pfad des Baurechners gefunden.');
-  console.log();
-  console.log('Was weiterhin im Binary steht und auch soll:');
+const wasSollteStehen = () => {
   console.log('  - localhost:11434 als Vorgabewert, änderbar mit /server-url');
   console.log('  - 0.0.0.0 als Bindungsadresse im Startskript für Ollama');
   console.log('  - Feldnamen wie app_password – keine Werte');
-  process.exit(0);
-}
+};
 
-if (harmlose.length > 0) {
-  console.log(`${harmlose.length} Fundstelle(n), die Tauri selbst schreibt:`);
-  console.log();
-  for (const { wert } of harmlose) {
-    console.log(`  ${wert}`);
-  }
-  console.log();
-}
-
-if (echteFunde.length === 0) {
-  console.log('Keine fremde Adresse und kein eigener Pfad des Baurechners gefunden.');
+if (funde.length === 0) {
+  console.log('Keine fremde Netzadresse gefunden.');
   console.log();
   console.log('Was weiterhin im Binary steht und auch soll:');
-  console.log('  - localhost:11434 als Vorgabewert, änderbar mit /server-url');
-  console.log('  - 0.0.0.0 als Bindungsadresse im Startskript für Ollama');
-  console.log('  - Feldnamen wie app_password – keine Werte');
+  wasSollteStehen();
   process.exit(0);
 }
 
-console.log(`${echteFunde.length} Fundstelle(n), die zu entfernen sind:`);
+console.log(`${funde.length} Fundstelle(n), die zu entfernen sind:`);
 console.log();
 
-for (const { wert, begruendung, umgebung } of echteFunde) {
+for (const { wert, begruendung, umgebung } of funde) {
   console.log(`  ${wert}`);
   console.log(`    Grund:  ${begruendung}`);
   console.log(`    Kontext: …${umgebung}…`);
@@ -327,9 +259,4 @@ for (const { wert, begruendung, umgebung } of echteFunde) {
 console.log('Hinweise:');
 console.log('  Eine fremde Adresse im Quelltext als konstante Vorgabe kommt über');
 console.log('  `strings` im Binary an. Sie gehört entfernt, nicht abgeschwächt.');
-console.log();
-console.log('  Ein Pfad des Baurechners aus dem **eigenen** Quelltext lässt sich mit');
-console.log('  --remap-path-prefix in src-tauri/.cargo/config.toml entschärfen. Das');
-console.log('  eine Vorkommen, das Tauri selbst schreibt, lässt sich nur vermeiden,');
-console.log('  indem das Manifest-Verzeichnis umbenannt wird – siehe src-tauri/build.rs.');
 process.exit(1);

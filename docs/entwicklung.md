@@ -30,10 +30,28 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 ```
 
 Die erzeugte Binary liegt anschließend unter `src-tauri/target/release/mimir`.
+Gemessen auf einem ruhigen Rechner: **24 Minuten** und **1,5 GB** in `target/`.
+Die Dauer kommt von `lto = true` und `codegen-units = 1` in `Cargo.toml` – beide
+sind eine bewusste Entscheidung für eine kleinere Binary, kein Versehen.
+
+**In kein `tmpfs` bauen.** Der Build bricht dann beim Binden ab mit
+
+```
+Disk quota exceeded (os error 122)
+```
+
+was nach einem kaputten Quelltext aussieht und keiner ist. Gemessen auf einem
+4-GB-`/tmp`; nötig sind rund 7 GB, wenn ein altes `target/` danebenliegt, und
+1,5 GB für einen frischen Checkout.
 
 Die Oberfläche lässt sich ohne Fenster prüfen: Ein Nachbau von `main.js` unter jsdom spiegelt alle Tauri-Befehle samt Fehlerfällen und fährt den Ablauf durch. Er liegt nicht im Repository, weil er sich mit dem Backend gemeinsam weiterentwickelt; die Prüfungen dafür stehen in `src-tauri/src/calendar/*/tests.rs` und in den Modultests von `lib.rs`.
 
 ## Verteilen
+
+Mimir wird nicht veröffentlicht. Es gibt kein Paket, kein pacman-Repository und
+keinen AUR-Eintrag; wer es haben will, klont das Repository und baut selbst. Was
+hier steht, sind die Bundle-Formate, die `cargo tauri build` lokal erzeugt – nützlich,
+wenn man eine Datei zum Weitergeben möchte, aber kein Weg zur Installation.
 
 ### Das Debian-Paket
 
@@ -42,14 +60,16 @@ cd src-tauri
 cargo tauri build
 ```
 
-Das Ergebnis liegt unter `target/release/bundle/deb/`. Installieren:
+Das Ergebnis liegt unter `src-tauri/target/release/bundle/deb/`. Installieren:
 
 ```bash
-sudo apt install ./mimir_0.1.0_amd64.deb
+sudo apt install ./src-tauri/target/release/bundle/deb/mimir_0.1.1_amd64.deb
 ```
 
 Das Paket nennt seine Abhängigkeiten selbst (`libwebkit2gtk-4.1-0`, `libgtk-3-0`),
-die also nicht vorher von Hand zu installieren sind.
+die also nicht vorher von Hand zu installieren sind. Für den eigenen Rechner ist
+dieser Weg der bequemste: Er legt Binary, Menüeintrag und Icon an, und das muss
+man nicht von Hand tun wie in der [README](../README.md#linux).
 
 **Warum kein AppImage.** `linuxdeploy-plugin-gtk` ist für Debian geschrieben und
 läuft unter Arch nicht:
@@ -61,21 +81,42 @@ ERROR: Failed to run plugin: gtk (exit code: 1)
 
 Zusätzlich verlangt `linuxdeploy` selbst FUSE, das hier nicht vorhanden ist. Für
 Arch und Fedora ist ein eigenes AppImage nötig; ein Container-Build auf Debian-Basis
-wäre der Weg, lohnt sich bei dieser Anwendung aber nicht.
+wäre der Weg, lohnt sich bei dieser Anwendung aber nicht. Ohne AppImage bleibt auf
+Arch die Binary aus dem Quelltext.
 
 ### Windows und macOS
 
-Beide lassen sich nur auf diesen Systemen zuverlässig bauen. Die Ziele stehen in
-`bundle.targets` in `tauri.conf.json` und lassen sich beim Bauen einschränken:
+Beide lassen sich nur auf diesen Systemen zuverlässig bauen, und beide brauchen
+mehr als Rust.
+
+**Windows**
+
+| Fehlt | Folge beim Bauen | Behebung |
+| --- | --- | --- |
+| Microsoft C++ Build Tools | `link.exe not found` beim Binden | Visual Studio Installer, Workload *Desktop development with C++* |
+| WebView2 Runtime | leeres Fenster | auf Desktop-Windows vorhanden, auf Servern *Evergreen Bootstrapper* nachinstallieren |
+
+`rustup` installiert keinen Linker, und Rust sucht den Visual-Studio-Compiler
+nicht von allein. WebKitGTK und GTK3 werden nicht gebraucht – das sind
+Linux-Bibliotheken.
+
+**macOS**
+
+`xcode-select --install`; ohne die Command Line Tools findet der Build kein
+`clang`. WebKit ist Teil von macOS, es ist nichts nachzuinstallieren.
+
+Die Ziele stehen in `bundle.targets` in `tauri.conf.json` und sind dort auf `deb`
+gestellt. Ohne `--bundles` baut Tauri unter Windows ein Debian-Paket, deshalb:
 
 ```bash
 cargo tauri build --bundles msi      # Windows, nur unter Windows
 cargo tauri build --bundles app,dmg  # macOS, nur unter macOS
 ```
 
-Für alle drei Formate aus einer Quellkopie braucht es einen CI-Lauf auf drei
-Maschinen. Windows ohne Signatur zeigt SmartScreen mit einer Warnung; die
-umgeht man nur mit einem Zertifikat.
+Windows ohne Signatur zeigt SmartScreen mit einer Warnung; die umgeht man nur mit
+einem Zertifikat. Auf macOS startet die App auf dem eigenen Rechner ohne Problem;
+wird sie weitergegeben, muss sie signiert und notarisiert sein, sonst blockiert
+Gatekeeper den Start.
 
 ### Icons
 
@@ -101,50 +142,11 @@ Mimir steht unter der MIT-Lizenz, in `LICENSE` im Wurzelverzeichnis. Das Feld
 `license` in `src-tauri/Cargo.toml` sagt dasselbe – sind die beiden verschieden,
 gilt für das Paket die Datei und das Manifest erzählt etwas anderes.
 
-Ohne Lizenzdatei ist die Veröffentlichung nicht erlaubt, gleichgültig wie offen
-der Quelltext liegt. `erzeuge-archiv.sh` verweigert ohne sie die Arbeit und legt
-sie als `mimir.license` in das Archiv, damit das fertige Paket sie nennen kann.
-
-### Arch: Paket für pacman
-
-Arch-Nutzer brauchen kein Debian-Paket und kein AppImage. Sie bekommen ein Paket
-für `pacman`, gebaut aus `packaging/arch/PKGBUILD`.
-
-**Der entscheidende Punkt: Die PKGBUILD baut nichts, sie lädt die Binary herunter.**
-
-Ein AUR-Eintrag, der selbst kompiliert, zwingt jedem Nutzer eine Rust-Toolchain
-und einen zehnminütigen Build auf. Mimir hängt an 143 Systembibliotheken, und wer
-ein Chat-Programm installieren will, soll dafür nicht zwanzig Minuten warten. Wer
-selbst bauen will, nimmt das Repository.
-
-```bash
-# Einmalig: Binary bauen, prüfen, Archiv schnüren
-./packaging/arch/erzeuge-archiv.sh
-
-# Prüfsumme in packaging/arch/PKGBUILD eintragen
-sha256sum -b packaging/arch/mimir-0.1.0-x86_64.tar.gz
-
-# Archiv als Release hochladen, Adresse in der PKGBUILD anpassen
-
-# Prüfen, ob das Paket baubar ist
-cd packaging/arch && makepkg -si
-```
-
-`erzeuge-archiv.sh` bricht ab, wenn die `LICENSE` fehlt, und ruft vorher die
-Binary-Prüfung auf. Ein Archiv mit fremden Adressen zu veröffentlichen wäre der
-schlimmste der möglichen Fehler – die landen sonst dauerhaft im Release.
-
-Das fertige Paket installiert:
-
-```
-/usr/bin/mimir
-/usr/share/applications/mimir.desktop
-/usr/share/icons/hicolor/128x128/apps/mimir.png
-/usr/share/licenses/mimir/LICENSE
-```
-
-und nennt `webkit2gtk-4.1` und `gtk3` als Abhängigkeiten. Ohne WebKitGTK startet
-das Programm nicht, und es ist besser, `pacman` sagt es vorher.
+Weil es kein fertiges Paket mehr gibt, wird die Datei nicht mehr von einem
+Skript in ein Archiv gelegt. Sie bleibt trotzdem nötig: Das Debian-Paket, das
+`cargo tauri build` erzeugt, nennt sie unter
+`/usr/share/licenses/mimir/LICENSE`, und ohne sie bleibt der Ordner leer. Wer
+selbst baut, braucht sie für die Weitergabe des Quelltextes.
 
 ### Prüfen, bevor es herausgeht
 
@@ -167,8 +169,7 @@ aufgetreten und in den Paketmetadaten sichtbar gewesen.
 
 Quelltext: <https://github.com/bilandal-dev/Mimir>
 
-Die Adresse steht in `packaging/arch/PKGBUILD` (`url` und `_release_url`) und in
-`src-tauri/Cargo.toml` (`repository`).
+Die Adresse steht in `src-tauri/Cargo.toml` (`repository`) und in `README.md`.
 
 **Vor dem ersten Push die Historie prüfen:**
 
@@ -181,37 +182,38 @@ Adressen, die einmal im Quelltext standen, bleiben über `git log -S` auffindbar
 Zwei Wege: die Historie umschreiben (`git filter-repo`) oder – leichter – das
 Repository neu anlegen und einen einzigen sauberen Stand hineincommitten. Für ein
 öffentliches Repository ist der zweite Weg der ehrlichere: Die alte Historie
-erzählt, wie Mimir entstanden ist, und das gehört nicht in ein fremdes
-Archiv.
+erzählt, wie Mimir entstanden ist, und das gehört nicht in ein fremdes Archiv.
 
-**Für den AUR-Eintrag ist ein Release nötig**, kein Commit. Die PKGBUILD lädt:
-
-```
-https://github.com/bilandal-dev/Mimir/releases/download/v0.1.0/mimir-0.1.0-x86_64.tar.gz
-```
-
-Ohne hochgeladenes Archiv findet der AUR-Bot nichts und der Eintrag ist tot.
-
-### Noch zu erledigen
-
-- Das **Archiv muss als Release hochgeladen** werden. `erzeuge-archiv.sh` legt es
-  unter `packaging/arch/mimir-0.1.0-x86_64.tar.gz` ab, aber die PKGBUILD lädt es
-  von GitHub.
-- Die **Paketkennung** `com.bilandal.mimir` enthält den Namen des Entwicklers. Sie
-  bestimmt zugleich, wo Mimir seine Einstellungen ablegt – sie umzubenennen ist
-  nicht folgenlos, siehe [Konfiguration](konfiguration.md). Für ein öffentliches
-  Paket wäre `dev.bilandal.mimir` die naheliegende Form.
+**Die Paketkennung enthält den Namen des Entwicklers.** `com.bilandal.mimir`
+bestimmt zugleich, wo Mimir seine Einstellungen ablegt – sie umzubenennen ist
+nicht folgenlos, siehe [Konfiguration](konfiguration.md). Für eine öffentliche
+Veröffentlichung wäre `dev.bilandal.mimir` die naheliegende Form. Weil es kein
+fertiges Paket mehr gibt, ist der Zeitpunkt dafür jetzt günstig: Wer die Kennung
+umstellt, verliert außer der eigenen Konfiguration nichts.
 
 ## Das Binary prüfen
 
-Was andere installieren, wird am **Artefakt** geprüft, nicht am Quelltext. Eine Konstante, die im Quelltext harmlos aussieht, landet als Zeichenkette im Binary und ist mit `strings` sichtbar:
+Geprüft wird das **Artefakt**, nicht der Quelltext. Eine Konstante, die im
+Quelltext harmlos aussieht, landet als Zeichenkette im Binary und ist mit `strings`
+sichtbar:
 
 ```bash
 cargo build --release --manifest-path src-tauri/Cargo.toml
 node src/tests/binary-pruefen.mjs
 ```
 
-Das Skript schlägt fehl, sobald eine fremde Netzadresse oder ein Pfad des Baurechners auftaucht. Ausgenommen sind `localhost` und `0.0.0.0`: Die erste ist der Vorgabewert, die zweite die Bindungsadresse im Startskript für Ollama.
+Das Skript schlägt fehl, sobald eine fremde Netzadresse auftaucht. Ausgenommen sind
+`localhost` und `0.0.0.0`: Die erste ist der Vorgabewert, die zweite die
+Bindungsadresse im Startskript für Ollama.
+
+Pfade des Bauenden prüft es nicht mehr. Tauri bettet das Verzeichnis des Manifests
+einmal als Asset-Präfix ein – an einer einzigen Stelle, an der es sich nicht
+trennen lässt, weil dieselbe Variable auch `tauri.conf.json` findet. Solange Mimir
+nicht als Binary an Fremde geht, ist das der eigene Pfad auf dem eigenen Rechner.
+
+Die Bundle-Konfiguration prüft es weiterhin: `authors`, `productName` und die
+Beschreibungen landen in den Metadaten des Debian-Pakets, und die Fehler dort
+waren beim ersten Bauen sichtbar.
 
 **Was deshalb im Quelltext steht.** Der Vorgabewert für den Ollama-Server war die Adresse des Entwicklers:
 
@@ -283,25 +285,30 @@ Zwei Eigenschaften, die der Chat-Befehl `/server-url` nicht hat:
 - **Prüfen vor dem Speichern.** Ein Tippfehler wird nicht still angenommen und danach als „Server: Offline" gemeldet.
 - **Nicht verwerfen bei einem nicht erreichbaren Server.** Der Rechner kann aus, die Firewall kann zu, der Port kann falsch sein – die Adresse kann trotzdem richtig sein. „Abbrechen" stellt den Ausgangszustand wieder her.
 
-**Was drinbleibt, und warum.** Ein Pfad des Baurechners steht an **einer** Stelle im Binary:
+**Was nicht im Binary steht.** Keine Passwörter, Token, Kalendernamen oder Benutzernamen – nur Feldnamen wie `app_password` aus der Datenstruktur. Die Zugangsdaten des Kalenders liegen in `calendar-secret.json` mit `0o600`, getrennt von `ollama.json`, und entstehen erst zur Laufzeit auf dem Rechner, auf dem Mimir läuft. `panic = "abort"` verhindert, dass ein Absturz den Chatverlauf in eine Meldung schreibt.
+
+Was drinbleibt und nichts verrät: Tauri bettet das Verzeichnis des Manifests
+einmal als Asset-Präfix ein und verbindet es mit `frontendDist`:
 
 ```
 /pfad/des/baurechners/Mimir/src-tauri   cacheTauri-Response…
 ```
 
-Er ist das Asset-Präfix, das Tauri aus `frontendDist` bildet. Es lässt sich nicht umschreiben, ohne den Build zu brechen: Tauri braucht dasselbe `CARGO_MANIFEST_DIR`, um `tauri.conf.json` zu finden, und
+Das lässt sich nicht umschreiben, ohne den Build zu brechen: Tauri braucht
+dieselbe `CARGO_MANIFEST_DIR`, um `tauri.conf.json` zu finden, und
 
 ```
 error: unable to read Tauri config file at /mimir/tauri.conf.json
 ```
 
-beweist, dass beide Zwecke nicht trennbar sind. Ein neutraler Zielpfad über `target-dir` wurde versucht und brachte nichts – die Ursache ist der Speicherort der Konfiguration, nicht der des Buildverzeichnisses. Die Notiz steht in `src-tauri/build.rs`, damit niemand es erneut versucht.
+beweist, dass beide Zwecke nicht trennbar sind. Ein neutraler Zielpfad über
+`target-dir` wurde versucht und brachte nichts – die Ursache ist der Speicherort
+der Konfiguration, nicht der des Buildverzeichnisses.
 
-Der Pfad nennt den Benutzernamen und das Projektverzeichnis. Beides steht schon im Namen der Anwendung, und auf einem fremden Rechner ist es ein anderes. Für eine Veröffentlichung an unbekannte Empfänger ist das der einzige verbleibende Punkt; wer ihn loswerden will, baut aus einem Verzeichnis ohne den eigenen Namen – etwa unter `/build`.
-
-**Was nicht im Binary steht.** Keine Passwörter, Token, Kalendernamen oder Benutzernamen – nur Feldnamen wie `app_password` aus der Datenstruktur. Die Zugangsdaten des Kalenders liegen in `calendar-secret.json` mit `0o600`, getrennt von `ollama.json`, und entstehen erst zur Laufzeit auf dem Rechner, auf dem Mimir läuft. `panic = "abort"` verhindert, dass ein Absturz den Chatverlauf in eine Meldung schreibt.
-
-Pfade aus dem **eigenen** Quelltext lassen sich mit `--remap-path-prefix` in `src-tauri/.cargo/config.toml` entschärfen. Das ist eingerichtet und hat 422 Fundstellen auf einen gebracht.
+Früher war das die eine Stelle, die einen fremden Rechner verriet, und deshalb
+stand hier früher ein `src-tauri/.cargo/config.toml` mit `--remap-path-prefix`.
+Das ist weg: Mimir geht nicht mehr als Binary an Fremde, wer es baut, baut auf
+seinem eigenen Rechner, und der Pfad ist seins.
 
 ## Die Datumsangabe prüfen
 

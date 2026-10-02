@@ -28,10 +28,3 @@ dist-ssr
 #   cargo tauri icon src-tauri/icons/source.svg
 /src-tauri/icons/android/
 /src-tauri/icons/ios/
-
-# Das Release-Archiv entsteht aus `erzeuge-archiv.sh` und wird als Release
-# hochgeladen, nicht committet. Eine 3,7-MB-Binary im Repository wächst mit jedem
-# Release, und die gehört auf die Release-Seite, nicht in den Quelltext.
-/packaging/arch/mimir-*.tar.gz
-/packaging/arch/mimir.desktop
-/packaging/arch/mimir.license

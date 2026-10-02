@@ -38,47 +38,107 @@ Für den Komfortbefehl `/server-start`, der Ollama über SSH auf dem Server neu 
 braucht Mimir zusätzlich ein lokales `ssh`-Programm und einen Schlüssel. Das ist
 freiwillig; ohne SSH funktioniert alles andere genauso.
 
-Auf einem Linux-System braucht Mimir WebKitGTK – die Abhängigkeiten stehen in
-[docs/entwicklung.md](docs/entwicklung.md).
-
 ## Installation
 
-**Für Debian und Ubuntu:**
+Mimir wird aus dem Quelltext gebaut. Es gibt kein fertiges Paket: Wer es haben
+will, klont das Repository und baut es selbst. Der Build dauert einmal rund
+25 Minuten, danach ist die Binary da.
+
+### Linux
+
+Werkzeug und Bibliotheken — auf Arch:
 
 ```bash
-sudo apt install ./mimir_0.1.0_amd64.deb
+sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3
 ```
 
-**Für Arch:** Ein Paket für `pacman` liegt im AUR, sobald es dort eingetragen ist.
-Ohne Rust-Installation, ohne selbst zu bauen:
-
-```bash
-yay -S mimir
-```
-
-Die Binary selbst geht überall, wo WebKitGTK und GTK3 installiert sind:
-
-```bash
-chmod +x mimir && ./mimir
-```
-
-Alle Pakete nennen ihre Abhängigkeiten selbst; `libwebkit2gtk` und `libgtk-3`
-müssen nicht vorher von Hand installiert werden.
-
-**Aus dem Quelltext:**
+Dann bauen und starten:
 
 ```bash
 git clone https://github.com/bilandal-dev/Mimir.git
 cd Mimir
-cd src-tauri && cargo tauri build
+cargo build --release --manifest-path src-tauri/Cargo.toml
+./src-tauri/target/release/mimir
 ```
 
-Das Ergebnis liegt unter `src-tauri/target/release/`. Kein Node, kein npm, kein
-Frontend-Werkzeug – das Frontend sind drei Dateien, die mitkompiliert werden.
+Drei Dinge, die den ersten Build aufhalten:
 
-Windows und macOS lassen sich nur auf diesen Systemen bauen. Ein AppImage gibt es
-nicht, weil `linuxdeploy` unter Arch an einem Debian-spezifischen Plugin scheitert.
-Einzelheiten in [docs/entwicklung.md](docs/entwicklung.md#verteilen).
+- **Er braucht Platz.** Rund 1,5 GB landen in `src-tauri/target/`. Das ist kein
+  Versehen, sondern `lto = true` und `codegen-units = 1` in `Cargo.toml`
+  geschuldet.
+- **Nicht in ein `tmpfs` bauen.** Ein `/tmp` von 4 GB reicht nicht; dort bricht
+  der Linker mit `Disk quota exceeded` ab, obwohl der Quelltext in Ordnung ist.
+  `/var/tmp` oder das Home-Verzeichnis sind sicher.
+- **Kein Node, kein npm, kein `cargo install tauri-cli`.** Das Frontend sind
+  drei Dateien, die Tauri mitkompiliert. Auf Rust und den Systembibliotheken
+  genügt der obige Befehl.
+
+`cargo build` erzeugt nur die Binary — kein Menüeintrag, kein Icon. Beides
+legst du selbst ab:
+
+```bash
+install -Dm755 src-tauri/target/release/mimir ~/.local/bin/mimir
+
+install -Dm644 src-tauri/icons/128x128.png \
+  ~/.local/share/icons/hicolor/128x128/apps/mimir.png
+
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/mimir.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Mimir
+Comment=Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server
+Exec=$HOME/.local/bin/mimir
+Icon=mimir
+Terminal=false
+Categories=Development;
+StartupWMClass=mimir
+EOF
+```
+
+### Windows
+
+Der Bau braucht mehr als Rust. `rustup` installiert keinen Linker, und Rust sucht
+den Visual-Studio-Compiler nicht von allein:
+
+- **Microsoft C++ Build Tools** mit der Workload *Desktop development with C++*.
+  Ohne sie scheitert der Build beim Binden mit `link.exe not found`.
+- **WebView2 Runtime**, in dem die Oberfläche läuft. Auf Windows 10 ab 21H2 und
+  auf Windows 11 ist sie vorhanden; auf einem Server ohne Desktop fehlt sie.
+- **WebKitGTK und GTK3 werden nicht gebraucht.** Das sind Linux-Bibliotheken.
+
+Der Befehl ist derselbe, aber das Bundle-Ziel passt nicht:
+
+```powershell
+cargo build --release --manifest-path src-tauri/Cargo.toml
+cargo tauri build --bundles msi
+```
+
+`bundle.targets` in `src-tauri/tauri.conf.json` steht auf `["deb"]` — ohne
+`--bundles` versucht Tauri unter Windows ein Debian-Paket zu bauen. Ohne
+Signaturzertifikat zeigt der Installer beim Start eine SmartScreen-Warnung; die
+umgehst nur ein Zertifikat.
+
+### macOS
+
+- **Xcode Command Line Tools**: `xcode-select --install`. Ohne sie findet der
+  Build keinen `clang`.
+- **WebKit ist Teil von macOS.** Es ist nichts zu installieren, und anders als
+  unter Linux gibt es hier keine WebKitGTK-Abhängigkeit.
+
+```bash
+cargo build --release --manifest-path src-tauri/Cargo.toml
+cargo tauri build --bundles app,dmg
+```
+
+Wie unter Windows gilt: `bundle.targets` nennt `deb`, also braucht es
+`--bundles`. Auf einem eigenen Rechner startet die App ohne Problem. Wer sie an
+andere weitergeben will, muss sie signieren und notarisieren — sonst blockiert
+Gatekeeper den Start, und der Umweg über die Datenschutz-Einstellungen des
+Empfängers ist nicht dauerhaft.
+
+Details zu allen drei Systemen in
+[docs/entwicklung.md](docs/entwicklung.md#verteilen).
 
 ## Erster Start
 
@@ -170,5 +230,9 @@ Näheres in [docs/entwicklung.md](docs/entwicklung.md#sicherheits--und-datenhinw
 
 - Getestet unter Linux mit Hyprland. Andere Desktop-Umgebungen verwenden die
   native Fensterdekoration und funktionieren, sind aber nicht erprobt.
+- **Windows und macOS sind nicht erprobt.** Die Schritte in der
+  [Installation](#installation) stammen aus den Anforderungen von Tauri, nicht
+  von einer Messung auf diesen Systemen. Sie sind unvollständig geprüft; wer sie
+  braucht, sollte sie auf dem eigenen Zielrechner nachvollziehen.
 - Nur Ollama. Es gibt keine Anbindung an andere Modellanbieter.
 - Die Anzeige spricht Deutsch.
