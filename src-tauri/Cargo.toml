@@ -20,7 +20,14 @@ categories = ["gui"]
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "mimir_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Nur `rlib`. Tauri legt hier üblicherweise `staticlib` und `cdylib` dazu, weil es
+# die für iOS (staticlib) und Android (cdylib) braucht. Auf dem Desktop werden
+# beide trotzdem gebaut – cargo erzeugt *jede* gelistete Form, auch wenn die Binary
+# sie nie anfasst. Gemessen: ein zusätzlicher LTO-Durchlauf über den ganzen
+# Crate-Graphen, 170 MB `.a`, und 3m40s von der Gesamtbauzeit.
+# `cargo build --release` unter Windows und macOS baut bei Bedarf selbst die
+# passende Form; auf Mobilgeräten ist die Zeile wieder zu ergänzen.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -37,7 +44,17 @@ serde_json = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
 # Für den Fingerabdruck, mit dem ein selbstsigniertes Zertifikat bestätigt wird.
 sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
+# Die sechs Features, die benutzt werden, statt `full`:
+#   rt-multi-thread  für `#[tokio::test]` und `tokio::spawn`
+#   macros           für `tokio::select!`
+#   time             für `timeout`, `sleep`, `interval`
+#   sync             für `watch` im Stream
+#   process          für den SSH-Start
+#   io-util          für `AsyncReadExt` beim SSH-Start
+# `full` zog zusätzlich `fs`, `io-std`, `net`, `signal` und `parking_lot` mit,
+# von denen keines benutzt wird. Die Bauzeit ändert sich dadurch kaum, die Binary
+# wird rund 48 KB kleiner – der Grund ist eine ehrliche Liste.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
 futures-util = "0.3"
 ammonia = "4.2"
 pulldown-cmark = "0.13.4"

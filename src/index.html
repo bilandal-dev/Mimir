@@ -57,7 +57,7 @@
                 </div>
             </div>
             <div id="calendar-picker" class="calendar-picker" hidden>
-                <p class="calendar-state" id="calendar-picker-note">Welche Kalender in der Leiste erscheinen sollen.</p>
+                <p class="calendar-state">Welche Kalender in der Leiste erscheinen sollen.</p>
                 <div id="calendar-picker-list"></div>
                 <button type="button" id="calendar-picker-save">Auswahl merken</button>
             </div>
@@ -233,7 +233,7 @@
     </dialog>
 
     <dialog id="certificate-dialog">
-        <div id="certificate-body">
+        <div>
             <h3>Zertifikat der Instanz</h3>
             <p>Die Instanz liefert ein selbstsigniertes Zertifikat. Mimir prüft die Zertifikatskette nicht, sondern merkt sich dieses eine Zertifikat und vergleicht es bei jedem Zugriff. Stimmt es nicht mehr, wird der Zugriff verweigert.</p>
             <p class="certificate-host">Instanz: <code id="certificate-host"></code></p>

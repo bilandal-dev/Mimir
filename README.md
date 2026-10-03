@@ -42,7 +42,7 @@ freiwillig; ohne SSH funktioniert alles andere genauso.
 
 Mimir wird aus dem Quelltext gebaut. Es gibt kein fertiges Paket: Wer es haben
 will, klont das Repository und baut es selbst. Der Build dauert einmal rund
-25 Minuten, danach ist die Binary da.
+17 Minuten, danach ist die Binary da.
 
 ### Linux
 
@@ -63,7 +63,7 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 
 Drei Dinge, die den ersten Build aufhalten:
 
-- **Er braucht Platz.** Rund 1,5 GB landen in `src-tauri/target/`. Das ist kein
+- **Er braucht Platz.** Rund 1,3 GB landen in `src-tauri/target/`. Das ist kein
   Versehen, sondern `lto = true` und `codegen-units = 1` in `Cargo.toml`
   geschuldet.
 - **Nicht in ein `tmpfs` bauen.** Ein `/tmp` von 4 GB reicht nicht; dort bricht

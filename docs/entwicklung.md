@@ -30,7 +30,7 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 ```
 
 Die erzeugte Binary liegt anschließend unter `src-tauri/target/release/mimir`.
-Gemessen auf einem ruhigen Rechner: **24 Minuten** und **1,5 GB** in `target/`.
+Gemessen auf einem ruhigen Rechner: **17 Minuten** und **1,3 GB** in `target/`.
 Die Dauer kommt von `lto = true` und `codegen-units = 1` in `Cargo.toml` – beide
 sind eine bewusste Entscheidung für eine kleinere Binary, kein Versehen.
 
@@ -41,8 +41,32 @@ Disk quota exceeded (os error 122)
 ```
 
 was nach einem kaputten Quelltext aussieht und keiner ist. Gemessen auf einem
-4-GB-`/tmp`; nötig sind rund 7 GB, wenn ein altes `target/` danebenliegt, und
-1,5 GB für einen frischen Checkout.
+4-GB-`/tmp`; für einen frischen Checkout genügen die 1,3 GB, neben einem alten
+`target/` sind es rund 7 GB.
+
+### Was den Bau ausmacht
+
+Zwei Stellen im Manifest kosten mehr, als sie aussehen. Beide sind gemessen, nicht
+vermutet – die Zahlen stammen aus je einem sauberen Komplettbau.
+
+**`crate-type` in `[lib]`.** Tauri liefert `["staticlib", "cdylib", "rlib"]` mit,
+weil es die für iOS und Android braucht. Cargo erzeugt aber **jede** gelistete
+Form, auch beim Bau der Desktop-Binary, die keine davon anfasst. Der zusätzliche
+LTO-Durchlauf über den ganzen Crate-Graphen kostet **3m40s** und 170 MB `.a`:
+
+| `crate-type` | Bauzeit | `target/` | Artefakte |
+| --- | --- | --- | --- |
+| `["staticlib", "cdylib", "rlib"]` | 20m38s | 1,5 GB | `.a` 170 MB, `.so`, `.rlib` |
+| `["rlib"]` | 16m58s | 1,3 GB | `.rlib` 25 MB |
+
+Die Binary ist dabei **bytegleich** – 11.019.184 Bytes in beiden Fällen. Auf
+Mobilgeräten ist die Zeile wieder zu ergänzen.
+
+**`tokio = ["full"]`.** `full` schaltet zusätzlich `fs`, `io-std`, `net`,
+`signal` und `parking_lot` an, von denen keines benutzt wird. Die
+sechs tatsächlich nötigen Features stehen als Kommentar in `Cargo.toml`. Die
+Bauzeit ändert sich kaum, die Binary wird rund 48 KB kleiner – der Grund ist
+eine ehrliche Liste, keine Geschwindigkeit.
 
 Die Oberfläche lässt sich ohne Fenster prüfen: Ein Nachbau von `main.js` unter jsdom spiegelt alle Tauri-Befehle samt Fehlerfällen und fährt den Ablauf durch. Er liegt nicht im Repository, weil er sich mit dem Backend gemeinsam weiterentwickelt; die Prüfungen dafür stehen in `src-tauri/src/calendar/*/tests.rs` und in den Modultests von `lib.rs`.
 
