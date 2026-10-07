@@ -14,6 +14,11 @@ edition = "2021"
 repository = "https://github.com/bilandal-dev/Mimir"
 keywords = ["ollama", "chat", "tauri"]
 categories = ["gui"]
+# Es gibt zwei Binaries: die Anwendung und `termine-validierung`, ein Werkzeug
+# für den Abgleich mit einem echten Modell. Ohne diese Zeile weiß `cargo run` bei
+# mehreren Binaries nicht, welche gemeint ist – und `cargo tauri dev`, das
+# genau `cargo run` aufruft, bricht mit „could not determine which binary“ ab.
+default-run = "mimir"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary

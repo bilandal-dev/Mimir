@@ -424,7 +424,7 @@ impl ChatConfig {
     }
 }
 
-fn normalize_system_prompt(value: &str) -> Result<String, String> {
+pub fn normalize_system_prompt(value: &str) -> Result<String, String> {
     let prompt = value.trim();
 
     if prompt.is_empty() {
@@ -473,6 +473,10 @@ fn validate_context_tokens(value: usize) -> Result<usize, String> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct OllamaConfig {
     server_url: String,
+    /// Woher die Modelle kommen. Fehlt das Feld in einer alten Konfiguration,
+    /// gilt das bisherige Verhalten: der eingetragene Server.
+    #[serde(default)]
+    provider: Provider,
     #[serde(default)]
     ssh: SshConfig,
     #[serde(default)]
@@ -484,18 +488,119 @@ struct OllamaConfig {
     calendar: crate::calendar::CalendarConfig,
 }
 
+/// Woher die Modelle kommen.
+///
+/// Vorher gab es nur eine Adresse, und die zeigte auf einen Rechner im Netz. Wer
+/// ein Modell auf dem eigenen Rechner laufen lassen will, musste die Adresse von
+/// Hand umstellen – mitten im Betrieb, und der Verlauf des anderen Servers blieb
+/// stehen. Der Provider ist deshalb eine eigene, gespeicherte Wahl: `remote`
+/// benutzt die eingetragene Adresse, `local` die feste Vorgabe auf diesem Rechner.
+///
+/// Das ist bewusst kein eingebettetes Modell: `local` redet weiterhin mit Ollama,
+/// nur eben mit dem, das auf diesem Rechner läuft.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Provider {
+    /// Ollama an der eingetragenen Adresse, heute meist ein Rechner im Netz.
+    #[default]
+    Remote,
+    /// Ollama auf diesem Rechner, immer unter der Vorgabeadresse.
+    Local,
+}
+
+impl Provider {
+    /// Was die Oberfläche und die Fehlermeldungen dem Benutzer nennen.
+    fn bezeichnung(self) -> &'static str {
+        match self {
+            Provider::Remote => "entferntes Ollama",
+            Provider::Local => "lokales Ollama",
+        }
+    }
+
+    /// Ob über diesen Provider das Dateisystem erreichbar sein darf.
+    ///
+    /// Das lokale Modell ist ein kleiner Assistent auf demselben Rechner, auf dem
+    /// auch Mimir läuft: Es bekommt dort nur die Kalenderwerkzeuge. Nicht als
+    /// Sicherheitsgrenze – die Adresse ist frei wählbar –, sondern weil ein
+    /// kleines Modell, das neben dem Assistenten auf demselben Rechner läuft,
+    /// keinen Grund hat, in dessen Arbeitsverzeichnis zu stöbern.
+    fn erlaubt_dateizugriff(self) -> bool {
+        matches!(self, Provider::Remote)
+    }
+
+    /// Die Adresse, unter der dieser Provider antwortet.
+    fn adresse(self, remote: &str) -> &str {
+        match self {
+            Provider::Remote => remote,
+            // Fest, weil es auf diesem Rechner keine andere gibt: Hier liefe ein
+            // Ollama, das nicht auf `localhost` lauscht, nicht.
+            Provider::Local => DEFAULT_OLLAMA_BASE_URL,
+        }
+    }
+}
+
+/// Der Umfang, der tatsächlich gilt.
+///
+/// Der gespeicherte Umfang bleibt beim Wechsel des Providers unberührt: Wer auf
+/// das lokale Modell wechselt und wieder zurück, findet seinen Umfang so vor,
+/// wie er war. Nur solange das lokale Modell läuft, gilt der Terminumfang – und
+/// zwar im Backend, an jeder Stelle, an der Werkzeuge angeboten oder geprüft
+/// werden. Eine nur in der Oberfläche gesetzte Anzeige wäre an einer Stelle, die
+/// jemand später neu baut, wieder weg.
+fn wirksamer_umfang(config: &OllamaConfig) -> Scope {
+    if config.provider.erlaubt_dateizugriff() {
+        config.agent.scope
+    } else {
+        Scope::Termine
+    }
+}
+
+/// Wie weit das Modell reichen darf.
+///
+/// Der Umfang steht nicht im Chat, sondern in der Konfiguration: Er ist eine
+/// Absicht, die über einen Neustart hinweg gilt, und im Chat würde er sich nur
+/// schwer vom Schreibmodus unterscheiden lassen. Gespeichert wird er trotzdem nur
+/// deshalb, weil er den Zugriff nur verkleinern kann – `Termine` nimmt dem Modell
+/// die Dateiwerkzeuge und das Arbeitsverzeichnis, es gibt keine Form davon, die
+/// mehr erlaubt als `Agent`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Scope {
+    /// Bisheriger Stand: lesende und freigegebene schreibende Dateiwerkzeuge im
+    /// festen Arbeitsverzeichnis, dazu der Kalender.
+    #[default]
+    Agent,
+    /// Nur die Kalenderwerkzeuge. Ohne Arbeitsverzeichnis und damit ohne jeden
+    /// Dateizugriff.
+    Termine,
+}
+
+impl Scope {
+    /// Was `/scope` und die Fehlermeldungen dem Benutzer nennen.
+    fn bezeichnung(self) -> &'static str {
+        match self {
+            Scope::Agent => "Agentenmodus",
+            Scope::Termine => "Terminumfang",
+        }
+    }
+}
+
 /// Einstellungen des Agentenmodus. Das Arbeitsverzeichnis ist die einzige
 /// Stelle, aus der gelesen werden darf, und es wird bei jedem Zugriff erneut
 /// geprüft.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct AgentConfig {
     /// Absolutes Arbeitsverzeichnis. Leer heißt: der Agentenmodus hat noch kein
-    /// Arbeitsverzeichnis und verweigert jeden Zugriff.
+    /// Arbeitsverzeichnis und verweigert jeden Zugriff. Im Terminumfang bleibt
+    /// das Feld unberührt, weil dort nichts gelesen wird.
     #[serde(default)]
     root: String,
     /// Obergrenze der Werkzeugschritte je Zug.
     #[serde(default = "default_agent_max_steps")]
     max_steps: usize,
+    /// Wie weit das Modell reichen darf.
+    #[serde(default)]
+    scope: Scope,
 }
 
 fn default_agent_max_steps() -> usize {
@@ -510,6 +615,7 @@ impl Default for AgentConfig {
             // bis /agent-dir einen gültigen Pfad setzt.
             root: default_agent_root(),
             max_steps: default_agent_max_steps(),
+            scope: Scope::default(),
         }
     }
 }
@@ -586,6 +692,7 @@ fn test_settings() -> OllamaSettings {
     OllamaSettings {
         config: tokio::sync::RwLock::new(OllamaConfig {
             server_url: "http://localhost:11434".to_string(),
+            provider: Provider::Remote,
             ssh: SshConfig::default(),
             agent: AgentConfig::default(),
             chat: ChatConfig::default(),
@@ -614,6 +721,7 @@ impl OllamaSettings {
                 .map_err(|error| format!("Ungültige Ollama-Konfiguration: {}", error))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => OllamaConfig {
                 server_url: DEFAULT_OLLAMA_BASE_URL.to_string(),
+                provider: Provider::default(),
                 ssh: SshConfig::default(),
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
@@ -790,13 +898,52 @@ impl OllamaSettings {
         self.config.read().await.clone()
     }
 
+    /// Die Adresse, unter der der eingestellte Provider antwortet.
+    ///
+    /// Jede Anfrage im Backend läuft hierüber: `/api/tags` für die Modellliste,
+    /// `/api/chat` für Antworten und alle Prüfungen dazwischen. Der eingetragene
+    /// `server_url` bleibt dabei unangetastet, damit das Zurückwechseln auf das
+    /// entfernte Ollama ohne erneutes Abtippen funktioniert.
     async fn get_base_url(&self) -> String {
-        self.get_config().await.server_url
+        let config = self.get_config().await;
+        config.provider.adresse(&config.server_url).to_string()
+    }
+
+    async fn get_provider(&self) -> Provider {
+        self.get_config().await.provider
+    }
+
+    /// Stellt zwischen entfernem und lokalem Ollama um.
+    ///
+    /// Geprüft wird nichts: Das lokale Ollama kann laufen oder nicht, und das ist
+    /// eine Frage an den Server, nicht an die Konfiguration. Ein Wechsel, der
+    /// scheitert, wäre hier nur eine Speicherung mit Umweg – die Oberfläche zeigt
+    /// den Zustand ohnehin gleich an, wenn sie die Modelle lädt.
+    async fn set_provider(&self, provider: Provider) -> Result<Provider, String> {
+        let mut config = self.config.write().await;
+        let mut candidate = config.clone();
+        candidate.provider = provider;
+        self.persist_config(&candidate)?;
+        config.provider = provider;
+        Ok(provider)
     }
 
     async fn set_base_url(&self, server_url: &str) -> Result<String, String> {
-        let normalized_url = normalize_server_url(server_url)?;
         let mut config = self.config.write().await;
+
+        // Die Adresse gehört zum entfernten Provider. Solange das lokale läuft,
+        // wäre eine Änderung hier etwas, das man einträgt und danach nicht mehr
+        // bemerkt – der Knopf ist dann ausgeblendet, und ein Aufruf aus dem Chat
+        // heraus bekommt dieselbe Antwort.
+        if !config.provider.erlaubt_dateizugriff() {
+            return Err(format!(
+                "Die eingetragene Adresse gilt nur für das {}. Mit /provider remote kommst du \
+                 zurück; lokal benutzt Mimir immer {DEFAULT_OLLAMA_BASE_URL}.",
+                Provider::Remote.bezeichnung(),
+            ));
+        }
+
+        let normalized_url = normalize_server_url(server_url)?;
         let mut candidate = config.clone();
         candidate.server_url = normalized_url.clone();
         self.persist_config(&candidate)?;
@@ -874,6 +1021,19 @@ impl OllamaSettings {
     }
 
     async fn set_agent_config(&self, agent: AgentConfig) -> Result<AgentConfig, String> {
+        // Der lokale Provider gibt keine Dateiwerkzeuge heraus. Das wird hier
+        // abgelehnt und nicht erst in der Oberfläche: An dieser Stelle wird
+        // gespeichert, und eine Prüfung, die nur beim Aufrufer steht, umgeht der
+        // nächste Aufrufer.
+        if agent.scope == Scope::Agent && !self.get_provider().await.erlaubt_dateizugriff() {
+            return Err(format!(
+                "Im Provider „{}“ gibt es nur den Terminumfang: Das Modell läuft auf diesem \
+                 Rechner und bekommt dort keine Dateiwerkzeuge. Mit /provider remote kommst du \
+                 zu den Dateiwerkzeugen zurück.",
+                Provider::Local.bezeichnung(),
+            ));
+        }
+
         // `validate_agent_config` prüft die Struktur; zusätzlich muss das
         // Verzeichnis jetzt schon existieren, sonst wäre der Modus im Moment
         // der Freischaltung unbenutzbar.
@@ -2480,7 +2640,7 @@ fn ollama_client_builder() -> reqwest::ClientBuilder {
         .tcp_keepalive_retries(Some(OLLAMA_TCP_KEEPALIVE_RETRIES))
 }
 
-fn build_ollama_chat_client() -> Result<Client, String> {
+pub fn build_ollama_chat_client() -> Result<Client, String> {
     ollama_client_builder()
         .http1_only()
         .connect_timeout(OLLAMA_CHAT_CONNECT_TIMEOUT)
@@ -2554,7 +2714,7 @@ fn validate_chat_message(message: &ChatMessage) -> Result<(), String> {
 /// `beim_verbinden` unterscheidet die beiden Fälle, die reqwest gleich benennt
 /// und die ganz verschiedene Ursachen haben: ein vergeblicher Verbindungsaufbau
 /// und ein Server, der die Anfrage angenommen, aber nicht beantwortet hat.
-fn connection_error_message(
+pub fn connection_error_message(
     base_url: &str,
     details: &str,
     beim_verbinden: bool,
@@ -2657,7 +2817,7 @@ async fn describe_http_error(response: reqwest::Response) -> String {
     }
 }
 
-fn validate_chat_input(model: &str, messages: &[ChatMessage]) -> Result<(), String> {
+pub fn validate_chat_input(model: &str, messages: &[ChatMessage]) -> Result<(), String> {
     validate_model_name(model)?;
     if messages.is_empty() || messages.len() > MAX_HISTORY_MESSAGES {
         return Err("Der Chatverlauf ist leer oder zu lang".to_string());
@@ -3189,7 +3349,7 @@ async fn send_chat_attempt(
 /// Prüft die vom Frontend gelieferten Werkzeug-Schemata. Sie stammen zwar aus
 /// dem Backend selbst, aber die Oberfläche ist kein vertrauenswürdiger Absender,
 /// deshalb wird auch hier gedeckelt.
-fn validate_tool_schemas(
+pub fn validate_tool_schemas(
     tools: Option<Vec<serde_json::Value>>,
 ) -> Result<Option<Vec<serde_json::Value>>, String> {
     let Some(tools) = tools else {
@@ -3821,13 +3981,26 @@ async fn start_ollama_via_ssh(
     let password = password.map(Zeroizing::new);
     let config = settings.get_config().await;
 
+    // Ein Server auf diesem Rechner wird nicht über SSH gestartet: Dafür gibt es
+    // hier weder ein Ziel noch einen Grund. Vorher wäre der Knopf im lokalen
+    // Provider gedrückt worden und hätte an einem Rechner im Netz etwas gestartet,
+    // das mit dem gerade benutzten Modell nichts zu tun hat.
+    if !config.provider.erlaubt_dateizugriff() {
+        return Err(format!(
+            "Im Provider „{}“ wird kein Server über SSH gestartet. Läuft hier kein Ollama, wird es \
+             mit `sudo pacman -S ollama` installiert und mit `ollama serve` gestartet. Mit \
+             /provider remote steht der SSH-Weg wieder zur Verfügung.",
+            config.provider.bezeichnung(),
+        ));
+    }
+
     if config.ssh.target.is_empty() {
         return Err(
             "Kein SSH-Ziel konfiguriert. Nutze /ssh-target <benutzer@host> [port].".to_string(),
         );
     }
 
-    if is_ollama_online(&config.server_url).await {
+    if is_ollama_online(config.provider.adresse(&config.server_url)).await {
         return Ok(SshStartResult::Started);
     }
 
@@ -3857,6 +4030,22 @@ async fn get_server_url(settings: State<'_, OllamaSettings>) -> Result<String, S
     Ok(settings.get_base_url().await)
 }
 
+/// Woher die Modelle kommen. Steht in der Rückgabe, damit die Oberfläche ihre
+/// Auswahl nicht aus dem eingetragenen `server_url` erraten muss: Bei beiden
+/// Providern kann dieselbe Adresse stehen.
+#[tauri::command]
+async fn get_provider(settings: State<'_, OllamaSettings>) -> Result<Provider, String> {
+    Ok(settings.get_provider().await)
+}
+
+#[tauri::command]
+async fn set_provider(
+    provider: Provider,
+    settings: State<'_, OllamaSettings>,
+) -> Result<Provider, String> {
+    settings.set_provider(provider).await
+}
+
 /// Wie weit Mimir eingerichtet ist.
 ///
 /// Wird nur beim Start einmal abgefragt, um beim ersten Mal eine Anleitung im Chat
@@ -3869,7 +4058,8 @@ async fn get_server_url(settings: State<'_, OllamaSettings>) -> Result<String, S
 /// freiwillig ist. Nur die Serveradresse ist etwas, ohne das Mimir nicht läuft.
 #[derive(Serialize, Clone, Debug)]
 struct Einrichtung {
-    /// Stimmt, wenn die Serveradresse nicht mehr die Vorgabe ist.
+    /// Stimmt, wenn die Serveradresse nicht mehr die Vorgabe ist – oder wenn gar
+    /// keine gebraucht wird, weil das lokale Ollama ohne Eintragung auskommt.
     server_eingetragen: bool,
     /// Die Vorgabe, gegen die geprüft wird. Steht hier, damit die Oberfläche den
     /// Text nicht selbst nachbauen muss.
@@ -3887,13 +4077,14 @@ async fn get_einrichtung(settings: State<'_, OllamaSettings>) -> Result<Einricht
         // Der Vergleich läuft über den normalisierten Wert: `localhost:11434` und
         // `http://localhost:11434/` sind derselbe Server, und wer die zweite Form
         // eingetragen hat, ist genauso gut eingerichtet wie jemand, der nichts
-        // getan hat.
-        server_eingetragen: server != normalize_server_url(DEFAULT_OLLAMA_BASE_URL)?,
+        // getan hat. Beim lokalen Provider zählt die Adresse gar nicht: Sie wird
+        // nicht gebraucht, also gibt es auch nichts zu beanstanden.
+        server_eingetragen: !config.provider.erlaubt_dateizugriff()
+            || server != normalize_server_url(DEFAULT_OLLAMA_BASE_URL)?,
         server_vorgabe: DEFAULT_OLLAMA_BASE_URL.to_string(),
         kalender_eingetragen: !config.calendar.server_url.trim().is_empty(),
     })
 }
-
 
 #[tauri::command]
 async fn set_server_url(
@@ -3903,24 +4094,60 @@ async fn set_server_url(
     settings.set_base_url(&server_url).await
 }
 
+/// Der gespeicherte Umfang, zusammen mit dem, der tatsächlich gilt.
+///
+/// Beide stehen in der Antwort, weil sie im lokalen Provider auseinanderfallen
+/// können: Dort bleibt der gespeicherte Umfang stehen, während gearbeitet wird
+/// im Terminumfang. Die Oberfläche zeigt den wirksamen an, sonst behauptete sie
+/// Dateiwerkzeuge, die es nicht gibt.
 #[tauri::command]
 async fn get_agent_config(settings: State<'_, OllamaSettings>) -> Result<AgentConfig, String> {
-    Ok(settings.get_config().await.agent)
+    let config = settings.get_config().await;
+    let umfang = wirksamer_umfang(&config);
+    Ok(AgentConfig {
+        scope: umfang,
+        ..config.agent
+    })
 }
 
 #[tauri::command]
 async fn set_agent_config(
     root: String,
     max_steps: Option<usize>,
+    scope: Option<Scope>,
     settings: State<'_, OllamaSettings>,
 ) -> Result<AgentConfig, String> {
-    // Ohne ausdrückliche Schrittzahl bleibt die eingestellte erhalten.
-    let current = settings.get_config().await.agent;
+    let config = settings.get_config().await;
+
+    // Ohne ausdrückliche Angabe bleibt die eingestellte erhalten: `/agent-dir`
+    // setzt einen Pfad und darf den Umfang nicht nebenbei zurücksetzen.
     let agent = AgentConfig {
         root,
-        max_steps: max_steps.unwrap_or(current.max_steps),
+        max_steps: max_steps.unwrap_or(config.agent.max_steps),
+        scope: scope.unwrap_or(config.agent.scope),
     };
-    settings.set_agent_config(agent).await
+
+    // Das Backend lehnt einen Umfang ab, den der Provider nicht hergibt; die
+    // Meldung hier nennt den Grund, bevor überhaupt gespeichert wird.
+    if agent.scope == Scope::Agent && !config.provider.erlaubt_dateizugriff() {
+        return Err(format!(
+            "Im Provider „{}“ gibt es nur den Terminumfang: Das Modell läuft auf diesem \
+             Rechner und bekommt dort keine Dateiwerkzeuge. Mit /provider remote kommst du zu \
+             den Dateiwerkzeugen zurück.",
+            config.provider.bezeichnung(),
+        ));
+    }
+
+    let agent = settings.set_agent_config(agent).await?;
+
+    // Zurück kommt der Umfang, mit dem wirklich gearbeitet wird. Bei lokalem
+    // Provider ist das der Terminumfang, auch wenn ein Agentenmodus gespeichert
+    // war – sonst zeigte die Oberfläche Werkzeuge an, die es nicht gibt.
+    let config = settings.get_config().await;
+    Ok(AgentConfig {
+        scope: wirksamer_umfang(&config),
+        ..agent
+    })
 }
 
 /// Schemata und Systemprompt des Agentenmodus. Beides wird im Backend
@@ -3929,9 +4156,9 @@ async fn set_agent_config(
 /// der Benutzer sie freigeschaltet hat: Ein nicht beworbenes Werkzeug kann das
 /// Modell nicht verlangen.
 #[derive(Serialize)]
-struct AgentToolset {
-    system_prompt: String,
-    tools: Vec<serde_json::Value>,
+pub struct AgentToolset {
+    pub system_prompt: String,
+    pub tools: Vec<serde_json::Value>,
 }
 
 fn write_tool_schemas() -> Vec<serde_json::Value> {
@@ -3979,12 +4206,54 @@ fn apply_write_mode(state: &AgentState, enabled: bool) -> bool {
     state.write_enabled()
 }
 
+/// Ob das Modell Termine anlegen, ändern und löschen darf.
+///
+/// Der Schreibmodus gilt für die ganze Sitzung und sperrt damit Datei **und**
+/// Kalender. Im Terminumfang ist der eingestellte Umfang selbst die
+/// Freischaltung: Er nimmt dem Modell die Dateiwerkzeuge und gibt ihm die
+/// Terminwerkzeuge, und mehr als das kann er nicht. Deshalb genügt hier der
+/// Umfang, statt zusätzlich `/agent` und `/agent-write` zu verlangen – drei
+/// Schalter für eine Fähigkeit wären eine Hürde ohne Sicherheitsgewinn.
+///
+/// Jeder einzelne Vorgang bleibt davon unberührt: `preview_tool_call` zeigt ihn
+/// dem Benutzer mit Titel, Zeit und Inhalt, und erst danach schreibt
+/// `execute_tool`.
+fn darf_kalender_schreiben(state: &AgentState, scope: Scope) -> bool {
+    scope == Scope::Termine || state.write_enabled()
+}
+
+/// Prüft den schreibenden Kalenderzugriff und sagt bei Ablehnung, woran es liegt.
+///
+/// Der Text nennt den Umfang mit: Im Terminumfang kann eine Ablehnung gar nicht
+/// erst entstehen, wer sie dort zu Gesicht bekommt, läuft also `/scope` nach,
+/// statt `/agent-write` zu versuchen. An drei Stellen stand derselbe Text, und
+/// eine der drei hätte ihn irgendwann anders formuliert.
+fn pruefe_kalender_schreiben(state: &AgentState, scope: Scope) -> Result<(), String> {
+    if darf_kalender_schreiben(state, scope) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Schreibende Werkzeuge sind nicht freigeschaltet. Der Umfang ist {}; /agent-write gibt \
+         sie für diese Sitzung frei.",
+        scope.bezeichnung()
+    ))
+}
+
 /// Beschreibung des Termin-Werkzeugs für das Modell.
 ///
 /// Bewusst knapp und ohne Beispieltermine aus der wirklichen Welt: Der Benutzer
 /// nennt Datum und Uhrzeit, und das Modell muss sie unverändert weitergeben.
 /// Ausgearbeitete Beispiele führen dazu, dass er erfundene Zeiten einsetzt.
-fn calendar_event_schema() -> serde_json::Value {
+///
+/// Die Kalendernamen stehen **zweimal**: im Prompt und in der Beschreibung des
+/// Feldes. Nach dem zweiten Validierungslauf war das nötig: Im Prompt genannt hat
+/// das Modell sie noch zwei von fünf Sätzen weggelassen. Das Feld, das gefüllt
+/// werden soll, hat offenbar die kürzeste Aufmerksamkeit – und genau dort muss
+/// die Wahl stehen.
+fn calendar_event_schema(kalender: &[String]) -> serde_json::Value {
+    let kalender_text = kalender_hinweis(kalender);
+
     serde_json::json!({
         "type": "function",
         "function": {
@@ -3998,17 +4267,16 @@ fn calendar_event_schema() -> serde_json::Value {
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Überschrift des Termins, höchstens 200 Zeichen."
+                        "description": titel_hinweis()
                     },
                     "start": {
                         "type": "string",
-                        "description": "Beginn in den Worten des Benutzers, etwa „heute 14:00“ \
-    oder „morgen um 9“. Auch JJJJ-MM-TTThh:mm wird verstanden. Ohne Versatz gilt die \
-    Zeit des Rechners."
+                        "description": start_hinweis()
                     },
                     "end": {
                         "type": "string",
-                        "description": "Ende in denselben Worten. Ohne Angabe eine Stunde."
+                        "description": "Ende in denselben Worten. Ohne Angabe eine Stunde; \
+    ohne Tagesangabe gehört es zum Tag von start."
                     },
                     "all_day": {
                         "type": "boolean",
@@ -4024,7 +4292,7 @@ fn calendar_event_schema() -> serde_json::Value {
                     },
                     "calendar": {
                         "type": "string",
-                        "description": "Name des Zielkalenders, wenn mehrere ausgewählt sind."
+                        "description": kalender_text
                     },
                     "reminder": {
                         "type": "string",
@@ -4116,7 +4384,7 @@ kein HEUTE, rechne nichts selbst, sondern sage, dass das aktuelle Datum fehlt.",
 /// Die beiden schreibenden Kalenderwerkzeuge.
 ///
 /// Zwei Schemata, darum eine Liste: `json!` fasst nur einen Wert.
-fn calendar_change_schema() -> Vec<serde_json::Value> {
+fn calendar_change_schema(kalender: &[String]) -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
         "type": "function",
@@ -4131,7 +4399,7 @@ fn calendar_change_schema() -> Vec<serde_json::Value> {
                     "uid": { "type": "string", "description": "Kennung aus list_calendar_events. Nicht nötig, wenn du title und on_date nennst." },
                     "title": { "type": "string", "description": "Aktueller Titel des Termins, so wie ihn der Benutzer gesagt hat." },
                     "on_date": { "type": "string", "description": "Wann der Termin JETZT ist, in den Worten des Benutzers: etwa „gestern 14:00“. Das grenzt Termine gleichen Titels voneinander ab. Steht in start schon eine neue Zeit, darfst du on_date weglassen." },
-                    "calendar": { "type": "string", "description": "Kalendername, wenn der Benutzer einen genannt hat." },
+                    "calendar": { "type": "string", "description": format!("Kalendername, wenn der Benutzer einen genannt hat. Auswahl: {}. Ohne Angabe bleibt der bisherige Kalender.", kalender.join(", ")) },
                     "summary": { "type": "string", "description": "Neuer Titel." },
                     "start": { "type": "string", "description": "Neuer Beginn in den Worten des Benutzers, etwa „morgen 14:00“." },
                     "end": { "type": "string", "description": "Neues Ende. Ohne Angabe bleibt die bisherige Dauer." },
@@ -4158,7 +4426,7 @@ fn calendar_change_schema() -> Vec<serde_json::Value> {
                     "uid": { "type": "string", "description": "Kennung aus list_calendar_events. Nicht nötig, wenn du title und on_date nennst." },
                     "title": { "type": "string", "description": "Titel des Termins, so wie ihn der Benutzer gesagt hat." },
                     "on_date": { "type": "string", "description": "Wann der Termin ist, in den Worten des Benutzers: etwa „gestern 14:00“ oder „morgen 9 Uhr“. Das grenzt Termine gleichen Titels voneinander ab." },
-                    "calendar": { "type": "string", "description": "Kalendername, wenn der Benutzer einen genannt hat." }
+                    "calendar": { "type": "string", "description": format!("Kalendername, wenn der Benutzer einen genannt hat. Auswahl: {}", kalender.join(", ")) }
                 },
                 "required": []
                 }
@@ -4218,7 +4486,9 @@ der Benutzer selbst in Nextcloud.",
     )
 }
 
-fn agent_toolset_for(root: &Path, write_enabled: bool, kalender: bool) -> AgentToolset {
+fn agent_toolset_for(root: &Path, write_enabled: bool, kalender: &[String]) -> AgentToolset {
+    // Ohne Anmeldung gibt es keine Namen und damit keine Kalenderwerkzeuge.
+    let angemeldet = !kalender.is_empty();
     let mut tools = agent_tool_schemas();
     let mut prompt = agent_system_prompt(&root.to_string_lossy());
 
@@ -4236,16 +4506,16 @@ freigegeben werden.",
     // Das Lesen der Termine braucht nur die Anmeldung: Es verändert nichts und
     // kostet den Benutzer keine Bestätigung. Ohne Anmeldung gäbe es nichts zu
     // lesen, und das Modell würde es ankündigen und an jedem Aufruf scheitern.
-    if kalender {
+    if angemeldet {
         tools.push(list_events_schema());
         prompt.push_str(&calendar_read_prompt());
     }
 
     // Die schreibenden Kalenderwerkzeuge brauchen beides: die Freigabe für
     // Schreibvorgänge und eine Anmeldung.
-    if write_enabled && kalender {
-        tools.push(calendar_event_schema());
-        tools.extend(calendar_change_schema());
+    if write_enabled && angemeldet {
+        tools.push(calendar_event_schema(kalender));
+        tools.extend(calendar_change_schema(kalender));
         prompt.push_str(&calendar_event_prompt());
     }
 
@@ -4255,24 +4525,205 @@ freigegeben werden.",
     }
 }
 
+/// Das Werkzeugangebot im Terminumfang: die vier Kalenderwerkzeuge, sonst nichts.
+///
+/// Eine eigene Funktion und kein Schalter in `agent_toolset_for`, weil dort die
+/// Anweisung über das Arbeitsverzeichnis erzeugt wird – im Terminumfang gibt es
+/// keins, und eine leere Adresse darin zu nennen wäre eine Aussage, die nicht
+/// stimmt. Die Dateiwerkzeuge sind hier nicht abgeschaltet, sondern gar nicht
+/// erst vorhanden: Ein nicht angebotenes Werkzeug kann das Modell nicht
+/// verlangen, und ohne Anmeldung gäbe es hier gar nichts zu tun.
+pub fn termine_toolset_for(kalender: &[String]) -> Result<AgentToolset, String> {
+    if kalender.is_empty() {
+        // Ohne Anmeldung oder ohne Kalenderauswahl. Beides heißt dasselbe für
+        // das Modell: Es gäbe nichts zu tun, und eine leere Liste sähe aus wie
+        // ein Kalender mit nichts drin.
+        return Err(
+            "Der Terminumfang braucht eine Anmeldung: Mit /calendar anmelden, sonst \
+             hat das Modell kein Werkzeug."
+                .to_string(),
+        );
+    }
+
+    let mut tools = vec![list_events_schema()];
+    tools.push(calendar_event_schema(kalender));
+    tools.extend(calendar_change_schema(kalender));
+
+    Ok(AgentToolset {
+        system_prompt: termine_anweisung(kalender),
+        tools,
+    })
+}
+
+/// Die Anweisung des Terminumfangs, für sich genommen.
+///
+/// Aus `termine_toolset_for` herausgezogen, weil die Validierung mit einem echten
+/// Modell dieselben Sätze schicken muss, die im Betrieb gehen. An zwei Stellen
+/// gelesen zu sein ist hier kein Duplikat: Es ist derselbe Text, derselbe Weg.
+pub fn termine_anweisung(kalender_namen: &[String]) -> String {
+    let mut prompt = calendar_read_prompt();
+    prompt.push_str(&kalender_aufgabe(kalender_namen));
+    prompt.push_str(&calendar_event_prompt());
+    prompt
+}
+
+/// Was das Modell über die **ausgewählten** Kalender wissen muss.
+///
+/// Ohne diesen Absatz rät das Modell. Das Schema sagt nur, `calendar` sei „Name
+/// des Zielkalenders, wenn mehrere ausgewählt sind" – welche Kalender das sind,
+/// stand nirgends. Im ersten Validierungslauf nannte qwen2.5:7b daraufhin
+/// „Arbeitskalender", „WorkCalendar" und ließ das Feld in anderen Fällen ganz
+/// weg. `waehle_kalender` vergleicht absichtlich exakt, also lehnt es zu Recht ab
+/// und der Benutzer sieht eine Fehlermeldung statt eines Termins.
+fn kalender_aufgabe(namen: &[String]) -> String {
+    if namen.len() == 1 {
+        return format!(
+            "\n\nEs ist ein Kalender ausgewählt: {}. Lass `calendar` leer – das Werkzeug trägt \
+             dann selbst ein.",
+            namen[0]
+        );
+    }
+
+    format!(
+        "\n\nEs sind mehrere Kalender ausgewählt: {}. Trage `calendar` **nur** ein, wenn der \
+         Benutzer selbst einen Kalender genannt hat – dann genau diesen Namen, unverändert. \
+         Hat er keinen genannt, lass das Feld leer und **frag ihn, in welchen Kalender es soll**. \
+         Rate keinen: Ein erfundener Name wird abgelehnt, und eine Frage kostet den Benutzer \
+         weniger als ein Termin im falschen Kalender.",
+        namen.join(", ")
+    )
+}
+
+/// Der Text für das Feld `calendar` im Schéma.
+///
+/// Bei einem Kalender: Das Feld soll leer bleiben. Bei mehreren: Die Namen – und
+/// die ausdrückliche Erlaubnis, das Feld leer zu lassen und nachzufragen.
+///
+/// Das ist die Stelle, an der es entschieden wird. Ein Absatz im Prompt allein hat
+/// nicht gereicht: Der Prompt sagte „nenn einen dieser Namen“, und die Felder
+/// waren `Pflicht`. Beides zusammen las das Modell als Auftrag, das Feld zu füllen,
+/// und es erfand einen Namen. Erst als die Feldbeschreibung selbst sagte, dass ein
+/// leerer Wert richtig ist, blieb es leer.
+fn kalender_hinweis(namen: &[String]) -> String {
+    match namen.len() {
+        0 => "Nicht gesetzt: Ohne Anmeldung gibt es dieses Werkzeug nicht.".to_string(),
+        1 => format!(
+            "Nicht nötig, es ist nur ein Kalender ausgewählt ({}). Lass das Feld leer.",
+            namen[0]
+        ),
+        _ => format!(
+            "Nur wenn der Benutzer einen Kalender genannt hat – dann genau einen von {}, \
+             unverändert. Sonst **leer lassen und ihn fragen**, welchen Kalender er meint. \
+             Erfinde keinen Namen: Ein Name, der nicht stimmt, wird abgelehnt.",
+            namen.join(", ")
+        ),
+    }
+}
+
+/// Der Text für das Feld `start` im Anlegen-Schema.
+///
+/// `start` ist zusammen mit `summary` das einzige Pflichtfeld. Wird es hier
+/// allein genannt, weiß das Modell am Ort des Ausfüllens, dass ein fehlender
+/// Zeitpunkt eine Nachfrage ist – die allgemeine Regel im Prompt steht weiter
+/// weg und wird eher überlesen.
+fn start_hinweis() -> &'static str {
+    "Beginn in den Worten des Benutzers, etwa „heute 14:00“ oder „morgen um 9“. Auch \
+     JJJJ-MM-TTThh:mm wird verstanden. Ohne Versatz gilt die Zeit des Rechners."
+}
+
+/// Der Text für das Feld `summary` im Anlegen-Schema.
+///
+/// Steht an derselben Stelle wie der Kalenderhinweis und aus demselben Grund:
+/// Nach dem zweiten Lauf war der Titel in drei von sechs Sätzen „Termin" oder eine
+/// Umformulierung dessen, was der Benutzer gesagt hatte. Das Feld bekommt den
+/// Klartext des Benutzers, nicht einen Titel, den das Modell erfunden hat.
+fn titel_hinweis() -> &'static str {
+    "Überschrift des Termins, höchstens 200 Zeichen."
+}
+
+/// Das Werkzeugangebot für den eingestellten Umfang.
+///
+/// Der Umfang entscheidet hier, nicht der Schalter im Kopf: Im Terminumfang
+/// läuft die Werkzeugschleife ohne weiteres Zutun des Benutzers, weil er die
+/// Kalenderwerkzeuge mitbringt. Deshalb prüft dieser Aufruf das
+/// Arbeitsverzeichnis nur im Agentenmodus – sonst müsste man es setzen, obwohl
+/// nichts gelesen wird.
+///
+/// Der Umfang kommt als eigener Parameter und wird nicht aus `agent` gelesen:
+/// Er ist der wirksame Umfang, der vom Provider abweichen kann. Aus der
+/// Konfiguration gelesen wäre hier die eine Stelle, an der das lokale Modell
+/// doch Dateiwerkzeuge bekäme.
+fn toolset_for(
+    agent: &AgentConfig,
+    scope: Scope,
+    write_enabled: bool,
+    kalender: &[String],
+) -> Result<AgentToolset, String> {
+    match scope {
+        Scope::Termine => termine_toolset_for(kalender),
+        Scope::Agent => {
+            if agent.root.is_empty() {
+                return Err(
+                    "Kein Arbeitsverzeichnis konfiguriert. Nutze /agent-dir <pfad>.".to_string(),
+                );
+            }
+
+            Ok(agent_toolset_for(
+                &canonical_root(&agent.root)?,
+                write_enabled,
+                kalender,
+            ))
+        }
+    }
+}
+
+/// Die Namen der Kalender, in die geschrieben werden darf.
+///
+/// Es sind die **ausgewählten**, nicht alle vorhandenen: `waehle_kalender` sucht
+/// nur unter den ausgewählten, und ein Name aus dem übrigen Bestand würde vom
+/// Modell als gültig gelesen und vom Werkzeug abgelehnt.
+///
+/// Leer heißt: keine Anmeldung oder keine Auswahl. Dann gibt es kein Werkzeug,
+/// und der Grund dafür steht im Aufrufer – eine leere Liste hier einzusetzen
+/// hieße, dem Modell eine Wahl zu geben, die es nicht hat.
+fn gewaehlte_kalender(
+    config: &crate::calendar::CalendarConfig,
+    session: &crate::calendar::CalendarSession,
+) -> Vec<String> {
+    if config.calendars.is_empty() {
+        return known_calendars(session)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+    }
+
+    // Die Auswahl nennt Pfade. Die Namen holt der Sitzungszustand, weil nur er
+    // sie kennt; ein Pfad ohne Namen im Sitzungszustand fällt weg, weil er sich
+    // nicht nennen ließe.
+    known_calendars(session)
+        .into_iter()
+        .filter(|(href, name)| !name.is_empty() && config.calendars.iter().any(|wahl| wahl == href))
+        .map(|(_, name)| name)
+        .collect()
+}
+
 #[tauri::command]
 async fn list_tools(
     settings: State<'_, OllamaSettings>,
     state: State<'_, AgentState>,
+    session: State<'_, crate::calendar::CalendarSession>,
 ) -> Result<AgentToolset, String> {
-    let agent = settings.get_config().await.agent;
-
-    if agent.root.is_empty() {
-        return Err("Kein Arbeitsverzeichnis konfiguriert. Nutze /agent-dir <pfad>.".to_string());
-    }
-
-    let root = canonical_root(&agent.root)?;
-    Ok(agent_toolset_for(
-        &root,
+    let config = settings.get_config().await;
+    toolset_for(
+        &config.agent,
+        wirksamer_umfang(&config),
         state.write_enabled(),
-        settings.get_config().await.calendar.logged_in_hint(),
-    ))
+        &gewaehlte_kalender(&config.calendar, &session),
+    )
 }
+
+pub mod termine_validierung;
+pub mod termine_validierung_pruefungen;
 
 /// Vorschau eines Schreibvorgangs. Sie entsteht aus derselben Planungsfunktion
 /// wie der Schreibvorgang selbst, kann also nicht von der tatsächlichen Wirkung
@@ -4359,20 +4810,21 @@ async fn execute_calendar_event(
     config: &crate::calendar::CalendarConfig,
     session: &crate::calendar::CalendarSession,
     arguments: &serde_json::Value,
+    scope: Scope,
+    benutzertext: &str,
 ) -> Result<ToolOutput, String> {
-    if !state.write_enabled() {
-        return Err(
-            "Schreibende Werkzeuge sind nicht freigeschaltet. Der Benutzer muss sie im Chat \
-             freigeben."
-                .to_string(),
-        );
-    }
+    pruefe_kalender_schreiben(state, scope)?;
 
     let Some(password) = session.password() else {
         return Err("Für Termine muss Mimir angemeldet sein. Mit /calendar anmelden.".to_string());
     };
 
-    let plan = crate::calendar::write::plan_event(config, &known_calendars(session), arguments)?;
+    let plan = crate::calendar::write::plan_event(
+        config,
+        &known_calendars(session),
+        arguments,
+        benutzertext,
+    )?;
 
     // Wie beim Lesen: Das Zertifikat wird geprüft, bevor das Passwort die Maschine
     // verlässt.
@@ -4390,6 +4842,16 @@ async fn execute_calendar_event(
     content.push('\n');
     content.push_str(&format!("Kennung {}.", plan.uid));
     content.push_str("Prüfe das Ergebnis mit /termine.");
+
+    // Was verworfen wurde, gehört auch in das Werkzeugergebnis: Das Modell
+    // erfährt damit, dass seine Angabe nicht angekommen ist, und kann im
+    // nächsten Schritt nachfragen, statt zu glauben, der Ort stehe drin.
+    if !plan.verworfen.is_empty() {
+        content.push_str(&format!(
+            "\nNicht übernommen, weil der Benutzer es nicht genannt hat: {}.",
+            plan.verworfen.join(", ")
+        ));
+    }
 
     Ok(ToolOutput::new(content, plan.summary))
 }
@@ -5098,32 +5560,28 @@ async fn execute_calendar_change(
     name: &str,
     arguments: &serde_json::Value,
 ) -> Result<ToolOutput, String> {
-    if !state.write_enabled() {
-        return Err(
-            "Schreibende Werkzeuge sind nicht freigeschaltet. Der Benutzer muss sie im Chat \
-             freigeben."
-                .to_string(),
-        );
-    }
+    let config = settings.get_config().await;
+    pruefe_kalender_schreiben(state, wirksamer_umfang(&config))?;
 
-    let config = settings.get_config().await.calendar;
+    let calendar = config.calendar;
     let Some(password) = session.password() else {
         return Err("Für Termine muss Mimir angemeldet sein. Mit /calendar anmelden.".to_string());
     };
 
-    crate::calendar::ensure_certificate(&config).await?;
-    let client = crate::calendar::client::build_client(config.uses_tls())?;
+    crate::calendar::ensure_certificate(&calendar).await?;
+    let client = crate::calendar::client::build_client(calendar.uses_tls())?;
 
     // Der Termin wird unmittelbar vor dem Schreiben geholt: Zwischen Vorschau
     // und Freigabe können Sekunden liegen, in denen Nextcloud den Termin ändert.
-    let termin = lade_fuer_aenderung(&client, &config, &password, session, name, arguments).await?;
+    let termin =
+        lade_fuer_aenderung(&client, &calendar, &password, session, name, arguments).await?;
 
     state.charge_write(termin.inhalt.len().max(1))?;
 
     if termin.geloescht {
         crate::calendar::client::delete_event(
             &client,
-            &config,
+            &calendar,
             &password,
             &termin.url,
             &termin.etag,
@@ -5132,7 +5590,7 @@ async fn execute_calendar_change(
     } else {
         crate::calendar::client::update_event(
             &client,
-            &config,
+            &calendar,
             &password,
             &termin.url,
             &termin.etag,
@@ -5153,12 +5611,16 @@ async fn execute_calendar_change(
 async fn preview_tool_call(
     name: String,
     arguments: serde_json::Value,
+    benutzertext: String,
     settings: State<'_, OllamaSettings>,
     session: State<'_, crate::calendar::CalendarSession>,
     state: State<'_, AgentState>,
 ) -> Result<ToolPreview, String> {
+    let config = settings.get_config().await;
+    let scope = wirksamer_umfang(&config);
+
     if name == crate::calendar::write::EVENT_TOOL {
-        if !state.write_enabled() {
+        if !darf_kalender_schreiben(&state, scope) {
             return Err(
                 "Schreibende Werkzeuge sind nicht freigeschaltet. Der Benutzer muss sie im \
                  Chat freigeben."
@@ -5166,33 +5628,30 @@ async fn preview_tool_call(
             );
         }
 
-        let config = settings.get_config().await.calendar;
-        let plan =
-            crate::calendar::write::plan_event(&config, &known_calendars(&session), &arguments)?;
+        let plan = crate::calendar::write::plan_event(
+            &config.calendar,
+            &known_calendars(&session),
+            &arguments,
+            &benutzertext,
+        )?;
 
         return Ok(preview_event(&plan));
     }
 
     if name == crate::calendar::edit::UPDATE_TOOL || name == crate::calendar::edit::DELETE_TOOL {
-        if !state.write_enabled() {
-            return Err(
-                "Schreibende Werkzeuge sind nicht freigeschaltet. Der Benutzer muss sie im \
-                 Chat freigeben."
-                    .to_string(),
-            );
-        }
+        pruefe_kalender_schreiben(&state, scope)?;
 
-        let config = settings.get_config().await.calendar;
+        let calendar = config.calendar;
         let Some(password) = session.password() else {
             return Err(
                 "Für Termine muss Mimir angemeldet sein. Mit /calendar anmelden.".to_string(),
             );
         };
 
-        crate::calendar::ensure_certificate(&config).await?;
-        let client = crate::calendar::client::build_client(config.uses_tls())?;
+        crate::calendar::ensure_certificate(&calendar).await?;
+        let client = crate::calendar::client::build_client(calendar.uses_tls())?;
         let termin =
-            lade_fuer_aenderung(&client, &config, &password, &session, &name, &arguments).await?;
+            lade_fuer_aenderung(&client, &calendar, &password, &session, &name, &arguments).await?;
 
         return Ok(preview_change(
             &termin.vorher,
@@ -5202,8 +5661,7 @@ async fn preview_tool_call(
         ));
     }
 
-    let agent = settings.get_config().await.agent;
-    let root = canonical_root(&agent.root)?;
+    let root = canonical_root(&config.agent.root)?;
     preview_write(&root, &name, &arguments)
 }
 
@@ -5211,6 +5669,7 @@ async fn preview_tool_call(
 async fn execute_tool(
     name: String,
     arguments: serde_json::Value,
+    benutzertext: String,
     settings: State<'_, OllamaSettings>,
     state: State<'_, AgentState>,
     session: State<'_, crate::calendar::CalendarSession>,
@@ -5220,8 +5679,16 @@ async fn execute_tool(
     }
 
     if name == crate::calendar::write::EVENT_TOOL {
-        let config = settings.get_config().await.calendar;
-        return execute_calendar_event(&state, &config, &session, &arguments).await;
+        let config = settings.get_config().await;
+        return execute_calendar_event(
+            &state,
+            &config.calendar,
+            &session,
+            &arguments,
+            wirksamer_umfang(&config),
+            &benutzertext,
+        )
+        .await;
     }
 
     if name == crate::calendar::edit::UPDATE_TOOL || name == crate::calendar::edit::DELETE_TOOL {
@@ -5760,7 +6227,7 @@ fn is_hyprland_session() -> bool {
 /// die zu Ollama. Deshalb steht das ganz vorn beim Start und nicht erst im
 /// Kalenderteil. `ring` statt der Vorgabe, weil es ohne zusätzliche Werkzeuge
 /// baut.
-fn install_crypto_provider() {
+pub fn install_crypto_provider() {
     use std::sync::Once;
 
     static EINMAL: Once = Once::new();
@@ -5821,6 +6288,8 @@ pub fn run() {
             set_ssh_config,
             start_ollama_via_ssh,
             get_server_url,
+            get_provider,
+            set_provider,
             get_einrichtung,
             set_server_url,
             get_agent_config,
@@ -5880,6 +6349,7 @@ mod tests {
         execute_read_only_tool,
         execute_write_tool,
         finish_ssh_command,
+        gewaehlte_kalender,
         is_write_tool,
         known_calendars,
         kuerze_fuer_nachricht,
@@ -5901,6 +6371,8 @@ mod tests {
         should_retry_chat,
         ssh_failure_message,
         start_ollama_script,
+        termine_toolset_for,
+        toolset_for,
         undo_last_change,
         validate_agent_max_steps,
         validate_chat_config,
@@ -5909,6 +6381,7 @@ mod tests {
         validate_context_tokens,
         validate_history,
         validate_tool_schemas,
+        wirksamer_umfang,
         without_thinking,
         AgentConfig,
         AgentState,
@@ -5919,6 +6392,8 @@ mod tests {
         OllamaRequest,
         OllamaSettings,
         OllamaStreamParser,
+        Provider,
+        Scope,
         SshConfig,
         SshFailure,
         StreamChunk,
@@ -6557,6 +7032,7 @@ mod tests {
         let settings = OllamaSettings {
             config: tokio::sync::RwLock::new(OllamaConfig {
                 server_url: "http://localhost:11434".to_string(),
+                provider: Provider::Remote,
                 ssh: SshConfig::default(),
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
@@ -6846,15 +7322,35 @@ mod tests {
             .set_agent_config(AgentConfig {
                 root: root.to_string_lossy().to_string(),
                 max_steps: 5,
+                scope: Scope::Agent,
             })
             .await
             .unwrap();
         assert_eq!(stored.max_steps, 5);
+        assert_eq!(stored.scope, Scope::Agent);
 
         let reloaded = OllamaSettings::load(config_path.clone()).unwrap();
         let agent = reloaded.get_config().await.agent;
         assert_eq!(agent.max_steps, 5);
         assert_eq!(agent.root, root.to_string_lossy());
+        assert_eq!(agent.scope, Scope::Agent);
+
+        // Der Umfang überlebt einen Neustart und kommt als lesbarer Wert zurück,
+        // nicht als Zahlencode: Eine Konfigurationsdatei wird auch von Hand
+        // gelesen.
+        settings
+            .set_agent_config(AgentConfig {
+                root: root.to_string_lossy().to_string(),
+                max_steps: 5,
+                scope: Scope::Termine,
+            })
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text.contains("\"scope\": \"termine\""), "{text}");
+
+        let neu = OllamaSettings::load(config_path.clone()).unwrap();
+        assert_eq!(neu.get_config().await.agent.scope, Scope::Termine);
 
         // Ein nicht existierendes Verzeichnis darf nicht gespeichert werden, ein
         // relatives ebenfalls nicht.
@@ -6862,6 +7358,7 @@ mod tests {
             .set_agent_config(AgentConfig {
                 root: "/gibt/es/nicht/xyz".to_string(),
                 max_steps: 5,
+                scope: Scope::Agent,
             })
             .await
             .is_err());
@@ -6869,6 +7366,7 @@ mod tests {
             .set_agent_config(AgentConfig {
                 root: "relativ".to_string(),
                 max_steps: 5,
+                scope: Scope::Agent,
             })
             .await
             .is_err());
@@ -7449,8 +7947,8 @@ mod tests {
         // Fehlten die beiden Felder im Schema, hätte das Modell sie nicht
         // gefunden und stattdessen behauptet, es hätte sie gesetzt.
         for schema in [
-            super::calendar_event_schema(),
-            super::calendar_change_schema()
+            super::calendar_event_schema(&zwei_kalender()),
+            super::calendar_change_schema(&zwei_kalender())
                 .into_iter()
                 .find(|schema| schema["function"]["name"] == super::calendar::edit::UPDATE_TOOL)
                 .expect("das Ändern-Werkzeug fehlt im Angebot"),
@@ -7971,7 +8469,7 @@ mod tests {
         let root = std::env::temp_dir();
 
         // Anmelden genügt fürs Lesen, Schreiben braucht beides.
-        let nur_lesen = agent_toolset_for(&root, false, true);
+        let nur_lesen = agent_toolset_for(&root, false, &zwei_kalender());
         let namen_lesen = namen(&nur_lesen.tools);
         assert!(
             namen_lesen.contains(&LIST_EVENTS_TOOL.to_string()),
@@ -7980,7 +8478,7 @@ mod tests {
         assert!(!namen_lesen.contains(&crate::calendar::edit::UPDATE_TOOL.to_string()));
         assert!(!namen_lesen.contains(&crate::calendar::edit::DELETE_TOOL.to_string()));
 
-        let mit_schreiben = agent_toolset_for(&root, true, true);
+        let mit_schreiben = agent_toolset_for(&root, true, &zwei_kalender());
         let namen_schreiben = namen(&mit_schreiben.tools);
         assert!(namen_schreiben.contains(&crate::calendar::edit::UPDATE_TOOL.to_string()));
         assert!(namen_schreiben.contains(&crate::calendar::edit::DELETE_TOOL.to_string()));
@@ -8002,7 +8500,7 @@ mod tests {
     #[test]
     fn ohne_anmeldung_gibt_es_auch_das_lesen_nicht() {
         let root = std::env::temp_dir();
-        let ohne = agent_toolset_for(&root, true, false);
+        let ohne = agent_toolset_for(&root, true, &[]);
 
         assert!(!namen(&ohne.tools).contains(&LIST_EVENTS_TOOL.to_string()));
     }
@@ -8012,7 +8510,7 @@ mod tests {
         // Die Grenzen stehen in der Beschreibung, die das Modell liest: Es soll
         // gar nicht erst danach scheitern.
         // Zwei Schemata; deshalb wird der Text aus allen zusammengesetzt.
-        let text = calendar_change_schema()
+        let text = calendar_change_schema(&zwei_kalender())
             .iter()
             .map(|schema| schema.to_string())
             .collect::<Vec<_>>()
@@ -8181,11 +8679,11 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
         // Ohne Anmeldung bekommt das Modell das Werkzeug nicht: Es würde es
         // ankündigen und an jedem Aufruf scheitern.
-        let ohne = agent_toolset_for(&root, true, false);
+        let ohne = agent_toolset_for(&root, true, &[]);
         assert!(!namen(&ohne.tools).contains(&crate::calendar::write::EVENT_TOOL.to_string()));
         assert!(!ohne.system_prompt.contains("create_calendar_event"));
 
-        let mit = agent_toolset_for(&root, true, true);
+        let mit = agent_toolset_for(&root, true, &zwei_kalender());
         assert!(namen(&mit.tools).contains(&crate::calendar::write::EVENT_TOOL.to_string()));
         assert!(mit.system_prompt.contains("create_calendar_event"));
         assert!(mit.system_prompt.contains("nicht rückgängig zu machen"));
@@ -8196,8 +8694,10 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let root = std::env::temp_dir();
 
         // Kalender da, Schreiben aus: nur die lesenden Werkzeuge.
-        assert!(!namen(&agent_toolset_for(&root, false, true).tools)
-            .contains(&crate::calendar::write::EVENT_TOOL.to_string()));
+        assert!(
+            !namen(&agent_toolset_for(&root, false, &zwei_kalender()).tools)
+                .contains(&crate::calendar::write::EVENT_TOOL.to_string())
+        );
     }
 
     #[test]
@@ -8223,32 +8723,49 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     async fn die_anleitung_erscheint_nur_vor_der_einrichtung() {
         use super::Einrichtung;
 
-        fn stand(server_url: &str, kalender: &str) -> Einrichtung {
+        fn stand(provider: Provider, server_url: &str, kalender: &str) -> Einrichtung {
             let normalisiert = normalize_server_url(server_url).expect("gültige Adresse");
 
             Einrichtung {
-                server_eingetragen: normalisiert
-                    != normalize_server_url(super::DEFAULT_OLLAMA_BASE_URL).expect("Vorgabe"),
+                server_eingetragen: !provider.erlaubt_dateizugriff()
+                    || normalisiert
+                        != normalize_server_url(super::DEFAULT_OLLAMA_BASE_URL).expect("Vorgabe"),
                 server_vorgabe: super::DEFAULT_OLLAMA_BASE_URL.to_string(),
                 kalender_eingetragen: !kalender.trim().is_empty(),
             }
         }
 
+        let fern = Provider::Remote;
         // Ohne jede Eingabe: Der Vorgabewert steht noch, die Anleitung gehört hin.
-        assert!(!stand(super::DEFAULT_OLLAMA_BASE_URL, "").server_eingetragen);
-        assert!(!stand("localhost:11434", "").server_eingetragen);
+        assert!(!stand(fern, super::DEFAULT_OLLAMA_BASE_URL, "").server_eingetragen);
+        assert!(!stand(fern, "localhost:11434", "").server_eingetragen);
         // Beide Schreibweisen desselben Servers zählen als eingerichtet.
-        assert!(!stand("http://localhost:11434/", "").server_eingetragen);
+        assert!(!stand(fern, "http://localhost:11434/", "").server_eingetragen);
         // Eine eigene Adresse zählt.
-        assert!(stand("ollama.example.org:11434", "").server_eingetragen);
+        assert!(stand(fern, "ollama.example.org:11434", "").server_eingetragen);
         // Eine Adresse im LAN. `192.0.2.10` wäre nicht zulässig – das ist
         // TEST-NET-1 und damit gerade keine private Adresse, und Mimir lässt nur
         // loopback, unspezifiziert und privat zu.
-        assert!(stand("http://192.168.1.50:11434", "").server_eingetragen);
+        assert!(stand(fern, "http://192.168.1.50:11434", "").server_eingetragen);
         // Und eine Ablehnung, weil sie ins Netz zeigt.
         assert!(normalize_server_url("http://192.0.2.10:11434").is_err());
         // Der Kalender ändert daran nichts.
-        assert!(!stand(super::DEFAULT_OLLAMA_BASE_URL, "https://cloud.example.org").server_eingetragen);
+        assert!(
+            !stand(
+                fern,
+                super::DEFAULT_OLLAMA_BASE_URL,
+                "https://cloud.example.org"
+            )
+            .server_eingetragen
+        );
+
+        // Lokal braucht keine eingetragene Adresse und wird deshalb nicht mit einer
+        // Anleitung begrüßt, die nach einer Adresse fragt, die es dort nicht gibt.
+        // Das ist der ganze Grund für den Provider.
+        assert!(stand(Provider::Local, super::DEFAULT_OLLAMA_BASE_URL, "").server_eingetragen);
+        // Und eine eingetragene Adresse ändert daran nichts: Sie wird lokal nicht
+        // benutzt, also ist auch nichts zu beanstanden.
+        assert!(stand(Provider::Local, "ollama.example.org:11434", "").server_eingetragen);
     }
 
     /// Ein Hostname ist erlaubt, eine Adresse ins Internet nicht.
@@ -8407,7 +8924,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
     #[test]
     fn the_termin_tool_is_described_without_fabricated_examples() {
-        let schema = calendar_event_schema();
+        let schema = calendar_event_schema(&zwei_kalender());
         let text = schema.to_string();
 
         assert!(text.contains("create_calendar_event"));
@@ -8435,11 +8952,16 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             &kalender_konfig(),
             &session,
             &serde_json::json!({"summary": "Zahnarzt", "start": "morgen 09:00"}),
+            Scope::Agent,
+            "",
         )
         .await
         .expect_err("ohne Freigabe wird nichts geschrieben");
 
         assert!(fehler.contains("nicht freigeschaltet"), "{fehler}");
+        // Der Text nennt den Umfang, damit im Terminumfang niemand einen Befehl
+        // sucht, der dort gar nicht nötig ist.
+        assert!(fehler.contains("Agentenmodus"), "{fehler}");
     }
 
     #[tokio::test]
@@ -8453,10 +8975,36 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             &kalender_konfig(),
             &session,
             &serde_json::json!({"summary": "Zahnarzt", "start": "morgen 09:00"}),
+            Scope::Agent,
+            "",
         )
         .await
         .expect_err("ohne Anmeldung gibt es keine Adresse");
 
+        assert!(fehler.contains("angemeldet"), "{fehler}");
+    }
+
+    #[tokio::test]
+    async fn the_termin_scope_writes_without_the_write_switch() {
+        // Der Umfang ist die Freischaltung: Ohne /agent-write wird im
+        // Terminumfang trotzdem geschrieben, und der Aufruf scheitert erst an
+        // der fehlenden Anmeldung – das ist der nächste Fehler, nicht der
+        // Schreibschalter.
+        let state = AgentState::default();
+        let session = crate::calendar::CalendarSession::default();
+
+        let fehler = execute_calendar_event(
+            &state,
+            &kalender_konfig(),
+            &session,
+            &serde_json::json!({"summary": "Zahnarzt", "start": "morgen 09:00"}),
+            Scope::Termine,
+            "",
+        )
+        .await
+        .expect_err("ohne Anmeldung gibt es keine Adresse");
+
+        assert!(!fehler.contains("nicht freigeschaltet"), "{fehler}");
         assert!(fehler.contains("angemeldet"), "{fehler}");
     }
 
@@ -8475,7 +9023,15 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             serde_json::json!({"summary": "A", "start": "2023-10-05T14:00"}),
             serde_json::json!({"summary": "A", "start": "2026-09-14T09:00", "attendees": ["a@b.de"]}),
         ] {
-            let _ = execute_calendar_event(&state, &kalender_konfig(), &session, &schlecht).await;
+            let _ = execute_calendar_event(
+                &state,
+                &kalender_konfig(),
+                &session,
+                &schlecht,
+                Scope::Agent,
+                "",
+            )
+            .await;
         }
 
         // Ohne Server bleibt die Prüfung des Zertifikats als Fehlerquelle; das
@@ -8494,6 +9050,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
                 "start": format!("{}T09:00", (chrono::Local::now() + chrono::Duration::days(7)).format("%Y-%m-%d")),
                 "location": "Praxis Dr. Klein"
             }),
+            "",
         )
         .expect("der Plan muss sich bilden lassen");
 
@@ -8525,7 +9082,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
         // 1. Ausgangszustand: nur lesende Werkzeuge, Schreiben abgelehnt.
         assert_eq!(
-            agent_toolset_for(&canonical, state.write_enabled(), false)
+            agent_toolset_for(&canonical, state.write_enabled(), &[])
                 .tools
                 .len(),
             3
@@ -8543,7 +9100,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         assert!(apply_write_mode(&state, true));
         assert!(state.write_enabled());
         assert_eq!(
-            agent_toolset_for(&canonical, state.write_enabled(), false)
+            agent_toolset_for(&canonical, state.write_enabled(), &[])
                 .tools
                 .len(),
             5
@@ -8575,7 +9132,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         // 5. Und wieder abschalten: Das Angebot verschwindet wieder.
         assert!(!apply_write_mode(&state, false));
         assert_eq!(
-            agent_toolset_for(&canonical, state.write_enabled(), false)
+            agent_toolset_for(&canonical, state.write_enabled(), &[])
                 .tools
                 .len(),
             3
@@ -8613,7 +9170,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let root = test_tree("agent-werkzeugliste");
         let root = canonical_root(&root.to_string_lossy()).unwrap();
 
-        let read_only = agent_toolset_for(&root, false, false);
+        let read_only = agent_toolset_for(&root, false, &[]);
         assert_eq!(
             read_only.tools.len(),
             3,
@@ -8635,7 +9192,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             .system_prompt
             .contains("Zusätzlich darfst du schreiben"));
 
-        let with_write = agent_toolset_for(&root, true, false);
+        let with_write = agent_toolset_for(&root, true, &[]);
         assert_eq!(
             with_write.tools.len(),
             5,
@@ -8666,6 +9223,570 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         }
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Zwei ausgewählte Kalender, wie sie aus der Anmeldung kommen.
+    fn zwei_kalender() -> Vec<String> {
+        vec!["Persönlich".to_string(), "Arbeit".to_string()]
+    }
+
+    #[test]
+    fn the_termin_scope_offers_exactly_the_calendar_tools() {
+        let toolset =
+            termine_toolset_for(&zwei_kalender()).expect("mit Anmeldung gibt es Werkzeuge");
+
+        let names: Vec<&str> = toolset
+            .tools
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), 4, "{names:?}");
+        for expected in [
+            LIST_EVENTS_TOOL,
+            crate::calendar::write::EVENT_TOOL,
+            crate::calendar::edit::UPDATE_TOOL,
+            crate::calendar::edit::DELETE_TOOL,
+        ] {
+            assert!(names.contains(&expected), "fehlt: {expected} ({names:?})");
+        }
+
+        // Ohne Dateiwerkzeuge, an keiner Stelle: Nicht in der Liste und nicht im
+        // Prompt. Ein Schalter, der sie nur abschaltet, ließe die Anweisung
+        // stehen und damit das Modell glauben, es gäbe sie doch.
+        for verboten in ["write_file", "edit_file", "read_file", "list_directory"] {
+            assert!(
+                !names.contains(&verboten),
+                "unerwartetes Werkzeug: {verboten}"
+            );
+            assert!(
+                !toolset.system_prompt.contains(verboten),
+                "{}",
+                toolset.system_prompt
+            );
+        }
+
+        // Auch das Arbeitsverzeichnis kommt nicht vor: Es gäbe in diesem Umfang
+        // nichts, wofür es eine Grenze wäre.
+        for pfad_stueck in ["Arbeitsverzeichnis", "/tmp/", "read_file"] {
+            assert!(
+                !toolset.system_prompt.contains(pfad_stueck),
+                "{}",
+                toolset.system_prompt
+            );
+        }
+
+        // Die Kalenderanweisungen sind beide drin, samt der Werkzeugnamen.
+        assert!(
+            toolset
+                .system_prompt
+                .contains(crate::calendar::write::EVENT_TOOL),
+            "{}",
+            toolset.system_prompt
+        );
+        assert!(
+            toolset
+                .system_prompt
+                .contains(crate::calendar::edit::UPDATE_TOOL),
+            "{}",
+            toolset.system_prompt
+        );
+    }
+
+    /// Die Kalendernamen gehören in die Anweisung.
+    ///
+    /// Aus dem ersten Validierungslauf: Das Schéma sagt nur, `calendar` sei „Name
+    /// des Zielkalenders, wenn mehrere ausgewählt sind" – welche Kalender das sind,
+    /// stand nirgends. Das Modell riet daraufhin „Arbeitskalender" und „WorkCalendar",
+    /// und `waehle_kalender` lehnte zu Recht ab, weil es absichtlich exakt vergleicht.
+    #[test]
+    fn the_prompt_names_the_selected_calendars() {
+        let toolset = termine_toolset_for(&zwei_kalender()).expect("mit Kalendern");
+        let prompt = &toolset.system_prompt;
+
+        for name in ["Persönlich", "Arbeit"] {
+            assert!(
+                prompt.contains(name),
+                "„{name}“ fehlt in der Anweisung:\n{prompt}"
+            );
+        }
+
+        // Das Modell soll wissen, dass ein genannter Name übernommen wird – und
+        // dass es bei einem **nicht** genannten nachfragen soll, statt zu raten.
+        assert!(
+            prompt.contains("**nur** ein, wenn der Benutzer selbst einen Kalender genannt hat")
+                && prompt.contains("frag ihn, in welchen Kalender es soll"),
+            "die Anweisung sagt nicht, wann ein Name hingesetzt wird:\n{prompt}"
+        );
+
+        // Die Namen stehen auch im Schéma, und zwar im Feld, das gefüllt werden
+        // soll. Nach dem zweiten Lauf war das der Unterschied: Im Prompt genannt hat
+        // das Modell sie noch weggelassen; am Feld selbst nicht mehr.
+        let schema = toolset.tools[1]["function"]["parameters"]["properties"]["calendar"]
+            ["description"]
+            .as_str()
+            .expect("das Feld calendar hat eine Beschreibung");
+        for name in ["Persönlich", "Arbeit"] {
+            assert!(
+                schema.contains(name),
+                "„{name}“ fehlt in der Feldbeschreibung: {schema}"
+            );
+        }
+        // Und sie sagt ausdrücklich, dass ein leerer Wert richtig ist. Das ist
+        // der Punkt: Solange die Felder „Pflicht" waren und der Prompt zum
+        // Füllen aufforderte, erfand das Modell einen Namen.
+        assert!(
+            schema.contains("leer lassen") && schema.contains("frag"),
+            "die Feldbeschreibung erlaubt kein leeres Feld: {schema}"
+        );
+        assert!(
+            !schema.contains("Pflicht"),
+            "die Feldbeschreibung macht den Kalender wieder zur Pflicht: {schema}"
+        );
+
+        // Und der Prompt sagt dasselbe, statt zum Füllen aufzufordern.
+        assert!(
+            prompt.contains("frag ihn, in welchen Kalender"),
+            "der Prompt sagt nicht, dass nach dem Kalender gefragt wird:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Nenn für jeden Termin"),
+            "der Prompt fordert weiterhin zum Füllen auf:\n{prompt}"
+        );
+
+        // Bei einem einzigen Kalender genügt die Nennung nicht als Pflicht: Dann
+        // trägt das Werkzeug selbst ein, und ein erzwungener Name wäre eine
+        // erfundene Möglichkeit.
+        let einer = termine_toolset_for(&["Persönlich".to_string()]).expect("ein Kalender");
+        assert!(
+            einer.system_prompt.contains("Lass `calendar` leer"),
+            "{}",
+            einer.system_prompt
+        );
+        assert!(
+            !einer.system_prompt.contains("Nenn für jeden Termin"),
+            "{}",
+            einer.system_prompt
+        );
+    }
+
+    /// Die Anweisung nennt die **ausgewählten** Kalender, nicht alle vorhandenen.
+    ///
+    /// `waehle_kalender` sucht nur unter den ausgewählten. Ein Name aus dem übrigen
+    /// Bestand im Prompt wäre eine Wahl, die das Werkzeug ablehnt.
+    #[test]
+    fn only_the_selected_calendars_are_named() {
+        let alle = [
+            ("privat", "Privat"),
+            ("arbeit", "Arbeit"),
+            ("familie", "Familie"),
+        ];
+
+        let session = crate::calendar::CalendarSession::default();
+        session.set_calendars(
+            alle.iter()
+                .map(|(href, name)| crate::calendar::client::CalendarInfo {
+                    href: href.to_string(),
+                    display_name: name.to_string(),
+                    ctag: String::new(),
+                    color: String::new(),
+                })
+                .collect(),
+            None,
+        );
+
+        let mut config = crate::calendar::CalendarConfig {
+            server_url: "https://kalender.example.org".to_string(),
+            username: "benutzer".to_string(),
+            ..Default::default()
+        };
+
+        // Ohne Auswahl zählt, was da ist.
+        assert_eq!(
+            gewaehlte_kalender(&config, &session),
+            vec![
+                "Privat".to_string(),
+                "Arbeit".to_string(),
+                "Familie".to_string()
+            ]
+        );
+
+        config.calendars = vec!["privat".to_string(), "arbeit".to_string()];
+        assert_eq!(
+            gewaehlte_kalender(&config, &session),
+            vec!["Privat".to_string(), "Arbeit".to_string()]
+        );
+
+        // Ein Pfad ohne Namen im Sitzungszustand fällt weg: Er ließe sich dem Modell
+        // nicht nennen, also nennt die Anweisung ihn auch nicht.
+        let namenlos = crate::calendar::CalendarSession::default();
+        namenlos.set_calendars(
+            vec![crate::calendar::client::CalendarInfo {
+                href: "privat".to_string(),
+                display_name: String::new(),
+                ctag: String::new(),
+                color: String::new(),
+            }],
+            None,
+        );
+        config.calendars = vec!["privat".to_string()];
+        assert!(gewaehlte_kalender(&config, &namenlos).is_empty());
+    }
+
+    #[test]
+    fn the_termin_scope_needs_a_calendar_login() {
+        // Ohne Anmeldung gäbe es kein einziges Werkzeug: Das Modell würde nichts
+        // ankündigen und nichts erreichen. Eine leere Liste wäre die schlechtere
+        // Antwort, weil sie aussieht, als gäbe es nichts zu tun.
+        let Err(fehler) = termine_toolset_for(&[]) else {
+            panic!("ohne Anmeldung gibt es nichts");
+        };
+        assert!(fehler.contains("/calendar"), "{fehler}");
+
+        let agent = AgentConfig {
+            scope: Scope::Termine,
+            ..Default::default()
+        };
+        // Und über den Umfang dasselbe – auch ohne Arbeitsverzeichnis, das hier
+        // gar nicht gebraucht wird.
+        let Err(ueber_umfang) = toolset_for(&agent, Scope::Termine, false, &[]) else {
+            panic!("ohne Anmeldung gibt es nichts");
+        };
+        assert!(ueber_umfang.contains("/calendar"), "{ueber_umfang}");
+    }
+
+    #[test]
+    fn the_agent_scope_still_needs_a_working_directory() {
+        let ohne_root = AgentConfig {
+            scope: Scope::Agent,
+            ..AgentConfig {
+                root: String::new(),
+                max_steps: 8,
+                scope: Scope::Agent,
+            }
+        };
+        let Err(fehler) = toolset_for(&ohne_root, Scope::Agent, false, &[]) else {
+            panic!("ohne Verzeichnis gibt es kein Werkzeugangebot");
+        };
+        assert!(fehler.contains("/agent-dir"), "{fehler}");
+
+        // Mit Verzeichnis läuft der Agentenpfad unverändert weiter.
+        let root = test_tree("scope-agent-dir");
+        let agent = AgentConfig {
+            root: root.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let toolset = toolset_for(&agent, Scope::Agent, false, &[]).expect("mit Verzeichnis");
+        assert_eq!(toolset.tools.len(), 3);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_scope_that_is_misspelled_stops_the_start_up() {
+        // Ein Tippfehler von Hand darf nicht stillschweigend als breiter
+        // Umfang gelesen werden. Der Umfang steuert, ob das Modell Dateiwerkzeuge
+        // bekommt; ein stilles Zurückfallen auf den Vorgabeumfang wäre eine
+        // Rechteausweitung ohne den Benutzer. Deshalb bricht das Laden hier ab
+        // und nennt die beiden erlaubten Werte.
+        let fehler = serde_json::from_str::<OllamaConfig>(
+            r#"{"server_url": "http://localhost:11434", "agent": {"scope": "gibtesnicht"}}"#,
+        )
+        .expect_err("ein unbekannter Umfang darf nicht durchrutschen");
+        let text = fehler.to_string();
+        assert!(text.contains("agent"), "{text}");
+        assert!(text.contains("termine"), "{text}");
+
+        // Und über `load` ist der Fehler als Lesefehler erkennbar, nicht als
+        // irgendein anderer Zustand.
+        let config_path = test_config_path("scope-typo.json");
+        std::fs::write(
+            &config_path,
+            r#"{"server_url": "http://localhost:11434", "agent": {"scope": "gibtesnicht"}}"#,
+        )
+        .unwrap();
+        let Err(fehler) = OllamaSettings::load(config_path.clone()) else {
+            panic!("ein unbekannter Umfang muss den Start abbrechen");
+        };
+        assert!(fehler.contains("Konfiguration"), "{fehler}");
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    #[test]
+    fn the_scope_can_never_widen_the_access() {
+        // Ein gespeichertes Arbeitsverzeichnis wird im Terminumfang nicht
+        // ausgewertet, weil es dort nichts zu lesen gibt: Das Werkzeugangebot
+        // entsteht, ohne den Pfad zu prüfen oder zu nennen.
+        let termine = AgentConfig {
+            root: "/gibt/es/nicht/xyz".to_string(),
+            scope: Scope::Termine,
+            ..Default::default()
+        };
+        let toolset = toolset_for(&termine, Scope::Termine, false, &zwei_kalender())
+            .expect("der Pfad wird nicht gebraucht");
+        assert!(
+            !toolset.system_prompt.contains("xyz"),
+            "{}",
+            toolset.system_prompt
+        );
+
+        // Und im anderen Umfang gilt der Pfad weiterhin, samt seiner Prüfung.
+        let agent = AgentConfig {
+            root: "/gibt/es/nicht/xyz".to_string(),
+            scope: Scope::Agent,
+            ..Default::default()
+        };
+        let Err(fehler) = toolset_for(&agent, Scope::Agent, false, &zwei_kalender()) else {
+            panic!("der Pfad wird im Agentenmodus geprüft");
+        };
+        assert!(fehler.contains("Arbeitsverzeichnis"), "{fehler}");
+    }
+
+    /// Ein Provider, der fehlt, ist das entfernte Ollama.
+    ///
+    /// Jede bis jetzt geschriebene Konfiguration hat kein Provider-Feld. Ohne
+    /// Vorgabe würde sie beim Start entweder abbrechen oder – schlimmer – auf das
+    /// lokale Ollama zeigen, also genau das, was der Benutzer nicht eingestellt
+    /// hat. Der alte Stand muss sich also von selbst einstellen.
+    #[test]
+    fn ein_fehlender_provider_bleibt_das_entfernte_ollama() {
+        let config: OllamaConfig =
+            serde_json::from_str(r#"{"server_url": "http://192.168.1.50:11434"}"#).unwrap();
+        assert_eq!(config.provider, Provider::Remote);
+        assert_eq!(
+            config.provider.adresse(&config.server_url),
+            "http://192.168.1.50:11434"
+        );
+
+        // Und auch als Zeichenkette, wie es in der Datei steht.
+        let gespeichert = serde_json::to_string(&config).unwrap();
+        assert!(
+            gespeichert.contains("\"provider\":\"remote\""),
+            "{gespeichert}"
+        );
+
+        // Ausgeschrieben wird der Wert als Wort, nicht als Zahlencode: Eine
+        // Konfigurationsdatei wird auch von Hand gelesen.
+        let lokal: OllamaConfig = serde_json::from_str(
+            r#"{"server_url": "http://192.168.1.50:11434", "provider": "local"}"#,
+        )
+        .unwrap();
+        assert_eq!(lokal.provider, Provider::Local);
+        assert_eq!(
+            lokal.provider.adresse(&lokal.server_url),
+            super::DEFAULT_OLLAMA_BASE_URL,
+            "lokal sieht die eingetragene Adresse nicht"
+        );
+
+        // Und ein Tippfehler bricht den Start ab, statt auf das entfernte Ollama
+        // zurückzufallen: Genau das wäre die stille Umstellung, die hier nicht
+        // passieren soll.
+        assert!(serde_json::from_str::<OllamaConfig>(
+            r#"{"server_url": "http://localhost:11434", "provider": "hieslokal"}"#
+        )
+        .is_err());
+    }
+
+    /// Lokal ist eine feste Adresse auf diesem Rechner.
+    ///
+    /// Der eingetragene Server bleibt unangetastet: Wer zurückwechselt, muss die
+    /// Adresse nicht noch einmal eintippen. Und es gibt keine andere Adresse, auf
+    /// die ein Ollama auf diesem Rechner hörte.
+    #[tokio::test]
+    async fn der_lokale_provider_zeigt_auf_diesen_rechner() {
+        let config_path = test_config_path("provider-lokal");
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+
+        settings
+            .set_base_url("http://192.168.1.50:11434")
+            .await
+            .unwrap();
+
+        settings.set_provider(Provider::Local).await.unwrap();
+
+        assert_eq!(
+            settings.get_base_url().await,
+            super::DEFAULT_OLLAMA_BASE_URL,
+            "lokal ist immer die Vorgabeadresse"
+        );
+        // Die eingetragene Adresse ist noch da, nur nicht mehr in Gebrauch.
+        assert_eq!(
+            settings.get_config().await.server_url,
+            "http://192.168.1.50:11434"
+        );
+
+        // Und sie kommt nach dem Zurückwechseln wieder genau so zurück.
+        settings.set_provider(Provider::Remote).await.unwrap();
+        assert_eq!(settings.get_base_url().await, "http://192.168.1.50:11434");
+
+        // Der Wechsel übersteht einen Neustart.
+        let reloaded = OllamaSettings::load(config_path.clone()).unwrap();
+        assert_eq!(reloaded.get_provider().await, Provider::Remote);
+        assert_eq!(reloaded.get_base_url().await, "http://192.168.1.50:11434");
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    /// Im lokalen Provider gibt es keine Dateiwerkzeuge.
+    ///
+    /// Geprüft wird der Umfang, aus dem die Werkzeuge entstehen – nicht die
+    /// Oberfläche. Ein Anzeigefehler wäre lästig, ein Werkzeugangebot mit
+    /// `read_file` dagegen ein Fehler, der das Modell in ein Verzeichnis greifen
+    /// ließe, in dem der Assistent selbst läuft.
+    #[tokio::test]
+    async fn das_lokale_modell_bekommt_nur_die_kalenderwerkzeuge() {
+        let config_path = test_config_path("provider-umfang");
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+        let root = test_tree("provider-umfang-dir");
+
+        // Der gespeicherte Umfang ist der volle Agentenmodus – mit
+        // Arbeitsverzeichnis, damit die Prüfung nicht zufällig daran hängen
+        // bleibt.
+        settings
+            .set_agent_config(AgentConfig {
+                root: root.to_string_lossy().to_string(),
+                max_steps: 5,
+                scope: Scope::Agent,
+            })
+            .await
+            .unwrap();
+
+        settings.set_provider(Provider::Local).await.unwrap();
+
+        // Wirksam ist der Terminumfang, obwohl der Agentenmodus gespeichert ist.
+        let config = settings.get_config().await;
+        assert_eq!(config.agent.scope, Scope::Agent, "gespeichert bleibt er");
+        assert_eq!(
+            wirksamer_umfang(&config),
+            Scope::Termine,
+            "wirksam ist er es nicht"
+        );
+
+        // Und deshalb braucht das Werkzeugangebot kein Arbeitsverzeichnis: Der
+        // Pfad hier ist ungültig, und es stünde nicht einmal mehr im Weg.
+        let kaputt = AgentConfig {
+            root: "/gibt/es/nicht/xyz".to_string(),
+            scope: Scope::Agent,
+            ..Default::default()
+        };
+        let toolset = toolset_for(&kaputt, wirksamer_umfang(&config), false, &zwei_kalender())
+            .expect("lokal wird der Pfad nicht gebraucht");
+        let namen: Vec<&str> = toolset
+            .tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        for erwartet in [
+            crate::calendar::write::EVENT_TOOL,
+            crate::calendar::edit::UPDATE_TOOL,
+            crate::calendar::edit::DELETE_TOOL,
+            LIST_EVENTS_TOOL,
+        ] {
+            assert!(namen.contains(&erwartet), "{erwartet} fehlt: {namen:?}");
+        }
+        for verboten in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_files",
+            "search_files",
+        ] {
+            assert!(
+                !namen.contains(&verboten),
+                "{verboten} gehört nicht dazu: {namen:?}"
+            );
+        }
+
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    /// Der lokale Provider nimmt keinen Umfang an, den er nicht halten kann.
+    ///
+    /// Ohne diese Ablehnung würde `/scope agent` eine Wahl anzeigen, die nicht
+    /// gilt, und der Fehler käme erst beim Senden – nach der ersten Antwort des
+    /// Modells, die auf Dateiwerkzeuge hinausläuft.
+    #[tokio::test]
+    async fn das_lokale_modell_lässt_sich_nicht_zum_agenten_erweitern() {
+        let config_path = test_config_path("provider-erweiterung");
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+        let root = test_tree("provider-erweiterung-dir");
+
+        settings.set_provider(Provider::Local).await.unwrap();
+
+        let fehler = settings
+            .set_agent_config(AgentConfig {
+                root: root.to_string_lossy().to_string(),
+                max_steps: 5,
+                scope: Scope::Agent,
+            })
+            .await
+            .unwrap_err();
+        assert!(fehler.contains("/provider remote"), "{fehler}");
+
+        // Der Terminumfang lässt sich setzen, und er bleibt gültig.
+        let gesetzt = settings
+            .set_agent_config(AgentConfig {
+                root: root.to_string_lossy().to_string(),
+                max_steps: 5,
+                scope: Scope::Termine,
+            })
+            .await
+            .unwrap();
+        assert_eq!(gesetzt.scope, Scope::Termine);
+
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    /// Die eingetragene Adresse gehört zum entfernten Provider.
+    ///
+    /// Solange das lokale Ollama läuft, wäre eine neue Adresse ein Eintrag, den
+    /// niemand sieht: Die Oberfläche zeigte weiter `localhost`, und der Knopf ist
+    /// ausgeblendet. Die Ablehnung nennt deshalb den Weg zurück.
+    #[tokio::test]
+    async fn lokal_kann_die_adresse_nicht_umstellen() {
+        let config_path = test_config_path("provider-adresse");
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+
+        settings.set_provider(Provider::Local).await.unwrap();
+
+        let fehler = settings
+            .set_base_url("http://192.168.1.50:11434")
+            .await
+            .unwrap_err();
+        assert!(fehler.contains("/provider remote"), "{fehler}");
+        assert_eq!(
+            settings.get_base_url().await,
+            super::DEFAULT_OLLAMA_BASE_URL
+        );
+
+        // Und remote ist sie wieder gültig – genau derselbe Aufruf.
+        settings.set_provider(Provider::Remote).await.unwrap();
+        assert_eq!(
+            settings
+                .set_base_url("http://192.168.1.50:11434")
+                .await
+                .unwrap(),
+            "http://192.168.1.50:11434"
+        );
+
+        std::fs::remove_file(&config_path).ok();
+    }
+
+    #[test]
+    fn a_scope_that_is_missing_stays_the_default() {
+        // Eine bestehende Konfiguration ohne das Feld lädt, und der alte Stand
+        // bleibt: Der Agentenmodus mit Arbeitsverzeichnis, wie er war.
+        let config: OllamaConfig = serde_json::from_str(
+            r#"{"server_url": "http://localhost:11434", "agent": {"root": "/srv", "max_steps": 5}}"#,
+        )
+        .unwrap();
+        assert_eq!(config.agent.scope, Scope::Agent);
+        assert_eq!(config.agent.root, "/srv");
+        assert_eq!(config.agent.max_steps, 5);
+
+        // Und ohne ganzen `agent`-Abschnitt gilt dasselbe.
+        let ohne =
+            serde_json::from_str::<OllamaConfig>(r#"{"server_url": "http://localhost:11434"}"#)
+                .unwrap();
+        assert_eq!(ohne.agent.scope, Scope::Agent);
+        assert_eq!(ohne.agent.scope, AgentConfig::default().scope);
     }
 
     #[test]

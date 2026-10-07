@@ -12,6 +12,16 @@
         <h2>Mimir</h2>
         <div class="header-controls">
             <div class="server-actions">
+                <!-- Woher die Modelle kommen. Vorher stand die Wahl nur in der
+                     Konfiguration, und der Weg dorthin führte über die Adresse im
+                     Chat – mitten im Betrieb, während die Anzeige noch den anderen
+                     Server zeigte. Der Provider ist deshalb eine Auswahl im Kopf,
+                     und sie bleibt über einen Neustart stehen. -->
+                <label for="provider-select">Ollama: </label>
+                <select id="provider-select" class="provider-select" title="Woher die Modelle kommen: der eingetragene Server im Netz oder das Ollama auf diesem Rechner">
+                    <option value="remote">Server</option>
+                    <option value="local">Lokal</option>
+                </select>
                 <span id="server-status" class="server-status checking" aria-live="polite">Server: Prüfe ...</span>
                 <button type="button" id="check-server-btn" class="header-button">Prüfen</button>
                 <!-- Sichtbar, sobald der Server nicht antwortet. Ohne diesen Knopf

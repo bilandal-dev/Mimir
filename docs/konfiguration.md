@@ -1,9 +1,60 @@
 # Konfiguration
 
-Alles, was sich einstellen lässt und wo es gespeichert wird: Serveradresse, SSH,
-Kontextfenster, Systemanweisung und Verlauf.
+Alles, was sich einstellen lässt und wo es gespeichert wird: Provider, Serveradresse,
+SSH, Kontextfenster, Systemanweisung und Verlauf.
 
 Die Einstellungen liegen als JSON in `~/.config/com.bilandal.mimir/ollama.json`.
+
+## Provider: woher die Modelle kommen
+
+Vorher gab es nur eine Adresse, und die zeigte auf einen Rechner im Netz. Ein Modell
+auf dem eigenen Rechner war damit nicht erreichbar, außer man stellte die Adresse um
+– mitten im Betrieb, und der Verlauf des anderen Servers blieb dabei stehen.
+
+Deshalb gibt es zwei Einstellungen: den **Provider** und die Adresse.
+
+```json
+{
+  "provider": "remote",
+  "server_url": "http://192.168.178.42:11434"
+}
+```
+
+- `remote` (Vorgabe) benutzt `server_url`. Fehlt das Feld `provider` in einer älteren
+  Konfiguration, gilt das weiterhin – bestehende Installationen starten unverändert.
+- `local` benutzt immer die Vorgabeadresse `http://localhost:11434` auf diesem
+  Rechner. Ein Ollama auf diesem Rechner liefe unter keiner anderen Adresse.
+
+Gestellt wird der Provider in der Kopfzeile über die Auswahl **Ollama** (**Server** oder
+**Lokal**) oder im Chat:
+
+```text
+/provider
+/provider remote
+/provider local
+```
+
+Der Wechsel bleibt über einen Neustart erhalten und verändert `server_url` **nicht** –
+wer zurückwechselt, muss die Adresse nicht neu eintragen. Was beim Wechsel passiert:
+Der Chatverlauf wird verworfen (er gehört zum anderen Server) und die Modellliste neu
+geladen.
+
+Ein Wechsel prüft nichts: Ein lokales Ollama kann laufen oder nicht. Läuft es nicht,
+zeigt die Kopfzeile das wie bei jedem anderen Server als „Offline“. Die Knöpfe
+**Adresse** und **SSH starten** sind im lokalen Provider ausgeblendet und
+`/server-url` lehnt dort ab – beides hätte keine Wirkung, und eine Änderung, die
+nichts bewirkt, sollte man nicht als Erfolg melden.
+
+Im lokalen Provider gilt außerdem immer der [Terminumfang](#der-umfang-des-modells):
+`wirksamer_umfang` in `src-tauri/src/lib.rs` gibt dort die Kalenderwerkzeuge heraus, und
+`/scope agent` wird abgelehnt. Der gespeicherte `agent.scope` bleibt dabei unberührt –
+wer zurückwechselt, findet seinen Umfang so vor, wie er war. Der Grund ist nicht
+Misstrauen in das lokale Modell, sondern seine Größe: Ein kleines Modell, das neben
+dem Assistenten auf demselben Rechner läuft, hat keinen Grund, dessen Arbeitsverzeichnis
+zu durchsuchen. Auf einem eigenen Ollama in `ollama.service` ist das Modell ohnehin
+gegen alle anderen erreichbar – das ist eine Ollama-Eigenschaft, keine von Mimir.
+
+## Serveradresse
 
 Die initiale Ollama-Adresse ist als Vorgabewert in `src-tauri/src/lib.rs` hinterlegt:
 
@@ -46,14 +97,17 @@ Persistentes Konfigurationsformat:
 
 ```json
 {
+  "provider": "remote",
   "server_url": "http://localhost:11434",
   "ssh": {
     "target": "benutzer@ollama.example.org",
     "port": 22,
-    "identity_file": "/pfad/zum/schluessel/id_ed25519"
+    "identity_file": "/pfad/zum/schluessel/id25519"
   }
 }
 ```
+
+`provider` ist optional; fehlt das Feld, gilt das entfernte Ollama – eine bestehende Konfiguration startet damit unverändert.
 
 `identity_file` ist optional; fehlt das Feld oder ist es leer, gelten die OpenSSH-Standardpfade und der `ssh-agent`. Der Pfad muss absolut sein, darf keine Platzhalter und kein `..` enthalten und wird auch beim Laden der Konfiguration validiert.
 
@@ -131,6 +185,27 @@ Verwendete Ollama-Endpunkte:
 
 - `GET /api/tags` für die verfügbare Modellliste
 - `POST /api/chat` für den Chat mit Streaming-Antworten
+
+### Der Umfang des Modells
+
+Wie weit das Modell reichen darf, steht in `ollama.json` unter `agent.scope` und wird mit `/scope` gesetzt:
+
+```json
+{
+  "agent": {
+    "root": "/home/benutzer",
+    "max_steps": 8,
+    "scope": "agent"
+  }
+}
+```
+
+`agent` ist die Vorgabe und verhält sich wie bisher. `termine` gibt dem Modell ausschließlich die vier Kalenderwerkzeuge, ohne Dateizugriff und ohne Arbeitsverzeichnis. Der Umfang gilt über einen Neustart hinweg und kann den Zugriff nur verkleinern. Einzelheiten in [docs/agentenmodus.md](agentenmodus.md#der-umfang-alles-oder-nur-termine).
+
+Im lokalen Provider ist der wirksame Umfang immer `termine`, auch wenn hier `agent`
+steht: Das Modell läuft dann auf diesem Rechner und bekommt dort keine
+Dateiwerkzeuge. Gespeichert wird trotzdem, was eingestellt war, damit der gespeicherte
+Umfang über einen Providerwechsel hinweg erhalten bleibt.
 
 
 ## Kontextfenster, Systemanweisung und Verlauf

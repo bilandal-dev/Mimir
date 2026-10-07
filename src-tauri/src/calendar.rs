@@ -73,12 +73,6 @@ pub struct CalendarConfig {
 }
 
 impl CalendarConfig {
-    /// Steht eine Anmeldung für den Kalender? Ohne sie gibt es kein Werkzeug:
-    /// Das Modell würde es ankündigen und an jedem Aufruf scheitern.
-    pub fn logged_in_hint(&self) -> bool {
-        !self.server_url.is_empty() && !self.username.is_empty()
-    }
-
     /// Läuft die Verbindung über HTTPS? Dann braucht es eine Zertifikatsentscheidung.
     pub fn uses_tls(&self) -> bool {
         self.server_url.starts_with("https://")
@@ -690,6 +684,9 @@ pub struct CalendarEvent {
     #[serde(default)]
     pub canceled: bool,
 }
+
+#[cfg(test)]
+mod modellausgaben;
 
 #[cfg(test)]
 mod tests;

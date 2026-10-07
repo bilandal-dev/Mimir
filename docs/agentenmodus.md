@@ -32,6 +32,85 @@ Beim Anlegen wird der genannte Kalendername **exakt** verglichen, absichtlich oh
 
 Der Schreibmodus gilt **nur für die laufende Sitzung** und wird bewusst nicht in `ollama.json` gespeichert: Ein dauerhaft gesetzter Schreibzugriff würde einen Zugang hinterlassen, den niemand mehr erwartet.
 
+## Der Umfang: alles, oder nur Termine
+
+Neben dem Sitzungsschalter gibt es den **Umfang**, der angibt, welche Werkzeuge das Modell überhaupt bekommt. Er steht in `ollama.json` unter `agent.scope` und wird mit `/scope` gesetzt:
+
+```text
+/scope
+/scope agent
+/scope termine
+```
+
+| Umfang | Werkzeuge | Arbeitsverzeichnis |
+|---|---|---|
+| `agent` (Vorgabe) | die drei lesenden, dazu die freigegebenen schreibenden, dazu der Kalender bei Anmeldung | nötig |
+| `termine` | ausschließlich die vier Kalenderwerkzeuge | nicht nötig |
+
+Der Umfang ist das, was den Unterschied ausmacht. Im Terminumfang gilt:
+
+- **Keine Dateiwerkzeuge, weder lesend noch schreibend.** Sie sind nicht abgeschaltet, sondern gar nicht erst im Angebot, und stehen auch nicht im Prompt – ein nur abgeschaltetes Werkzeug ließe die Anweisung stehen und das Modell glauben, es gäbe es doch.
+- **Kein Arbeitsverzeichnis.** Ein eingetragenes wird weder geprüft noch im Prompt genannt, und `/agent-dir` verlangt keines.
+- **Der Schalter ist gegenstandslos.** Knopf **Agent** und `/agent-write` haben dort nichts zu tun und sagen das. Die Werkzeugschleife läuft ohnehin: Der Umfang ist hier die Freischaltung, sonst wären drei Schalter für eine Fähigkeit nötig – eine Hürde ohne Sicherheitsgewinn.
+
+Und das bleibt unverändert: **Jeder einzelne Vorgang wird vorher als Unterschied gezeigt** und wartet auf die Freigabe. Der Umfang ersetzt diese Bestätigung nicht, er betrifft nur die Auswahl der Werkzeuge.
+
+Der Umfang gilt über einen Neustart hinweg und wird – anders als der Schreibmodus – gespeichert. Das ist unbedenklich, weil er den Zugriff nur verkleinern kann: Es gibt keine Form von `termine`, die mehr erlaubt als `agent`. Ein unbekannter Wert aus einer von Hand bearbeiteten Datei bricht den Start ab, statt stillschweigend als breiter Umfang gelesen zu werden.
+
+Ohne Anmeldung über `/calendar` hat das Modell im Terminumfang gar kein Werkzeug; Mimir sagt das beim Umschalten und in `/tools`.
+
+## Der lokale Provider hat nur Termine
+
+Mit `/provider local` – in der Kopfzeile **Lokal** – läuft das Modell auf demselben Rechner wie Mimir. Dort gilt immer der Terminumfang, auch wenn in `agent.scope` der Agentenmodus steht: `wirksamer_umfang` in `src-tauri/src/lib.rs` gibt die Kalenderwerkzeuge heraus, `/scope agent` wird abgelehnt, und `list_tools` braucht kein Arbeitsverzeichnis. Die Durchsetzung sitzt im Backend an jeder Stelle, an der Werkzeuge angeboten oder eine Schreibfreigabe geprüft wird – eine nur in der Oberfläche gesetzte Anzeige wäre bei der nächsten Änderung wieder weg.
+
+Gespeichert wird der Umfang dabei nicht überschrieben. Wer auf `remote` zurückwechselt, findet seinen Umfang so vor, wie er war.
+
+Das ist keine Sicherheitsgrenze gegen das Modell, sondern eine Festlegung: Ein Ollama auf diesem Rechner ist ohnehin gegen alles erreichbar, was auf diesem Rechner läuft – das ist eine Ollama-Eigenschaft, keine von Mimir. Die Grenze liegt bei Mimir, also gilt sie dort. Die [Konfiguration](konfiguration.md#provider-woher-die-modelle-kommen) nennt den Grund ebenfalls.
+
+Bei **mehreren** ausgewählten Kalendern stehen deren Namen im Prompt **und** in der Beschreibung des Werkzeugfeldes `calendar`. Der Kalendername wird absichtlich exakt verglichen (`waehle_kalender`), weil der Schreibpfad entscheidet, in welchem Kalender geschrieben wird – ein Treffer auf Verdacht wäre stiller Datenverlust. Ein erfundener Name fällt deshalb auf, und zwar bevor etwas geschrieben wird.
+
+## Was die Läufe zeigen
+
+Der Terminumfang ist mehrfach mit einem echten Modell durchlaufen worden, mit `qwen2.5:7b` und deutschen Sätzen. Gemessen wurde zweierlei: ob das Modell das richtige Werkzeug wählt, und ob Mimir aus den gelieferten Argumenten einen Termin bauen kann (`plan_event`, dieselbe Funktion wie die Vorschau).
+
+| | erster Lauf | nach der Überarbeitung |
+|---|---|---|
+| richtiges Werkzeug | 10 von 12 | 5 von 6 |
+| vollständig brauchbar | **1 von 12** | **5 von 6** |
+
+Die drei Befunde des ersten Laufs und was daraus wurde:
+
+**1. Der Kalendername stand in keiner Anweisung.** Häufigster Grund. Das Schema sagte `calendar` sei „Name des Zielkalenders, wenn mehrere ausgewählt sind" – welche Kalender das sind, stand nirgends. Das Modell riet: „Arbeit", „Arbeitskalender", „WorkCalendar". Behoben an zwei Stellen: Die Namen stehen jetzt im Prompt (`kalender_aufgabe`) **und** in der Beschreibung des Feldes `calendar`. Die zweite Stelle war nötig – nach der ersten Korrektur ließ das Modell den Wert noch in zwei von fünf Sätzen weg. Das Feld, das gefüllt werden soll, hat offenbar die kürzeste Aufmerksamkeit.
+
+**2. Uhrzeiten ohne Zahl.** „übermorgen früh" und „Donnerstagmittag" kamen an, und Mimir lehnte ab, weil keine Uhrzeit im Text stand. Das war die richtige Vorsicht – Mimir rechnet keine Uhrzeit aus „früh" – aber es führte zu einer Rückfrage, wo der Benutzer gar keine Lücke gelassen hatte. Jetzt sind sieben Tageszeiten festgelegt: `nachts` 22:00, `frühmorgens` 6:30, `früh` 8:00, `vormittag` und `vormittags` 9:00, `mittag` 12:00, `abend` 18:00. Gesucht wird nur in **ganzen Wörtern**, sonst würde aus „Frühstück mit Anna" ein Vormittagstermin.
+
+**3. Erfundene Felder.** Aus „Freitagmittag" wurde `start: "Freitag um 14:00"` mit `end: "15:00"` – die Uhrzeit geraten, das Ende ebenso. Daraus sind zwei Regeln geworden. Fehlt `end`, gilt die Vorgabedauer, statt eine zu raten. Und: **ein Ende ohne Tagesangabe gehört zum Tag des Beginns**, weil „15:00" für sich allein der heutige Tag ist und der Termin sonst in der Vergangenheit läge. Ein Ende *mit* Tag bleibt, wie es ist.
+
+**Was übrig bleibt:** Bei „Vergiss bitte das Fitnessstudio am Donnerstag" fragt das Modell nach Kalender und genauer Uhrzeit, statt `delete_calendar_event` zu rufen. Das ist keine Fehlfunktion, sondern eine berechtigte Rückfrage – der Satz nennt weder Kalender noch Uhrzeit.
+
+### Nachfragen: versucht und zurückgenommen
+
+Der Wunsch war, das Modell bei unvollständigen Angaben ausdrücklich nachfragen zu lassen. Ein eigener Prompt-Absatz mit den vier Lücken – fehlender Titel, fehlende Zeit, fehlender Kalendername, fehlender Bezug zu einem Termin – und passende Hinweise an den Pflichtfeldern.
+
+**Das Ergebnis war schlechter, und der Versuch ist zurückgenommen.** Die brauchbaren Sätze gingen von 5 von 6 auf 3 von 12. Die Anweisung hat das Modell nicht zum Nachfragen gebracht, sondern zum Aufrufen des Werkzeugs mit **erfundenen** Werten: Aus „Mach mir morgen um 15 Uhr einen Termin" wurde ein Aufruf mit `summary`, `start` und `calendar` – drei Feldern, von denen der Benutzer genau keines genannt hatte. Und aus „Trag morgen um 14 Uhr einen Termin mit der Hausärztin ein" wurde ein Kalendername, den niemand genannt hatte.
+
+Die Ursache ist im Prompt selbst: Ein Kalender ist **Pflicht**, und die Feldbeschreibung sagt „Nimm genau einen von: Persönlich, Arbeit". Diese beiden Sätze zusammen lesen sich als Auftrag, das Feld zu füllen – nicht als Erlaubnis zu fragen. Ein Modell, das zum Ausfüllen angewiesen wird, füllt.
+
+Hinzu kam eine Fehlmessung auf meiner Seite: Die Prüfung auf ein Fragezeichen im Antworttext wertete „Um einen Termin mit Sarah einzutragen, benötige ich mehr Informationen" als kein Nachfragen, obwohl es eines ist. Die Messung ist jetzt breiter – ein Fragezeichen **oder** eine der üblichen Formulierungen.
+
+Was bleibt, ist deshalb die Formulierung in `calendar_event_prompt`, die schon vorher da war: *„Kannst du eine Angabe nicht auflösen, frag nach, statt zu raten."* Sie wirkt – der Sarah-Satz zeigt es. Ein zusätzlicher Absatz mit denselben Regeln hat sie nur überschrieben, und zwar zum Nachteil.
+
+**Beide Punkte sind inzwischen umgesetzt – und beide brauchten einen Eingriff am Werkzeug, nicht im Prompt.**
+
+1. **Ort und Beschreibung** werden gegen die Worte des Benutzers geprüft und fallen weg, wenn er sie nicht genannt hat, siehe [docs/kalender.md](kalender.md#erfundene-felder).
+2. **`calendar` ist ein optionales Feld geworden.** Trägt das Modell nur ein, wenn der Benutzer einen Kalender genannt hat. Sonst bleibt es leer, die Planung antwortet mit der Frage *„In welchen Kalender soll der Termin?"*, und das Modell gibt sie im Chat weiter.
+
+Punkt 2 bestätigt, was der Fehlschlag oben zeigte: Der Prompt war nie die richtige Stelle. *„Nenn für jeden Termin einen dieser Namen"* war zusammen mit einem Pflichtfeld ein Auftrag, und ein Modell, das zum Füllen angewiesen wird, füllt. Erst als die **Feldbeschreibung** sagte, dass ein leerer Wert richtig ist, blieb das Feld leer.
+
+**Was die Messung nicht zeigt:** Das Prüfprogramm stellt eine Frage, bekommt eine Antwort und misst – es führt keinen zweiten Zug. Der Fall „Termin ohne genannten Kalender" ist damit als *unbrauchbar* gezählt, obwohl er der richtige Verlauf ist: Der erste Zug stellt die Frage, der zweite legt an. Eine ehrliche Bewertung bräuchte einen zweiten Durchlauf mit der Frage im Verlauf.
+
+Ein Nebenumstand des Laufs: Der Server im LAN verschwand unter der Last mehrfach und kam nach ein bis zwei Minuten wieder. Der Durchlauf setzt deshalb `keep_alive`, damit Ollama das Modell nicht je Satz neu lädt.
+
 ## Jeder Schreibvorgang wird als Unterschied gezeigt
 
 Vor jedem Schreibvorgang erscheint ein Fenster mit dem **Vorher/Nachher-Unterschied** der Datei, nicht mit den Argumenten des Modells. Die Vorschau entsteht im Backend aus derselben Funktion (`plan_write`), die auch das Schreiben ausführt, sie kann also gar nicht von der tatsächlichen Wirkung abweichen. Erst nach „Schreiben" wird ausgeführt; bei „Ablehnen" bekommt das Modell die Ablehnung als Werkzeugergebnis und es wird nichts verändert. Gleiches gilt bei einem Fehler: Ein unmöglicher Schreibvorgang scheitert schon in der Vorschau, das Modell sieht den Grund und arbeitet weiter.

@@ -33,9 +33,16 @@ fn kalender(pfad: &str, name: &str) -> (String, String) {
     (pfad.to_string(), name.to_string())
 }
 
+/// Ohne Benutzertext wird nichts verworfen: `feld_gedeckt` lässt dann jedes Feld
+/// stehen. Deshalb genügt hier ein leerer Text – die Prüfung selbst hat eigene
+/// Tests in `modellausgaben`.
 fn termin(arguments: serde_json::Value) -> Result<EventPlan, String> {
+    termin_mit(arguments, "")
+}
+
+fn termin_mit(arguments: serde_json::Value, benutzertext: &str) -> Result<EventPlan, String> {
     let verfuegbar = vec![kalender("persoenlich", "Persönlich")];
-    plan_event(&config(), &verfuegbar, &arguments)
+    plan_event(&config(), &verfuegbar, &arguments, benutzertext)
 }
 
 /// Entfaltet die Zeilen wieder, damit Tests den Inhalt prüfen können.
@@ -665,6 +672,7 @@ fn the_first_selected_calendar_is_used_when_nothing_is_named() {
         &config,
         &verfuegbar,
         &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        "",
     )
     .unwrap();
 
@@ -678,11 +686,7 @@ fn a_named_calendar_wins_over_the_order() {
     let mut config = config();
     config.calendars = vec!["privat".to_string(), "arbeit".to_string()];
 
-    let plan = plan_event(
-        &config,
-        &verfuegbar,
-        &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "Arbeit"}),
-    )
+    let plan = plan_event(&config, &verfuegbar, &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "Arbeit"}), "")
     .unwrap();
 
     assert_eq!(plan.calendar_href, "arbeit");
@@ -700,6 +704,7 @@ fn a_calendar_can_also_be_named_by_its_path() {
             "start": format!("{}T09:00", spaeter(7)).as_str(),
             "calendar": "persoenlich"
         }),
+        "",
     )
     .unwrap();
 
@@ -713,11 +718,7 @@ fn an_unknown_calendar_lists_the_ones_that_exist() {
     let mut config = config();
     config.calendars = vec!["privat".to_string(), "arbeit".to_string()];
 
-    let fehler = plan_event(
-        &config,
-        &verfuegbar,
-        &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "Kanzlei"}),
-    )
+    let fehler = plan_event(&config, &verfuegbar, &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "Kanzlei"}), "")
     .unwrap_err();
 
     assert!(fehler.contains("Privat"), "{}", fehler);
@@ -734,10 +735,15 @@ fn a_calendar_name_is_needed_when_several_are_selected() {
         &config,
         &verfuegbar,
         &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        "",
     )
     .unwrap_err();
 
+    // Der Text ist eine Frage an den Benutzer, keine Anweisung an das Modell:
+    // Er kommt als Werkzeugergebnis zurück und soll weitergegeben werden.
     assert!(fehler.contains("mehrere Kalender"), "{}", fehler);
+    assert!(fehler.contains("In welchen Kalender"), "{}", fehler);
+    assert!(!fehler.contains("Nenne einen davon"), "{}", fehler);
 }
 
 #[test]
@@ -750,6 +756,7 @@ fn one_calendar_needs_no_name() {
         &config,
         &verfuegbar,
         &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        "",
     )
     .unwrap();
 
@@ -764,7 +771,8 @@ fn without_a_login_there_is_nothing_to_write_to() {
     let fehler = plan_event(
         &config,
         &[],
-        &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        &serde_json::json!({ "summary": "A", "start": "morgen 14:00" }),
+        "",
     )
     .unwrap_err();
 
@@ -784,6 +792,7 @@ fn an_empty_selection_means_every_calendar_the_server_knows() {
         &config,
         &verfuegbar,
         &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        "",
     )
     .unwrap();
 
@@ -804,10 +813,12 @@ fn an_empty_selection_with_several_calendars_asks_for_the_name() {
         &config,
         &verfuegbar,
         &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str()}),
+        "",
     )
     .unwrap_err();
 
     assert!(fehler.contains("mehrere Kalender"), "{}", fehler);
+    assert!(fehler.contains("In welchen Kalender"), "{}", fehler);
     assert!(fehler.contains("Persönlich"), "{}", fehler);
     assert!(fehler.contains("Arbeit"), "{}", fehler);
 }
@@ -819,11 +830,7 @@ fn a_calendar_can_be_named_by_its_path() {
     let mut config = config();
     config.calendars.clear();
 
-    let plan = plan_event(
-        &config,
-        &verfuegbar,
-        &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "persoenlich"}),
-    )
+    let plan = plan_event(&config, &verfuegbar, &json!({"summary": "A", "start": format!("{}T09:00", spaeter(7)).as_str(), "calendar": "persoenlich"}), "")
     .unwrap();
 
     assert_eq!(plan.calendar_href, "persoenlich");

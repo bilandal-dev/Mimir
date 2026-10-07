@@ -25,6 +25,9 @@ Ollamas HTTP-API; das Frontend muss den Server nicht selbst erreichen.
   Unterschieds und ausdrücklicher Freigabe
 - **Agentenmodus** mit lesenden Werkzeugen, feste Sandbox, jeder Aufruf wird
   bestätigt; Schreiben nur nach Freischaltung und als sichtbarer Unterschied
+- **Umfang** wählbar: alles wie bisher oder nur die vier Kalenderwerkzeuge, dann
+  ohne Dateizugriff und ohne Arbeitsverzeichnis, jede Änderung weiterhin als
+  sichtbarer Unterschied vorab bestätigt
 - **Dateien anhängen** ohne Mimir Zugriff auf das Dateisystem zu geben
 
 ## Voraussetzungen
@@ -170,19 +173,49 @@ Ist der Server nicht erreichbar, bleibt die Adresse trotzdem stehen. Ein Rechner
 aus ist, und eine falsche Adresse sind zwei verschiedene Fehler, und die eingetragene
 Adresse ist im ersten Fall richtig.
 
+## Ollama hier oder im Netz
+
+Die Auswahl **Ollama** in der Kopfzeile – **Server** oder **Lokal** – entscheidet,
+woher die Modelle kommen:
+
+- **Server** nimmt die eingetragene Adresse aus dem Netz, wie oben beschrieben
+- **Lokal** nimmt das Ollama auf diesem Rechner, immer unter
+  `http://localhost:11434`
+
+Das sind zugleich `/provider remote` und `/provider local`.
+
+Der Wechsel bleibt über einen Neustart erhalten und verändert die eingetragene Adresse
+nicht. Er setzt den Chatverlauf zurück – er gehört zum anderen Server – und lädt die
+Modellliste neu. Ein Wechsel prüft nichts: Läuft das Ollama, das du gewählt hast,
+nicht, zeigt die Kopfzeile das wie bei jeder anderen Adresse.
+
+Im lokalen Provider gibt es nur den Terminumfang, also die vier Kalenderwerkzeuge und
+keinen Dateizugriff. `/scope agent` wird dort abgelehnt. Der Grund ist die Größe des
+Modells: Es läuft auf demselben Rechner wie Mimir und hat keinen Grund, dessen
+Arbeitsverzeichnis zu durchsuchen. Zurück zu den Dateiwerkzeugen geht es mit
+`/provider remote`; der gespeicherte Umfang bleibt dabei erhalten.
+
+Einzelheiten in [Konfiguration](docs/konfiguration.md#provider-woher-die-modelle-kommen).
+
 ## Befehle
 
 Alles im Chat, mit `/` beginnend. `/help` zeigt dieselbe Liste in der Anwendung.
 
 | Befehl | Wirkung |
 | --- | --- |
+| `/provider` | zeigt oder stellt ein, woher die Modelle kommen |
+| `/provider remote` | entferntes Ollama aus dem Netz |
+| `/provider local` | Ollama auf diesem Rechner, nur Kalenderwerkzeuge |
 | `/server-url` | zeigt die eingestellte Adresse |
 | `/server-url <URL>` | ändert sie dauerhaft, nach Bestätigung |
 | `/server-status` | prüft die Erreichbarkeit neu |
-| `/server-start` | startet Ollama über das SSH-Ziel neu |
+| `/server-start` | startet Ollama über das SSH-Ziel neu, nur bei `/provider remote` |
 | `/system` | dauerhafte Anweisung an das Modell, z. B. Sprache oder Länge |
 | `/context` | Größe des Kontextfensters, `0` übernimmt die Vorgabe |
 | `/history` | Verlauf auf der Platte halten oder löschen, nur nach Rückfrage |
+| `/scope` | zeigt oder stellt ein, wie weit das Modell reicht |
+| `/scope agent` | Dateiwerkzeuge im Arbeitsverzeichnis |
+| `/scope termine` | nur die vier Kalenderwerkzeuge, ohne Dateizugriff |
 | `/agent` | Agentenmodus ein oder aus, nur lesende Werkzeuge |
 | `/agent-write` | schreibende Werkzeuge freigeben oder sperren |
 | `/agent-dir` | zeigt das Arbeitsverzeichnis des Agentenmodus |

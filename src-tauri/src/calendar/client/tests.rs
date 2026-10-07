@@ -817,6 +817,8 @@ fn plan() -> super::super::write::EventPlan {
             "summary": "Zahnarzt",
             "start": format!("{}T09:00", spaeteres_datum())
         }),
+        // Ohne Benutzertext wird nichts verworfen, siehe `write::tests::termin`.
+        "",
     )
     .expect("der Plan muss sich bilden lassen")
 }

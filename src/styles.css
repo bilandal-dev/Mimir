@@ -131,6 +131,15 @@ header select:focus {
     border-color: var(--accent-color);
 }
 
+/* Der Provider nennt nur zwei Wörter und steht vor der Statusanzeige. Er soll
+   nicht so breit sein wie die Modellliste – die trägt Namen, er trägt „Server“
+   und „Lokal“. */
+header select.provider-select {
+    width: 104px;
+    font-size: 12px;
+    padding: 5px 32px 5px 10px;
+}
+
 header select:disabled {
     cursor: wait;
     opacity: 0.7;

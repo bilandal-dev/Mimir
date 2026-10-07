@@ -12,6 +12,7 @@ const commandHintList = document.getElementById('command-hint-list');
 const sendBtn = document.getElementById('send-btn');
 const cancelChatBtn = document.getElementById('cancel-chat-btn');
 const modelSelect = document.getElementById('model-select');
+const providerSelect = document.getElementById('provider-select');
 const serverStatus = document.getElementById('server-status');
 const checkServerBtn = document.getElementById('check-server-btn');
 const startServerBtn = document.getElementById('start-server-btn');
@@ -135,10 +136,77 @@ const CALENDAR_TOOL_NAMES = [EVENT_TOOL, UPDATE_EVENT_TOOL, DELETE_EVENT_TOOL];
 // Bestaetigung wie eine Datei und gehoeren deshalb in eine einzige Liste.
 const WRITE_TOOL_NAMES = ['write_file', 'edit_file', ...CALENDAR_TOOL_NAMES];
 
+// Die beiden Umfänge, in denen das Modell Werkzeuge bekommt. `agent` ist der
+// bisherige Stand mit dem festen Arbeitsverzeichnis, `termine` nur der Kalender.
+// Der Wert kommt aus der Konfiguration und gilt über einen Neustart hinweg, weil
+// er eine Absicht beschreibt und nicht eine Sitzung.
+// Das Backend entscheidet, was daraus folgt; diese Liste hier dient nur der
+// Anzeige und der Prüfung von Schreibvorgängen.
+const SCOPE_NAMES = ['agent', 'termine'];
+const PROVIDER_NAMES = ['remote', 'local'];
+
+// Woher die Modelle kommen. Das ist keine Sitzungseinstellung wie der
+// Agentenmodus, sondern ein gespeicherter Zustand: Wer auf das lokale Ollama
+// wechselt, will das nach einem Neustart wieder so vorfinden.
+//
+// `remote` nimmt die eingetragene Adresse, `local` immer den lokalen Rechner.
+// Beim lokalen Provider gilt der Terminumfang, egal was gespeichert ist – das
+// Backend setzt das durch, und dieser Wert hier folgt ihm nur für die Anzeige.
+let provider = 'remote';
+
+function lokalesOllama() {
+    return provider === 'local';
+}
+
+// Was die Oberfläche zu einem Provider sagt. Die Wörter sind dieselben wie in der
+// Auswahl im Kopf – „Server“ und „Lokal“ –, damit die Kopfzeile und der Chat
+// nicht verschiedene Namen für dieselbe Sache verwenden. Für einen ganzen Satz
+// wird das noch ergänzt: „das lokale Ollama“ liest sich, „das Lokal“ nicht.
+function providername(art) {
+    return art === 'local' ? 'lokales Ollama' : 'entferntes Ollama';
+}
 // Zustand des Agentenmodus. Der Modus gilt nur für diese Sitzung: Nach einem
 // Neustart wird bewusst wieder normal gechatten, damit die Anwendung nie
-// ungefragt Werkzeuge anbietet. Dasselbe gilt für den Schreibmodus.
-const agent = { enabled: false, root: '', maxSteps: 8, toolset: null, writeEnabled: false, writeCount: 0, maxWrites: 0, maxWriteBytes: 0 };
+// ungefragt Werkzeuge anbietet. Dasselbe gilt für den Schreibmodus. Im
+// Terminumfang ist es andersherum: Dort ist der Umfang die Freischaltung, und
+// die Werkzeugschleife läuft ohne diesen Sitzungsschalter.
+const agent = { enabled: false, scope: 'agent', root: '', maxSteps: 8, toolset: null, writeEnabled: false, writeCount: 0, maxWrites: 0, maxWriteBytes: 0 };
+
+// Läuft die Werkzeugschleife? Im Terminumfang ja, weil der Umfang die
+// Kalenderwerkzeuge mitbringt und es dort nichts anderes gibt.
+function werkzeugschleifeAktiv() {
+    return agent.scope === 'termine' || agent.enabled;
+}
+
+function umfangsname(scope) {
+    return scope === 'termine' ? 'Terminumfang' : 'Agentenmodus';
+}
+
+// Der Text für `/scope`. Er nennt immer beide Umfänge mit dem Weg zurück, weil
+// der eingestellte sonst nur in der Konfiguration steht und im Chat nicht
+// auffindbar ist.
+function umfangstext(scope, config = agent) {
+    if (scope === 'termine') {
+        return 'Umfang: Terminumfang. Das Modell bekommt nur die vier Kalenderwerkzeuge – Termine '
+            + 'auflisten, anlegen, ändern und löschen. Es kann keine Dateien lesen oder schreiben, und ein '
+            + 'Arbeitsverzeichnis ist nicht nötig. Termine ändert es nur nach Vorschau und deiner Freigabe. '
+            + (calendar.status?.logged_in_hint
+                ? 'Der Kalender ist angemeldet.'
+                : 'Achtung: Ohne Anmeldung über /calendar gibt es kein Werkzeug. ')
+            + 'Umfang dauerhaft eingestellt. Mit /scope agent kommst du zu den Dateiwerkzeugen zurück.';
+    }
+
+    return `Umfang: Agentenmodus. Das Modell kann die Dateiwerkzeuge benutzen${
+        config.root ? `, begrenzt auf ${config.root}` : ', sobald ein Arbeitsverzeichnis gesetzt ist'
+    }${config.writeEnabled ? '. Schreibende Werkzeuge sind für diese Sitzung freigegeben' : ''}. `
+        + 'Mit /scope termine beschränkst du es auf den Kalender.';
+}
+
+// Wie der laufende Zug im Chat heißt. Im Terminumfang gibt es kein
+// Arbeitsverzeichnis, und ein Text, der davon spricht, wäre dort falsch.
+function zugname(termine) {
+    return termine ? 'Terminlauf' : 'Agentenlauf';
+}
 let cancelRequested = false;
 
 // Ein einziger Systemeintrag für den ganzen Vorgang: Er wird bei Erfolg oder
@@ -173,15 +241,18 @@ function setServerStatus(state, label) {
     serverStatus.className = `server-status ${state}`;
     serverStatus.textContent = label;
     // Nur ein wirklich ausgefallener Server bekommt den Neustart angeboten. Bei
-    // einer Funkstelle waere der Vorschlag falsch und ärgerlich.
+    // einer Funkstelle waere der Vorschlag falsch und ärgerlich. Im lokalen
+    // Provider beides nicht: Hier gibt es keinen Server im Netz zu starten und
+    // keine Adresse einzutragen – beides hätte keine Wirkung, also gar keine
+    // Wirkung zu behaupten.
     const isOffline = state === 'offline';
-    startServerBtn.hidden = !isOffline;
-    startServerBtn.disabled = !isOffline;
+    startServerBtn.hidden = !isOffline || lokalesOllama();
+    startServerBtn.disabled = !isOffline || lokalesOllama();
     // Der Knopf erscheint, wenn etwas zu reparieren ist. Beim Start wäre er eine
     // Sekunde lang da, ohne dass jemand etwas ändern müsste; bei „instabel“ ist er
     // da, denn eine schwankende Verbindung ist manchmal genau das Symptom einer
     // falschen Adresse.
-    serverUrlBtn.hidden = !isOffline && state !== 'unstable';
+    serverUrlBtn.hidden = lokalesOllama() || (!isOffline && state !== 'unstable');
     serverUrlBtn.disabled = state === 'checking' || state === 'starting';
     checkServerBtn.disabled = state === 'checking' || state === 'starting';
 }
@@ -337,6 +408,111 @@ function starteModelllistenWiederholung() {
     }, MODELLLISTE_PAUSE_MS);
 }
 
+// ------------------------------------------------------------------- Provider
+//
+// Der Provider beantwortet die Frage „woher kommen die Modelle". Er ist die
+// bewusste Alternative dazu, die Adresse im Chat umzuschreiben: Dort bleibt der
+// Verlauf des anderen Servers stehen und die Kopfzeile zeigt zwischendurch den
+// falschen Server. Hier bleibt die eingetragene Adresse unangetastet, und der
+// Umfang wird mitgezogen, weil das lokale Modell nur den Terminumfang kennt.
+
+/**
+ * Stellt auf einen Provider um und lädt alles neu, was daran hängt.
+ *
+ * Derselbe Weg für Auswahl im Kopf und für `/provider`: Zwei Wege zur selben
+ * Sache würden auseinanderlaufen, sobald einer von ihnen etwas vergisst.
+ */
+async function wechsleProvider(art, { fragen = true } = {}) {
+    if (!PROVIDER_NAMES.includes(art)) {
+        appendMessageToUI('system', usageHint('provider'));
+        return false;
+    }
+
+    if (art === provider) {
+        appendMessageToUI('system', `Es läuft bereits ${providername(art)}.`);
+        return false;
+    }
+
+    if (fragen && !window.confirm(`Auf ${providername(art)} umstellen?`)) {
+        // Die Auswahl im Kopf zurücknehmen: Sie zeigt den Provider, und ein
+        // stehengebliebener Wert wäre eine Anzeige ohne Wirkung.
+        providerSelect.value = provider;
+        appendMessageToUI('system', 'Provider unverändert.');
+        return false;
+    }
+
+    const vorher = provider;
+    providerSelect.disabled = true;
+
+    try {
+        provider = await invoke('set_provider', { provider: art });
+        providerSelect.value = provider;
+
+        // Der Umfang kann mit dem Provider wechseln: Lokal gibt es nur den
+        // Terminumfang. Das Backend entscheidet das, hier wird nur nachgezogen.
+        const vorherigerUmfang = agent.scope;
+        agent.toolset = null;
+        await refreshAgentConfig();
+        setAgentMode(agent.enabled);
+
+        // Der alte Server und der neue haben nichts miteinander zu tun. Der
+        // Verlauf des anderen bliebe sonst beim Start wieder da und liefe in
+        // Antworten, die es nicht gab.
+        if (vorher !== provider) {
+            messageHistory = [];
+            await invoke('delete_chat_history').catch(() => {});
+            updateContextUsage();
+        }
+
+        // Die Modelle des anderen Servers dürfen keinen Moment lang auswählbar
+        // sein: Eine Anfrage mit einem Namen, den der neue Server nicht kennt,
+        // ergäbe nur einen Fehler.
+        modelSelect.replaceChildren(new Option('Modelle werden geladen ...', ''));
+        modelSelect.disabled = true;
+        sendBtn.disabled = true;
+
+        const modelle = await loadModels();
+
+        const teile = [`Provider: ${providername(provider)}.`];
+        if (vorherigerUmfang !== agent.scope) {
+            teile.push(`Umfang: ${umfangsname(agent.scope)} – im lokalen Provider gibt es keine Dateiwerkzeuge.`);
+        }
+        if (vorher !== provider) {
+            teile.push('Chatverlauf zurückgesetzt.');
+        }
+        teile.push(modelle === null
+            ? 'Der Server antwortet nicht – die Modellliste konnte nicht geladen werden.'
+            : (modelle.length === 0
+                ? 'Der Server ist erreichbar, hat aber keine Modelle.'
+                : `${modelle.length} Modell(e) verfügbar.`));
+
+        appendMessageToUI('system', teile.join(' '));
+        return true;
+    } catch (error) {
+        providerSelect.value = provider;
+        provider = vorher;
+        appendMessageToUI('system', `Fehler beim Wechsel des Providers: ${error}`);
+        return false;
+    } finally {
+        providerSelect.disabled = false;
+    }
+}
+
+// Liest den eingestellten Provider und stellt die Auswahl darauf ein. Läuft vor
+// dem ersten Laden der Modelle, damit die Kopfzeile nicht kurz den falschen
+// Server ankündigt.
+async function ladeProvider() {
+    try {
+        provider = await invoke('get_provider');
+    } catch (error) {
+        console.error('Provider nicht lesbar:', error);
+        provider = 'remote';
+    }
+
+    providerSelect.value = provider;
+    return provider;
+}
+
 // Beim Start soll ohne Mausklick getippt werden können. WebKitGTK setzt den
 // Fokus beim ersten Zeichnen des Fensters gern wieder auf das Dokument zurück,
 // und beim Start ist das Fenster womöglich noch gar nicht fokussiert. Deshalb
@@ -463,15 +639,18 @@ async function zeigeErsteinrichtung() {
     focusPromptInput();
 }
 
-// Reihenfolge: Erst `loadModels`, dann die Anleitung. Sonst überschreiben sich
-// beide Meldungen in der Kopfzeile – die Anleitung erscheint, während das Backend
-// noch prüft, und der Serverzustand wechselt zurück auf „Prüfe ...“.
+// Reihenfolge: Erst der Provider, dann `loadModels`, dann die Anleitung. Ohne den
+// Provider zuerst würde die Kopfzeile für einen Moment den falschen Server
+// ankündigen. Und die beiden Meldungen überschreiben sich sonst, weil die
+// Anleitung erscheint, während das Backend noch prüft, und der Serverzustand
+// wechselt zurück auf „Prüfe ...“.
 //
 // `loadModels` fängt seine Fehler selbst ab und liefert bei einem Ausfall `null`,
 // ein Ablehnen käme nur bei einem Fehler in Mimir selbst. Deshalb genügt ein
 // `finally`: Ob der Server da ist oder nicht, entscheidet `get_einrichtung`, und
 // das fragt die Anleitung selbst.
-loadModels()
+ladeProvider()
+    .finally(loadModels)
     .finally(zeigeErsteinrichtung)
     .catch((error) => console.error('Modelle nicht ladbar:', error));
 focusPromptInput();
@@ -564,6 +743,20 @@ function requestSshPassword(target) {
 }
 
 async function startOllamaViaSsh() {
+    // Ein Server auf diesem Rechner wird nicht über SSH gestartet. Ohne diese
+    // Prüfung liefe der Knopf im lokalen Provider an einem Rechner im Netz
+    // vorbei und meldete danach einen Erfolg, der nichts gebracht hat.
+    if (lokalesOllama()) {
+        appendMessageToUI(
+            'system',
+            'Im lokalen Provider wird kein Server über SSH gestartet – hier läuft das Modell auf '
+            + 'diesem Rechner. Läuft hier kein Ollama, wird es mit `sudo pacman -S ollama` '
+            + 'installiert und mit `ollama serve` gestartet. Mit /provider remote steht der '
+            + 'SSH-Weg wieder zur Verfügung.'
+        );
+        return;
+    }
+
     isGenerating = true;
     setServerStatus('starting', 'Server: SSH startet ...');
     appendMessageToUI('system', 'SSH-Startbefehl wird ausgeführt ...');
@@ -693,11 +886,25 @@ const COMMAND_HELP = [
     {
         title: 'Ollama-Server',
         entries: [
+            {
+                name: '/provider',
+                text: 'Zeigt oder stellt ein, woher die Modelle kommen. Die Auswahl „Ollama“ im '
+                    + 'Kopf steht auf „Server“ – dann nimmt Mimir die eingetragene Adresse aus dem '
+                    + 'Netz – oder auf „Lokal“, dann das Ollama auf diesem Rechner. Beides entspricht '
+                    + '/provider remote und /provider local. Die Wahl bleibt über einen Neustart stehen, '
+                    + 'und die eingetragene Adresse wird dabei nicht verändert. Lokal gibt es nur den '
+                    + 'Terminumfang: Dort läuft das Modell auf diesem Rechner und bekommt keine '
+                    + 'Dateiwerkzeuge – mit /provider remote kommst du zu denen zurück.',
+                usage: '/provider [remote|local]',
+            },
+            { name: '/provider remote', text: 'Entferntes Ollama aus dem Netz, mit Dateiwerkzeugen' },
+            { name: '/provider local', text: 'Ollama auf diesem Rechner, nur Kalenderwerkzeuge' },
             { name: '/server-status', text: 'Prüft die Erreichbarkeit und aktualisiert die Modellliste' },
-            { name: '/server-start', text: 'Startet Ollama über das konfigurierte SSH-Ziel' },
+            { name: '/server-start', text: 'Startet Ollama über das konfigurierte SSH-Ziel, nur bei /provider remote' },
             {
                 name: '/server-url',
-                text: 'Zeigt die aktuell konfigurierte Server-URL',
+                text: 'Zeigt die aktuell konfigurierte Server-URL – im lokalen Provider die Adresse '
+                    + 'dieses Rechners. Ändern lässt sie sich nur beim entfernten.',
                 usage: '/server-url <URL>',
             },
             { name: '/server-url <URL>', text: 'Ändert die Server-URL dauerhaft nach Bestätigung' },
@@ -734,9 +941,21 @@ const COMMAND_HELP = [
             },
             {
                 name: '/agent-write',
-                text: 'Gibt schreibende Werkzeuge frei oder sperrt sie wieder; jeder Vorgang wird als Unterschied gezeigt. Bei angemeldetem Kalender kommen create_calendar_event, update_calendar_event und delete_calendar_event dazu; Termine lassen sich damit anlegen, ändern und löschen – jeweils nach Vorschau und Freigabe. Bei Terminen lassen sich auch Erinnerung und Kategorie angeben, etwa „5 Minuten vorher“ oder „Arbeit“. Teilnehmer und Anlagen nicht.',
+                text: 'Gibt schreibende Werkzeuge frei oder sperrt sie wieder; jeder Vorgang wird als Unterschied gezeigt. Bei angemeldetem Kalender kommen create_calendar_event, update_calendar_event und delete_calendar_event dazu; Termine lassen sich damit anlegen, ändern und löschen – jeweils nach Vorschau und Freigabe. Bei Terminen lassen sich auch Erinnerung und Kategorie angeben, etwa „5 Minuten vorher“ oder „Arbeit“. Tageszeiten wie „früh“ und „mittags“ liest Mimir selbst: früh wird 8 Uhr, mittags 12 Uhr, abends 18 Uhr. Teilnehmer und Anlagen nicht.',
                 usage: '/agent-write',
             },
+{
+                name: '/scope',
+                text: 'Zeigt oder stellt ein, wie weit das Modell reichen darf. Im Agentenmodus sind es die '
+                    + 'Dateiwerkzeuge im festen Arbeitsverzeichnis, im Terminumfang nur die vier Kalenderwerkzeuge – '
+                    + 'dann ohne Dateizugriff und ohne Arbeitsverzeichnis. Der Terminumfang gilt über einen Neustart '
+                    + 'hinweg und gibt die Kalenderwerkzeuge ohne /agent und ohne /agent-write frei; jeder Vorgang '
+                    + 'wird trotzdem vorher als Unterschied gezeigt. Womit das Modell Termine anlegt, hängt an den '
+                    + 'Kalendernamen, die es in der Anweisung sieht – ein erfundener Name wird abgelehnt.',
+                usage: '/scope [agent|termine]',
+            },
+            { name: '/scope agent', text: 'Dateiwerkzeuge im Arbeitsverzeichnis wie bisher' },
+            { name: '/scope termine', text: 'Nur die Kalenderwerkzeuge, ohne Dateizugriff' },
             {
                 name: '/agent-dir',
                 text: 'Zeigt das feste Arbeitsverzeichnis und die maximale Schrittzahl',
@@ -840,22 +1059,30 @@ function renderTools(toolset) {
     const lesend = alle.filter((tool) => !tool.schreibt);
     const schreibend = alle.filter((tool) => tool.schreibt);
     const angemeldet = Boolean(calendar.status?.logged_in_hint);
+    const termine = agent.scope === 'termine';
     const box = document.createElement('div');
     box.className = 'help tools';
 
     const kopf = document.createElement('p');
     kopf.className = 'help-intro';
     // Das Arbeitsverzeichnis steht in der Kopfzeile: Es ist die Grenze, an der
-    // das Modell scheitert, und man sucht es sonst in den Einstellungen.
-    kopf.textContent = agent.writeEnabled
-        ? 'Das Modell darf lesen und schreiben. Jeder Aufruf wird bestätigt, jeder Schreibvorgang als Unterschied gezeigt.'
-        : 'Das Modell darf nur lesen. Jeder Aufruf wird bestätigt.';
+    // das Modell scheitert, und man sucht es sonst in den Einstellungen. Im
+    // Terminumfang gibt es diese Grenze nicht, und eine Zeile „nicht gesetzt"
+    // täte dort so, als fehle etwas.
+    kopf.textContent = termine
+        ? 'Terminumfang: Das Modell darf ausschließlich den Kalender lesen und verändern. '
+            + 'Es kann keine Dateien erreichen, und jeder Aufruf wird bestätigt, jeder Schreibvorgang als Unterschied gezeigt.'
+        : (agent.writeEnabled
+            ? 'Das Modell darf lesen und schreiben. Jeder Aufruf wird bestätigt, jeder Schreibvorgang als Unterschied gezeigt.'
+            : 'Das Modell darf nur lesen. Jeder Aufruf wird bestätigt.');
     box.appendChild(kopf);
 
-    const pfad = document.createElement('p');
-    pfad.className = 'tools-root';
-    pfad.textContent = agent.root || 'nicht gesetzt';
-    box.appendChild(pfad);
+    if (!termine) {
+        const pfad = document.createElement('p');
+        pfad.className = 'tools-root';
+        pfad.textContent = agent.root || 'nicht gesetzt';
+        box.appendChild(pfad);
+    }
 
     const gruppe = (titel, eintraege, hinweis) => {
         if (eintraege.length === 0) {
@@ -903,7 +1130,18 @@ function renderTools(toolset) {
             : 'Für list_calendar_events muss Mimir mit /calendar angemeldet sein.',
     );
 
-    if (agent.writeEnabled) {
+    if (termine) {
+        // Im Terminumfang sind die drei schreibenden Kalenderwerkzeuge da und
+        // die zwei Dateiwerkzeuge nicht. Beide Fälle als „an" oder „gesperrt"
+        // zu beschriften wäre falsch: Es gibt nichts zu freischalten.
+        gruppe(
+            `Schreibend (${schreibend.length})`,
+            schreibend,
+            'Jeder Vorgang wird vor dem Schreiben als Unterschied gezeigt und wartet auf deine '
+            + 'Freigabe. Teilnehmer, Anlagen und Serientermine bleiben Nextcloud vorbehalten. '
+            + 'Termine lassen sich über Mimir nicht zurücknehmen.',
+        );
+    } else if (agent.writeEnabled) {
         gruppe(
             `Schreibend (${schreibend.length})`,
             schreibend,
@@ -1232,6 +1470,117 @@ async function handleChatCommand(text) {
         return;
     }
 
+    if (command === 'provider') {
+        if (args.length > 1) {
+            appendMessageToUI('system', usageHint('provider'));
+            return;
+        }
+
+        // Ohne Argument wird nur gezeigt, was eingestellt ist. Der Provider
+        // entscheidet, wo die Modelle herkommen, und der steht sonst nirgends.
+        if (args.length === 0) {
+            try {
+                const url = await invoke('get_server_url');
+                const umfang = (await refreshAgentConfig()).scope;
+                appendMessageToUI(
+                    'system',
+                    `Provider: ${providername(provider)} – ${url}. Umfang: ${umfangsname(umfang)}.`
+                    + (lokalesOllama()
+                        ? ' Lokal gibt es nur den Terminumfang; mit /provider remote kommst du zu den Dateiwerkzeugen.'
+                        : '')
+                );
+            } catch (error) {
+                appendMessageToUI('system', `Fehler: ${error}`);
+            }
+            return;
+        }
+
+        await wechsleProvider(args[0].toLowerCase());
+        return;
+    }
+
+    if (command === 'scope') {
+        if (args.length > 1) {
+            appendMessageToUI('system', usageHint('scope'));
+            return;
+        }
+
+        // Der lokale Provider gibt keine Dateiwerkzeuge heraus. Das Backend
+        // lehnt den Wechsel ab; hier steht der Grund vorher im Chat, statt ihn
+        // erst nach dem Bestätigungsfenster zu erfahren.
+        if (args.length === 1 && args[0].toLowerCase() === 'agent' && lokalesOllama()) {
+            appendMessageToUI(
+                'system',
+                'Im lokalen Provider gibt es nur den Terminumfang: Das Modell läuft auf diesem '
+                + 'Rechner und bekommt dort keine Dateiwerkzeuge. Mit /provider remote kommst du '
+                + 'zu den Dateiwerkzeugen zurück.'
+            );
+            return;
+        }
+
+        // Ohne Argument wird nur gezeigt, was eingestellt ist. Das ist keine
+        // Nebenbemerkung: Der Umfang entscheidet, welche Werkzeuge das Modell
+        // sieht, und der steht in keinem Fenster.
+        if (args.length === 0) {
+            try {
+                const config = await refreshAgentConfig();
+                appendMessageToUI('system', umfangstext(config.scope, config));
+            } catch (error) {
+                appendMessageToUI('system', `Fehler: ${error}`);
+            }
+            return;
+        }
+
+        const gewaehlt = args[0].toLowerCase();
+
+        if (!SCOPE_NAMES.includes(gewaehlt)) {
+            appendMessageToUI('system', usageHint('scope'));
+            return;
+        }
+
+        try {
+            const config = await refreshAgentConfig();
+
+            if (config.scope === gewaehlt) {
+                appendMessageToUI('system', `Der Umfang ist bereits ${umfangsname(config.scope)}.`);
+                return;
+            }
+
+            const frage = gewaehlt === 'termine'
+                ? 'Terminumfang einstellen? Das Modell bekommt dann nur die vier Kalenderwerkzeuge. '
+                    + 'Es kann keine Dateien lesen oder schreiben, und es braucht dafür kein Arbeitsverzeichnis. '
+                    + 'Termine legt es an, ändert und löscht es, jeweils nach Vorschau und deiner Freigabe. '
+                    + 'Das gilt über einen Neustart hinweg.'
+                : 'Agentenmodus einstellen? Das Modell bekommt wieder die Dateiwerkzeuge im festen '
+                    + `Arbeitsverzeichnis${config.root ? ` (${config.root})` : ''}. Ohne Arbeitsverzeichnis `
+                    + 'gibt es dort nichts zu lesen. Termine bleiben möglich.';
+
+            if (!window.confirm(frage)) {
+                appendMessageToUI('system', 'Umfang unverändert.');
+                return;
+            }
+
+            // Ohne `root` würde das Arbeitsverzeichnis mitgeschickt und damit
+            // beim bloßen Umfangwechsel überschrieben. Das Backend behält die
+            // eingestellte Größe, wenn nichts angegeben wird, und das gilt hier
+            // genauso für den Umfang.
+            const neu = await invoke('set_agent_config', {
+                root: config.root,
+                maxSteps: null,
+                scope: gewaehlt,
+            });
+
+            // Das Werkzeugangebot hängt am Umfang, also muss der Cache weg.
+            agent.toolset = null;
+            agent.scope = gewaehlt;
+            setAgentMode(agent.enabled);
+            appendMessageToUI('system', umfangstext(neu.scope, neu));
+        } catch (error) {
+            appendMessageToUI('system', `Fehler: ${error}`);
+        }
+        return;
+    }
+
     if (command === 'agent-dir') {
         if (args.length === 0) {
             try {
@@ -1278,6 +1627,11 @@ async function handleChatCommand(text) {
     if (command === 'agent-write') {
         if (args.length > 0) {
             appendMessageToUI('system', usageHint('agent-write'));
+            return;
+        }
+
+        if (agent.scope === 'termine') {
+            appendMessageToUI('system', 'Im Terminumfang gibt es keine Dateiwerkzeuge, die freizugeben wären. Termine legt das Modell an, ändert und löscht sie nach Vorschau und deiner Freigabe. Mit /scope agent wird der Schreibmodus wieder nötig.');
             return;
         }
 
@@ -2946,25 +3300,36 @@ async function readAttachments(files) {
 
 function setAgentMode(enabled) {
     agent.enabled = enabled;
-    agentToggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-    agentToggleBtn.textContent = enabled ? 'Agent: an' : 'Agent: aus';
-    agentToggleBtn.title = enabled
-        ? `Agentenmodus: nur lesende Werkzeuge in ${agent.root}`
-        : 'Agentenmodus mit lesenden Werkzeugen einschalten';
+    const termine = agent.scope === 'termine';
+    agentToggleBtn.setAttribute('aria-pressed', termine || enabled ? 'true' : 'false');
+    agentToggleBtn.textContent = termine ? 'Termine: an' : (enabled ? 'Agent: an' : 'Agent: aus');
+    agentToggleBtn.title = termine
+        ? 'Terminumfang: nur Kalenderwerkzeuge, kein Dateizugriff'
+        : (enabled
+            ? `Agentenmodus: nur lesende Werkzeuge in ${agent.root}`
+            : 'Agentenmodus mit lesenden Werkzeugen einschalten');
+    // Der Schalter ist im Terminumfang gegenstandslos: Der Umfang selbst gibt
+    // die Kalenderwerkzeuge frei, und ein Schalter, der hier nichts änderte,
+    // wäre eine Anzeige ohne Wirkung.
+    agentToggleBtn.disabled = termine;
 }
 
 async function refreshAgentConfig() {
     const config = await invoke('get_agent_config');
     agent.root = config.root || '';
     agent.maxSteps = Number(config.max_steps) || 0;
+    // Das Backend entscheidet, welche Werte es kennt; hier wird nichts geraten.
+    // Ein unbekannter Wert fällt auf den Agentenmodus zurück, weil der die
+    // Werkzeuge nur nach ausdrücklicher Freischaltung anbietet.
+    agent.scope = SCOPE_NAMES.includes(config.scope) ? config.scope : 'agent';
     setAgentMode(agent.enabled);
     return config;
 }
 
 // Schemata und Systemprompt kommen aus dem Backend, damit Anweisung und
 // Werkzeugimplementierung nicht auseinanderlaufen können. Nach einem Wechsel des
-// Arbeitsverzeichnisses wird der Cache bewusst verworfen, weil der Prompt den
-// Pfad nennt.
+// Arbeitsverzeichnisses oder des Umfangs wird der Cache bewusst verworfen, weil
+// der Prompt den Pfad nennt und das Angebot vom Umfang abhängt.
 async function loadAgentToolset() {
     if (agent.toolset) {
         return agent.toolset;
@@ -3177,7 +3542,25 @@ function renderDiff(container, before, after) {
 // daraus folgenden Unterschied. Die Vorschau entsteht im Backend aus derselben
 // Funktion wie das Schreiben selbst, sie kann also nicht von der wirklichen
 // Änderung abweichen.
-async function requestWriteApproval(call) {
+// Die Worte des Benutzers gehören zum Aufruf, weil Mimir daran prüft, was das
+// Modell erfunden hat: Ein Ort oder ein Kalender, den der Benutzer nicht genannt
+// hat, kommt nicht in den Termin. Ohne diese Angabe kann die Prüfung nichts
+// entscheiden und ließe jedes Feld stehen.
+//
+// Gesucht ist die letzte Nachricht des Benutzers aus dieser Unterhaltung – nicht
+// die ganze Unterhaltung. Sonst würde ein Ort, den der Benutzer vor drei Fragen
+// genannt hat, heute als genannt gelten.
+function letzteBenutzernachricht(working) {
+    for (let i = working.length - 1; i >= 0; i -= 1) {
+        if (working[i].role === 'user') {
+            return working[i].content || '';
+        }
+    }
+
+    return '';
+}
+
+async function requestWriteApproval(call, working) {
     const name = call?.function?.name ?? 'unbekannt';
 
     let preview;
@@ -3186,6 +3569,7 @@ async function requestWriteApproval(call) {
         preview = await invoke('preview_tool_call', {
             name,
             arguments: call.function.arguments,
+            benutzertext: letzteBenutzernachricht(working),
         });
     } catch (error) {
         return { approved: false, previewError: `Der Schreibvorgang ist nicht durchführbar: ${error}` };
@@ -3245,7 +3629,7 @@ async function runWriteCall(call, steps, working, label) {
     const name = call?.function?.name ?? 'unbekannt';
     const path = call?.function?.arguments?.path ?? '';
     const isEvent = CALENDAR_TOOL_NAMES.includes(name);
-    const decision = await requestWriteApproval(call);
+    const decision = await requestWriteApproval(call, working);
 
     if (decision.previewError) {
         const entry = addAgentStep(steps, call, decision.previewError);
@@ -3273,7 +3657,11 @@ async function runWriteCall(call, steps, working, label) {
     updateAgentStepsHead();
 
     try {
-        const output = await invoke('execute_tool', { name, arguments: call.function.arguments });
+        const output = await invoke('execute_tool', {
+            name,
+            arguments: call.function.arguments,
+            benutzertext: letzteBenutzernachricht(working),
+        });
         setAgentStepResult(entry, `${output.summary}${output.truncated ? ' (gekürzt)' : ''}`);
 
         if (isEvent) {
@@ -3406,6 +3794,9 @@ function toChatHistory(working) {
         .map((entry) => ({ role: entry.role, content: entry.content }));
 }
 
+// Namen im Chat: Der umlaufende Zug heißt „Terminlauf", wenn nur der Kalender
+// beteiligt ist. Eine Fehlermeldung, die vom Agentenmodus spricht, wäre in einem
+// Zug richtig falsch, in dem es gar kein Arbeitsverzeichnis gibt.
 async function runAgentTurn(model, messages, bubble) {
     setGenerating(true);
     cancelRequested = false;
@@ -3414,7 +3805,10 @@ async function runAgentTurn(model, messages, bubble) {
     try {
         await refreshAgentConfig();
 
-        if (!agent.root) {
+        const termine = agent.scope === 'termine';
+
+        // Das Arbeitsverzeichnis wird nur dort gebraucht, wo gelesen wird.
+        if (!termine && !agent.root) {
             await renderResult(bubble, 'Für den Agentenmodus fehlt das Arbeitsverzeichnis. Setze es mit /agent-dir <pfad>.');
             return;
         }
@@ -3441,7 +3835,7 @@ async function runAgentTurn(model, messages, bubble) {
 
         for (let step = 0; step < agent.maxSteps; step += 1) {
             if (cancelRequested) {
-                appendMessageToUI('system', 'Agentenlauf abgebrochen.');
+                appendMessageToUI('system', `${zugname(termine)} abgebrochen.`);
                 return;
             }
 
@@ -3480,7 +3874,7 @@ async function runAgentTurn(model, messages, bubble) {
 
             for (const call of result.toolCalls) {
                 if (cancelRequested) {
-                    appendMessageToUI('system', 'Agentenlauf abgebrochen.');
+                    appendMessageToUI('system', `${zugname(termine)} abgebrochen.`);
                     return;
                 }
 
@@ -3512,6 +3906,7 @@ async function runAgentTurn(model, messages, bubble) {
                     const output = await invoke('execute_tool', {
                         name: name,
                         arguments: call.function.arguments,
+                        benutzertext: letzteBenutzernachricht(working),
                     });
                     setAgentStepResult(entry, `${output.summary}${output.truncated ? ' (gekürzt)' : ''}\n\n${output.content}`);
                     working.push({ role: 'tool', tool_name: name, content: output.content });
@@ -3527,12 +3922,9 @@ async function runAgentTurn(model, messages, bubble) {
 
         messageHistory = toChatHistory(working);
         await persistHistory();
-        await renderResult(
-            bubble,
-            `${lastText}\n\n[Agentenlauf beendet: maximale Schrittzahl ${agent.maxSteps} erreicht. Mit /agent-dir oder /agent lässt sich das Arbeitsverzeichnis bzw. der Modus anpassen.]`,
-        );
+        await renderResult(bubble, `${lastText}\n\n[${zugname(termine)} beendet: maximale Schrittzahl ${agent.maxSteps} erreicht. ${termine ? 'Mit /scope agent kommst du zurück zu den Dateiwerkzeugen.' : 'Mit /agent-dir oder /agent lässt sich das Arbeitsverzeichnis bzw. der Modus anpassen.'}]`);
     } catch (error) {
-        await renderResult(bubble, `Der Agentenlauf ist fehlgeschlagen: ${error}`);
+        await renderResult(bubble, `Der ${zugname(termine)} ist fehlgeschlagen: ${error}`);
     } finally {
         setGenerating(false);
         // Der Agentenlauf holt den Fokus auch nach einem Fehler oder Abbruch
@@ -3659,9 +4051,9 @@ function attachRetryAction(bubble, onRetry) {
 
 // Ein Chat-Versuch inklusive Abschluss-UI; erneut aufrufbar für Retries
 async function performChat(model, messages, bubble) {
-    // Im Agentenmodus übernimmt die Werkzeugschleife; im Chat bleibt es bei
+    // Mit Werkzeugen übernimmt die Schleife; im einfachen Chat bleibt es bei
     // genau einer Anfrage.
-    if (agent.enabled) {
+    if (werkzeugschleifeAktiv()) {
         await runAgentTurn(model, messages, bubble);
         return;
     }
@@ -3825,6 +4217,11 @@ agentToggleBtn.addEventListener('click', async () => {
     try {
         await refreshAgentConfig();
 
+        if (agent.scope === 'termine') {
+            appendMessageToUI('system', 'Im Terminumfang sind die Kalenderwerkzeuge ohnehin da. Der Schalter gilt nur für das Arbeitsverzeichnis; mit /scope agent kommst du zurück.');
+            return;
+        }
+
         if (!agent.root) {
             appendMessageToUI('system', 'Es ist kein Arbeitsverzeichnis gesetzt. Erst /agent-dir <pfad> benutzen.');
             return;
@@ -3843,6 +4240,11 @@ agentToggleBtn.addEventListener('click', async () => {
 });
 
 writeToggleBtn.addEventListener('click', async () => {
+    if (agent.scope === 'termine') {
+        appendMessageToUI('system', 'Im Terminumfang gibt es keine Dateiwerkzeuge. Termine ändert das Modell ohnehin nach Vorschau; mit /scope agent wird der Schalter wieder nötig.');
+        return;
+    }
+
     if (!agent.enabled) {
         appendMessageToUI('system', 'Zuerst den Agentenmodus einschalten.');
         return;
@@ -3880,6 +4282,18 @@ writeToggleBtn.addEventListener('click', async () => {
 
 checkServerBtn.addEventListener('click', loadModels);
 startServerBtn.addEventListener('click', startOllamaViaSsh);
+
+// Die Auswahl im Kopf geht denselben Weg wie `/provider`: ein Wechsel ändert
+// Server, Umfang, Modelle und Verlauf, und das an zwei Stellen zu pflegen hieße,
+// dass eines von beidem irgendwann stehen bleibt.
+providerSelect.addEventListener('change', async () => {
+    // Der Wert steht schon auf der neuen Wahl, sobald dieses Ereignis kommt.
+    // `wechsleProvider` stellt ihn zurück, wenn der Benutzer abbricht oder das
+    // Speichern scheitert – deshalb wird hier nichts selbst zurückgesetzt.
+    await wechsleProvider(providerSelect.value, { fragen: true }).catch((error) =>
+        console.error('Providerwechsel fehlgeschlagen:', error)
+    );
+});
 
 // --- Die Adresse des Ollama-Servers ----------------------------------------
 

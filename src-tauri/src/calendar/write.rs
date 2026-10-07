@@ -131,6 +131,13 @@ pub struct EventPlan {
     pub summary: String,
     /// Beginn und Ende in der Zeitzone des Rechners.
     pub when: String,
+    /// Welche Felder das Modell gefüllt hat, obwohl der Benutzer sie nicht
+    /// genannt hat, und die deshalb nicht im Termin stehen.
+    ///
+    /// Leer heißt: nichts verworfen. Das ist der Normalfall, und ein leeres Feld
+    /// wird in der Zusammenfassung **nicht** erwähnt – der Benutzer soll nicht
+    /// jedes Mal lesen, dass nichts ausgelassen wurde.
+    pub verworfen: Vec<String>,
 }
 
 /// Liest ein reines Datum für Ganztagestermine.
@@ -326,6 +333,21 @@ fn mit_uhrzeit(
     }
 
     let Some((stunde, minute)) = stunde_aus(worte) else {
+        // Eine Tageszeit wie „früh" oder „mittags" ist eine echte Angabe und
+        // keine Lücke: Der Benutzer meint den Vormittag, nicht irgendeine
+        // Uhrzeit. Sie wird hier festgelegt, damit aus „übermorgen früh" ein
+        // Termin wird statt einer Rückfrage.
+        //
+        // Aus dem ersten Validierungslauf: Das Modell gab „übermorgen früh" und
+        // „Donnerstagmittag" wörtlich weiter, wie es die Anweisung verlangt, und
+        // Mimir lehnte beide ab. Zurückgewiesen wird hier nichts – nur ergänzt.
+        if let Some((stunde, minute)) = tageszeit_aus(worte) {
+            return Local
+                .from_local_datetime(&tag.and_hms_opt(stunde, minute, 0).expect("Stunde geprüft"))
+                .earliest()
+                .ok_or_else(|| ZEIT_HINWEIS.to_string());
+        }
+
         return Err(format!(
             "Zu „{original}“ fehlt die Uhrzeit. Nenne sie mit, etwa „morgen 14:00“."
         ));
@@ -743,6 +765,74 @@ fn stunde_aus(worte: &[String]) -> Option<(u32, u32)> {
     None
 }
 
+/// Die Tageszeiten, die Deutschland kennt.
+///
+/// Nicht geraten und nicht aus einer Skala errechnet: Für diese sechs Wörter
+/// gibt es eine gebräuchliche Uhrzeit, und sie steht hier. Jede andere
+/// Tageszeitangabe – „vormittags", „gegen Mittag", „am frühen Abend" – bleibt
+/// unbehandelt und führt zur Nachfrage.
+///
+/// Der Sinn ist nicht Bequemlichkeit, sondern eine Fehlerquelle weniger. Ein
+/// geratener Vormittag wäre ein Termin, den der Benutzer nicht bestellt hat,
+/// und die Vorschau wäre die letzte Stelle, an der es auffällt.
+const TAGESZEITEN: [(&str, u32, u32); 7] = [
+    // "nachts" steht am Ende: Es geht bei den Terminen um Schlafenszeiten.
+    ("nachts", 22, 0),
+    ("frühmorgens", 6, 30),
+    ("früh", 8, 0),
+    ("vormittag", 9, 0),
+    ("vormittags", 9, 0),
+    ("mittag", 12, 0),
+    ("abend", 18, 0),
+];
+
+/// Liest eine Tageszeit wie „früh" oder „mittags" als Uhrzeit.
+///
+/// Bewusst **kein** `contains`: „Frühstück" enthält „früh", und daraus 8 Uhr zu
+/// machen wäre eine Fabel. Gesucht wird deshalb nur in ganzen Wörtern.
+fn tageszeit_aus(worte: &[String]) -> Option<(u32, u32)> {
+    for wort in worte {
+        if let Some((_, stunde, minute)) = TAGESZEITEN
+            .iter()
+            .find(|(name, _, _)| *name == reiner(wort))
+        {
+            return Some((*stunde, *minute));
+        }
+    }
+
+    None
+}
+
+/// Setzt ein Ende ohne Tagesangabe auf den Tag des Beginns.
+///
+/// Ein Ende, das nur eine Uhrzeit nennt, ist für sich allein **heute**: „15:00"
+/// heißt nicht Freitag 15:00, sondern heute 15:00. Als Ende eines Termins, der
+/// am Freitag beginnt, läge es damit in der Vergangenheit – und der Termin
+/// würde abgelehnt, obwohl die Angabe des Benutzers genau eine war.
+///
+/// Deshalb wird es hier auf den Tag des Beginns gesetzt. Ein Ende **mit**
+/// Tagesangabe bleibt, wie es ist: „morgen 10 Uhr“ zu einem Termin am Freitag
+/// ist ein Tag später und wird nicht umgedeutet.
+fn ende_am_tag(ende: DateTime<Utc>, start: DateTime<Utc>) -> DateTime<Utc> {
+    if ende.date_naive() >= start.date_naive() {
+        return ende;
+    }
+
+    // Die Uhrzeit kommt in der Zeitzone des Rechners, nicht in UTC:
+    // `parse_term` liefert UTC, und „15:00" ist dort 13:00 – diese Zahl auf den
+    // Tag des Beginns zu legen hübe den Termin eine Stunde verschoben und
+    // wieder vor den Beginn.
+    let start_ort = start.with_timezone(&Local);
+    let ende_zeit = ende.with_timezone(&Local).time();
+
+    Local
+        .from_local_datetime(&start_ort.date_naive().and_time(ende_zeit))
+        .earliest()
+        .map(|lokal| lokal.with_timezone(&Utc))
+        // Kann nicht ausfallen: ein gültiger Tag mit einer gültigen Uhrzeit.
+        .unwrap_or(ende)
+}
+
 /// Zerlegt `14:00` und `14.00`.
 fn mit_doppelpunkt(wort: &str) -> Option<(u32, u32)> {
     let teile: Vec<&str> = wort.split([':', '.']).collect();
@@ -873,6 +963,109 @@ pub fn clean(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// So viele Wörter von mindestens drei Zeichen braucht es, damit eine Prüfung
+/// überhaupt etwas entscheidet.
+///
+/// Drei ist eine bewusst niedrige Schwelle. Sie steht gegen zwei Versuche
+/// gleichzeitig: „Mach morgen einen Termin“ (zwei Wörter) soll nichts prüfen,
+/// und „Trag morgen um 14 Uhr einen Termin ein“ (fünf) soll prüfen. Wer eine
+/// Adresse prüfen will, nennt meistens mehr als zwei Wörter.
+const MIN_WOERTER: usize = 3;
+
+/// Kommt dieses Wort in den Worten des Benutzers vor?
+///
+/// Das ist die Grundlage für das Verwerfen erfundener Felder. Aus dem zweiten
+/// Validierungslauf: Das Modell schickte zu „Mach heute noch einen Anruf bei der
+/// IT, Kategorie Arbeit" zusätzlich einen Kalendernamen, den der Benutzer nie
+/// genannt hatte, und zu „Ich brauche morgen einen Termin mit der Bank" den Ort
+/// „Online". Beides steht danach im Kalender.
+///
+/// Der Vergleich ist bewusst **Wort für Wort**, nicht „ist der Wert ein
+/// Teilstring": `Ort Talstraße 8` enthält nicht `straße`, und eine Adresse, die
+/// sich im Text wiederfindet, soll stehen bleiben. Umgekehrt gilt dasselbe – „Praxis
+/// am Talstraße 8" passt nicht auf „Ort Talstraße 8", weil „Praxis" fehlt.
+///
+/// Groß- und Kleinschreibung, Umlaute, Bindestriche und Punkte werden
+/// überbrückt: „Talstraße" und „Talstrasse" gelten als dasselbe Wort, und
+/// „St.-Nikolaus" soll an „Nikolaus" ankommen.
+fn wort_gefunden(wert: &str, woerter: &[String]) -> bool {
+    let gesucht: Vec<String> = wert
+        .split_whitespace()
+        .map(normalisiere)
+        .filter(|wort| !wort.is_empty())
+        .collect();
+
+    if gesucht.is_empty() {
+        return false;
+    }
+
+    // Gesucht wird in der **normalisierten Fassung des ganzen Satzes**, nicht in
+    // einzelnen Wörtern. „St.-Nikolaus" wird dabei zu „stnikolaus" – würde man
+    // es im Satz des Benutzers „in St. Nikolaus" suchen, stünden dort „st" und
+    // „nikolaus" getrennt und der Vergleich schlüge fehl.
+    //
+    // „Enthalten" statt „gleich": „Stock 2" steckt in „im zweiten Stock" nicht,
+    // das ist aber kein Fehler dieser Prüfung, sondern ein Fall, in dem das
+    // Modell umgerechnet hat – und dafür sind die Zahlenfelder da.
+    gesucht
+        .iter()
+        .all(|wort| woerter.iter().any(|kandidat| kandidat.contains(wort)))
+}
+
+/// Bringt ein Wort auf einen gemeinsamen Nenner, damit verglichen werden kann.
+///
+/// Kleinbuchstaben ohne alles, was kein Buchstabe oder keine Ziffer ist, und
+/// `ß` wird zu `ss`. Ohne das wäre „Talstraße" nie als „Talstrasse" wiederzufinden,
+/// und ein Punkt in einer Abkürzung würde jedes Wort dahinter zerreißen.
+fn normalisiere(wort: &str) -> String {
+    wort.chars()
+        .flat_map(|character| {
+            let klein = character.to_lowercase();
+            if character == 'ß' {
+                return vec!['s', 's'];
+            }
+            klein.filter(|zeichen| zeichen.is_alphanumeric()).collect()
+        })
+        .collect()
+}
+
+/// Die inhaltstragenden Wörter einer Nachricht.
+///
+/// Ohne Zahlen und ohne Einmaleins: Eine Uhrzeit soll nicht daran scheitern, dass
+/// der Benutzer „15" sagte und das Modell „15:00" schrieb. Die Zahl steckt im
+/// Zeitfeld und wird ohnehin strenger geprüft.
+fn benutzerwoerter(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(normalisiere)
+        .filter(|wort| !wort.is_empty())
+        .collect()
+}
+
+/// Soll dieses Feld bleiben, weil der Benutzer es genannt hat?
+///
+/// **Ohne Benutzertext bleibt jedes Feld stehen.** Das ist die wichtige Grenze:
+/// Die Prüfung darf nie etwas entfernen, weil sie ihre Grundlage nicht kennt. Wo
+/// die Worte des Benutzers nicht mitkommen – ein Aufruf aus einem anderen Weg,
+/// ein alter Verlauf –, wird nichts verworfen und nichts gemeldet.
+pub fn feld_gedeckt(wert: &str, benutzertext: &str, felder: &[&str]) -> bool {
+    let woerter = benutzerwoerter(benutzertext);
+
+    // Zu wenig Ausgangstext heißt: nichts prüfen. Ein einzelnes „15" ist keine
+    // Grundlage für eine Wortvergleichsprüfung – damit würde Mimir Orte
+    // verwerfen, nur weil der Benutzer eine Uhrzeit genannt hat.
+    //
+    // Die Schwelle liegt bewusst tief. Sie zu hoch zu setzen hieße, dass ein
+    // kurzer Satz „Termin morgen“ nichts prüfen dürfte, und genau dort erfand
+    // das Modell am meisten. Der Preis der falschen Richtung ist nur ein
+    // stehengebliebener Ort, der zweite ein falscher.
+    if woerter.iter().filter(|wort| wort.len() >= 3).count() < MIN_WOERTER {
+        return true;
+    }
+
+    wert.split_whitespace()
+        .all(|wort| felder.contains(&wort) || wort_gefunden(wort, &woerter))
 }
 
 /// Maskiert die Zeichen, die in einem ICS-Wert eine Bedeutung haben.
@@ -1402,6 +1595,7 @@ pub fn plan_event(
     config: &CalendarConfig,
     verfuegbare_kalender: &[(String, String)],
     arguments: &serde_json::Value,
+    benutzertext: &str,
 ) -> Result<EventPlan, String> {
     let request = EventRequest::from_value(arguments)?;
     let summary = clean(&request.summary);
@@ -1523,11 +1717,14 @@ pub fn plan_event(
         let mut plan = finish_plan(
             config,
             verfuegbare_kalender,
-            &request,
-            start,
-            end,
-            erinnerung,
-            kategorie.as_deref(),
+            &Ausgang {
+                request,
+                start,
+                ende: end,
+                erinnerung,
+                kategorie: &kategorie,
+                benutzertext,
+            },
         )?;
 
         // Bei mehreren Tagen steht die Spanne da, nicht nur der erste Tag.
@@ -1556,12 +1753,21 @@ pub fn plan_event(
     // Format: Ein Modell rechnet Datumsangaben schlecht, also soll es sie gar
     // nicht erst umrechnen müssen.
     let start = parse_term(&request.start)?;
+
+    // Ein Ende ohne Tagesangabe gehört zum selben Tag wie der Beginn.
+    //
+    // Aus dem zweiten Validierungslauf: Für „Leg einen Termin für Freitagmittag
+    // rein" lieferte qwen2.5:7b `start: "Freitag 14:00"` mit `end: "15:00"`.
+    // „15:00" ist für sich allein der heutige Tag – der Termin lag damit in der
+    // Vergangenheit und wurde abgelehnt, obwohl der Benutzer genau eine Angabe
+    // gemacht hatte. Siehe `ende_am_tag`.
+    //
+    // Ein Ende **mit** Tagesangabe bleibt, wie es ist: „morgen 10 Uhr" zu einem
+    // Termin am Freitag ist der nächste Tag und wird nicht umgedeutet.
     let ende = match &request.end {
-        Some(wert) => {
-            // „morgen 10 Uhr“ heißt ohne eigenes Ende bis morgen 10 Uhr; ein
-            // eigenes „heute 14 Uhr“ bleibt, wie es ist.
-            parse_term(wert)?
-        }
+        Some(wert) => ende_am_tag(parse_term(wert)?, start),
+        // Ohne eigenes Ende die Vorgabedauer. „morgen 10 Uhr“ heißt ohne
+        // Angabe bis morgen 10 Uhr.
         None => start + Duration::minutes(DEFAULT_DURATION_MINUTES),
     };
 
@@ -1590,11 +1796,14 @@ pub fn plan_event(
     finish_plan(
         config,
         verfuegbare_kalender,
-        &request,
-        start,
-        ende,
-        erinnerung,
-        kategorie.as_deref(),
+        &Ausgang {
+            request,
+            start,
+            ende,
+            erinnerung,
+            kategorie: &kategorie,
+            benutzertext,
+        },
     )
 }
 
@@ -1614,35 +1823,92 @@ fn zusaetze(erinnerung: Option<i64>, kategorie: Option<&str>) -> String {
 }
 
 /// Setzt Kalender, Kennung und Texte zusammen.
+/// Was die Planung aus dem Auftrag und aus dem Termin selbst macht.
+///
+/// Zusammengefasst, weil `finish_plan` sonst acht Parameter bekäme. Der
+/// Benutzertext steht darin, weil Ort und Beschreibung daran gemessen werden,
+/// ob der Benutzer sie genannt hat – siehe `finish_plan`.
+struct Ausgang<'a> {
+    request: EventRequest,
+    start: DateTime<Utc>,
+    ende: DateTime<Utc>,
+    erinnerung: Option<i64>,
+    kategorie: &'a Option<String>,
+    benutzertext: &'a str,
+}
+
 fn finish_plan(
     config: &CalendarConfig,
     verfuegbar: &[(String, String)],
-    request: &EventRequest,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    erinnerung: Option<i64>,
-    kategorie: Option<&str>,
+    ausgang: &Ausgang<'_>,
 ) -> Result<EventPlan, String> {
+    let Ausgang {
+        request,
+        start,
+        ende: end,
+        erinnerung,
+        kategorie,
+        benutzertext,
+    } = ausgang;
     let (calendar_href, calendar_display) =
         waehle_kalender(config, verfuegbar, request.calendar.as_deref())?;
+
+    // Ort und Kalender fallen weg, wenn der Benutzer sie nicht genannt hat. Sie
+    // stehen beide im Termin, und beide erfindet das Modell gern: Der Ort wird
+    // aus dem Anlass abgeleitet („mit der Bank“ wird zu „Online"), und der
+    // Kalender aus geratenen Namen wie „Arbeitskalender".
+    //
+    // Was der Benutzer **umgerechnet** hat, bleibt: `end` und `reminder` tragen
+    // durch, weil dort das Wegrechnen der Normalfall ist und die Zeit ohnehin
+    // strenger geprüft wird als ein Ort.
+    let mut verworfen: Vec<String> = Vec::new();
+
+    let ort = request
+        .location
+        .as_deref()
+        .map(clean)
+        .filter(|wert| !wert.is_empty())
+        .filter(|wert| feld_gedeckt(wert, benutzertext, &[]))
+        .or_else(|| {
+            if request
+                .location
+                .as_deref()
+                .map(clean)
+                .is_some_and(|wert| !wert.is_empty())
+            {
+                verworfen.push("Ort".to_string());
+            }
+            None
+        });
+
+    let beschreibung = request
+        .description
+        .as_deref()
+        .map(clean)
+        .filter(|wert| !wert.is_empty())
+        .filter(|wert| feld_gedeckt(wert, benutzertext, &[]))
+        .or_else(|| {
+            if request
+                .description
+                .as_deref()
+                .map(clean)
+                .is_some_and(|wert| !wert.is_empty())
+            {
+                verworfen.push("Beschreibung".to_string());
+            }
+            None
+        });
+
     let bereinigt = EventRequest {
         summary: clean(&request.summary),
         start: request.start.clone(),
         end: request.end.clone(),
         all_day: request.all_day,
-        location: request
-            .location
-            .as_deref()
-            .map(clean)
-            .filter(|v| !v.is_empty()),
-        description: request
-            .description
-            .as_deref()
-            .map(clean)
-            .filter(|v| !v.is_empty()),
+        location: ort,
+        description: beschreibung,
         calendar: request.calendar.clone(),
         reminder: request.reminder.clone(),
-        category: kategorie.map(|wert| wert.to_string()),
+        category: kategorie.as_ref().map(|wert| wert.to_string()),
     };
     let request = &bereinigt;
 
@@ -1651,21 +1917,41 @@ fn finish_plan(
         super::client::now().timestamp_millis(),
         UID_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let ics = build_ics(&uid, start, end, request, erinnerung, kategorie);
-    let when = format!("{} bis {}", display_time(start), display_time(end));
+    let ics = build_ics(
+        &uid,
+        *start,
+        *end,
+        request,
+        *erinnerung,
+        kategorie.as_deref(),
+    );
+    let when = format!("{} bis {}", display_time(*start), display_time(*end));
+
+    // Was verworfen wurde, steht in der Zusammenfassung – dort, wo der Benutzer
+    // ohnehin hinsieht, bevor er zustimmt. Ohne diesen Hinweis wäre ein
+    // verschwundener Ort nur schwer zu bemerken.
+    let hinweis = if verworfen.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nNicht übernommen, weil du es nicht genannt hast: {}",
+            verworfen.join(", ")
+        )
+    };
 
     Ok(EventPlan {
         calendar_href,
         summary: format!(
-            "Neuer Termin: {}\n{when}\nKalender {calendar_display}{}",
+            "Neuer Termin: {}\n{when}\nKalender {calendar_display}{}{hinweis}",
             bereinigt.summary,
-            zusaetze(erinnerung, kategorie)
+            zusaetze(*erinnerung, kategorie.as_deref())
         ),
         file_name: format!("{uid}.ics"),
         uid,
         ics,
         when,
         calendar_display,
+        verworfen,
     })
 }
 
@@ -1761,8 +2047,12 @@ fn waehle_kalender(
         return Ok(gewaehlt[0].clone());
     }
 
+    // Der Text ist eine **Frage an den Benutzer**, nicht eine Anweisung an das
+    // Modell. Er kommt als Werkzeugergebnis zurück, und das Modell soll ihn dem
+    // Benutzer weitergeben – „Nenne einen davon" lädt zum Raten ein, die Frage
+    // nicht.
     Err(format!(
-        "Es sind mehrere Kalender ausgewählt. Nenne einen davon: {}.",
+        "In welchen Kalender soll der Termin? Es sind mehrere Kalender ausgewählt: {}.",
         gewaehlt
             .iter()
             .map(|(_, name)| name.as_str())

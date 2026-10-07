@@ -109,8 +109,14 @@ if (existsSync(path.join(verzeichnis, 'ollama.json'))) {
   const server = einstellung.server_url || '(leer)';
   const kalender = einstellung.calendar?.server_url || '(nicht eingetragen)';
 
+  // Der Provider entscheidet, welche der beiden Adressen überhaupt benutzt wird.
+  // Fehlt das Feld, gilt das entfernte Ollama – so lesen es auch das Backend und
+  // ein alter Stand.
+  const provider = einstellung.provider || 'remote (Feld fehlt, so auch im Backend)';
+
   console.log(`Konfiguration gefunden.`);
   console.log(`  Ollama:   ${server}`);
+  console.log(`  Provider: ${provider}`);
   console.log(`  Kalender: ${kalender}`);
   console.log();
 

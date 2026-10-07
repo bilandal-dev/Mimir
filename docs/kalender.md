@@ -216,18 +216,41 @@ Was es prüft, bevor irgendetwas gesendet wird:
 | --- | --- |
 | `summary` | Pflicht, höchstens 200 Zeichen, Zeilenumbrüche werden escaped |
 | `start` | Pflicht, `JJJJ-MM-TTThh:mm`, auch mit Sekunden, `Z` oder `+02:00` |
-| `end` | Optional, ohne Angabe eine Stunde, immer nach dem Beginn |
+| `end` | Optional, ohne Angabe eine Stunde, immer nach dem Beginn; ohne Tagesangabe gehört es zum Tag von `start` |
 | `all_day` | `true` schreibt `DTSTART;VALUE=DATE`, das Ende ist der erste Tag danach |
-| `location` | Optional, höchstens 200 Zeichen |
+| `location` | Optional, höchstens 200 Zeichen; kommt nur hinein, wenn der Benutzer den Ort genannt hat |
 | `description` | Optional, höchstens 2000 Zeichen, wird nach 74 Oktett sauber umgebrochen |
-| `calendar` | Pflicht, sobald mehrere Kalender ausgewählt sind; Name oder Pfad |
+| `calendar` | Name oder Pfad. **Leer, wenn der Benutzer keinen genannt hat** – dann fragt Mimir ihn, welcher gemeint ist. Die Namen stehen auch in der Feldbeschreibung |
+| nicht genannte Felder | Ort und Beschreibung fallen weg, wenn der Benutzer sie nicht genannt hat; es steht dann im Bestätigungsfenster und im Werkzeugergebnis, welches |
 | `reminder` | Optional, „vorher" in Worten: „5 Minuten vorher", „eine Stunde vorher", „am Vorabend"; frühestens eine Minute, höchstens 90 Tage |
 | `category` | Optional, höchstens 100 Zeichen, mehrere mit Komma; ein Semikolon im Namen wird escaped |
 | unbekannte Felder | werden namentlich abgelehnt, statt stillschweigend wegzulassen |
 | weit in der Vergangenheit | abgelehnt; sieben Tage Rückblick sind erlaubt |
-| ohne Uhrzeit | es wird nachgefragt statt geraten |
+| ohne Uhrzeit | sieben Tageszeiten werden gelesen, alles andere wird nachgefragt statt geraten |
 
 Eine leere Auswahl in der Leiste heißt wie dort „alle Kalender". Anlegen darf Mimir trotzdem nicht in den ersten Kalender, den die Serverantwort nennt: Bei mehreren wird der Benutzer gefragt, welcher gemeint ist.
+
+**Tageszeiten.** `früh`, `frühmorgens`, `vormittag`, `vormittags`, `mittag`, `abend` und `nachts` sind fest belegt – 8:00, 6:30, 9:00, 9:00, 12:00, 18:00 und 22:00 Uhr. Sie werden nur als **ganzes Wort** erkannt, sonst machte „Frühstück mit Anna" daraus einen Vormittagstermin. Jede andere unbestimmte Angabe wird nachgefragt.
+
+**Mehrere Kalender ohne einen Namen.** Das Modell trägt `calendar` nur ein, wenn der Benutzer einen Kalender genannt hat. Sonst bleibt das Feld leer, und die Planung antwortet mit einer Frage: *„In welchen Kalender soll der Termin? Es sind mehrere Kalender ausgewählt: …"* Die Frage geht als Werkzeugergebnis an das Modell und wird im Chat an den Benutzer gestellt.
+
+Das ist eine Änderung im **Werkzeugvertrag** gewesen, nicht im Prompt. Solange `calendar` als Pflichtfeld mit Namen im Schema stand, war „nenn einen dieser Namen“ ein Auftrag zum Füllen – und ein 7B-Modell erfand daraufhin einen Namen. Als das Feld optional wurde und die Feldbeschreibung selbst sagte, dass ein leerer Wert richtig ist, blieb es leer.
+
+**Ein Ende ohne Tagesangabe** gehört zum Tag von `start`. „15:00" ist für sich allein der heutige Tag; als Ende eines Freitagstermins läge es damit in der Vergangenheit. Sobald ein Tag genannt wird, bleibt er, wie er ist – „morgen 10 Uhr" zu einem Termin am Freitag ist der nächste Tag.
+
+## Erfundene Felder
+
+Ein Modell füllt Felder, die der Benutzer nie genannt hat. Aus den Läufen: zu „Ich brauche morgen einen Termin mit der Bank" schickte es `location: "Online"`, und zu „Trag morgen einen Termin mit der Hausärztin ein" einen Kalendernamen, den niemand genannt hatte.
+
+**Ort und Beschreibung** landen deshalb nur im Termin, wenn der Benutzer sie genannt hat. Geprüft wird Wort für Wort gegen die letzte Nachricht des Benutzers: Jedes Wort des Feldes muss dort vorkommen, wobei Großschreibung, Bindestriche, Punkte und `ß`/`ss` nichts bedeuten. Was nicht passt, fällt weg — und wird im Bestätigungsfenster **und** im Werkzeugergebnis benannt, damit das Fehlen auffällt und das Modell im nächsten Schritt nachfragen kann.
+
+Drei Grenzen, die wichtig sind:
+
+- **Ohne Benutzertext wird nichts verworfen.** Wo die Worte des Benutzers nicht mitkommen, bleibt jedes Feld stehen. Eine Prüfung, die mangels Grundlage entfernt, wäre schlimmer als keine.
+- **Wenige Wörter, keine Prüfung.** Unter drei Wörtern von mindestens drei Zeichen entscheidet der Vergleich nichts. „Mach morgen einen Termin" darf keine Orte streichen, nur weil der Satz kurz ist.
+- **Teiltreffer zählen.** Ein Ort, in dem ein Teil des Wortes steckt, bleibt stehen. Der Abgleich ist strenger als „enthält" und weicher als „gleich" — Fälle wie „Talstraße 8, Haus 12b" gegen „Ort Talstraße 8" durchrutschen.
+
+**Was durchgeht:** `end` und `reminder`. Dort hat das Modell umgerechnet, und das Wegrechnen ist der Normalfall; die Zeit wird ohnehin strenger geprüft als ein Ort.
 
 Ohne Zeitzonenangabe gilt die Uhr des Rechners: 12 Uhr bleibt 12 Uhr, im Januar wie im Juli. Mit Versatz wird der Zeitpunkt umgerechnet und nicht doppelt gelesen. Jahreszahlen von 1970 bis 2200 gelten als plausibel, alles andere wird nachgefragt – ein Termin im Jahr 1700 kommt fast immer von einem gerechneten Datum. Termine mit Uhrzeit dürfen höchstens sieben Tage dauern, Ganztagestermine ein Jahr; ein zweiwöchiger Termin mit Uhrzeit ist mit hoher Wahrscheinlichkeit ein Rechenfehler. Beim **Ändern** gilt die Sieben-Tage-Grenze auch für Ganztagestermine, damit die Regel an einer Stelle bleibt – ein bestehender längerer Urlaub lässt sich deshalb nicht verschieben.
 

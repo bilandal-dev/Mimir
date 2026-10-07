@@ -344,7 +344,62 @@ node src/tests/datumsangabe.test.mjs
 
 Das ist keine Zierde: Die Fehler, die hier auftraten, sind an einem einzigen Tag unsichtbar. „Sonntag“ wurde zur „übernächsten Woche“, und das fiel an drei von sieben Tagen nicht auf. Ein Test mit einem festen Startdatum prüft genau eine dieser Lagen – und läuft um Mitternacht von selbst schief, wie es ein Test mit einem festgeschriebenen Datum getan hat.
 
-Stand der Prüfungen: 351 Rust-Tests, dazu drei Skripte ohne Fenster. Zusätzlich gibt es einen Nachbau des Ablaufs unter jsdom mit 129 Prüfungen; er liegt nicht im Repository und ist deshalb von hier aus nicht nachprüfbar. Sechs seiner Prüfungen brauchen einen wirklich erreichbaren Ollama-Server und werden ohne ihn ausdrücklich übersprungen, statt eine Ersatzliste vorzutäuschen.
+## Den Terminumfang gegen ein Modell prüfen
+
+Das ist die eine Prüfung, die kein Rust-Test ersetzen kann: Ob ein Modell die
+Kalenderwerkzeuge bedienen kann, ist eine Eigenschaft des Modells.
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin termine-validierung -- <server> <modell> [anzahl]
+```
+
+Sie geht 28 Sätze durch und misst dreierlei, weil jedes getrennt zählt:
+
+1. **Wählt das Modell das richtige Werkzeug?** Fällt im Chat nicht auf, weil dort
+   jede Antwort so aussieht, als hätte sie funktioniert.
+2. **Kann Mimir daraus einen Termin bauen?** Jeder Aufruf läuft durch
+   `plan_event`, dieselbe Funktion, die auch die Vorschau erzeugt.
+3. **Trägt der Aufruf überhaupt Angaben?** Ein Aufruf mit leerem Argumentobjekt
+   sieht in der Ausgabe wie ein Erfolg aus – der Werkzeugname steht da – und ist
+   keiner.
+
+**Der Satz des Benutzers wird mitgeschickt.** Mimir prüft Ort und Beschreibung
+gegen seine Worte und verwirft, was er nicht genannt hat. Die Validierung geht
+denselben Weg, sonst würde sie einen messen, den es im Betrieb nicht gibt.
+
+Der zweite Punkt ist der wichtigere, und er ist beim ersten Lauf sofort
+aufgefallen: Die Werkzeugwahl war meistens richtig, die **Argumente** waren es
+seltener. Was die Läufe gezeigt haben, steht in
+[docs/agentenmodus.md](agentenmodus.md#was-die-läufe-zeigen).
+
+**Vier der Sätze erwarten keine Antwort, sondern eine Frage.** Sie prüfen, ob das
+Model bei einer Lücke nachfragt. Gezählt wird das als richtig, wenn kein Werkzeug
+aufgerufen wurde und die Antwort nach einem Fehlen fragt – als Fragezeichen oder
+in einer der üblichen Formulierungen, denn ein Modell formuliert eine Nachfrage
+im Deutschen auch ohne Fragezeichen.
+
+Der Lauf geht dieselben Schemata und Anweisungen wie die Anwendung: Sie kommen
+aus `termine_toolset_for`, aus derselben Funktion, aus der auch `list_tools`
+sie holt. Eine Kopie im Prüfprogramm wäre eine zweite Wahrheit, die genau dann
+stimmt, wenn man sie pflegt.
+
+**Ohne erreichbaren Server prüft das Programm nichts.** Es sagt das laut und
+beendet sich mit Code 2, statt eine leere Liste als Erfolg zu melden. Das ist
+auch hier die Regel, die der jsdom-Nachbau für seine sechs Prüfungen braucht.
+
+## Den Umfang prüfen
+
+Der Umfang entscheidet, welche Werkzeuge das Modell überhaupt sieht, und ist darum als eigenes Skript prüfbar:
+
+```bash
+node src/tests/umfang.test.mjs
+```
+
+Geprüft wird nicht die Oberfläche, sondern die Stelle, an der aus dem eingestellten Umfang eine Antwort wird: ob die Werkzeugschleife im Terminumfang ohne Schalter läuft, ob der Text beide Umfänge samt Rückweg nennt und ob ohne angemeldeten Kalender gewarnt wird. Der Anmeldestand ist dabei nicht fest verdrahtet – eine Prüfung mit immer angemeldetem Kalender würde die Warnung nie zu Gesicht bekommen.
+
+Der Grund für ein eigenes Skript ist derselbe wie bei der Datumsangabe: Ein Fehler im Umfang sieht man im Chat nicht. Er äußert sich nicht als Textfehler, sondern darin, dass das Modell ein Werkzeug sieht, das es nicht sehen soll, oder einen Termin anlegt, den niemand wollte.
+
+Stand der Prüfungen: 369 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlich gibt es einen Nachbau des Ablaufs unter jsdom mit 129 Prüfungen; er liegt nicht im Repository und ist deshalb von hier aus nicht nachprüfbar. Sechs seiner Prüfungen brauchen einen wirklich erreichbaren Ollama-Server und werden ohne ihn ausdrücklich übersprungen, statt eine Ersatzliste vorzutäuschen.
 
 
 ## Sicherheits- und Datenhinweise
@@ -361,6 +416,7 @@ Stand der Prüfungen: 351 Rust-Tests, dazu drei Skripte ohne Fenster. Zusätzlic
 - SSH verwendet `StrictHostKeyChecking=yes`; unbekannte oder geänderte Host-Keys werden abgelehnt. Der SSH-Prozess selbst hat 30 Sekunden Zeit.
 - Chat-, Modell-, Stream- und Markdown-Daten sowie SSH-Antworten besitzen harte Größen-, Zeit- und Mengenlimits: 2 KiB für die Server-URL, 256 Byte je Modellname, 1000 Modelle, 1 MiB Modelllistenantwort, 4 MiB Verlaufsdatei, 64 KiB je Nachricht, 512 KiB je Anfrage, 4 MiB Antwortstrom, 256 KiB Zeile, 100 000 Zeilen, 256 KiB Denktext je Nachricht, 512 KiB Markdown-Eingabe, 2 MiB bereinigtes HTML und 4 KiB je SSH-Fehlertext. Das Werkzeugangebot ist auf 16 Schemata und 64 KiB begrenzt.
 - Der Agentenmodus arbeitet nur unterhalb eines festen Arbeitsverzeichnisses und nur nach Bestätigung pro Aufruf; die Werkzeugauswahl ist eine feste Liste im Backend.
+- Der Umfang (`agent.scope` in `ollama.json`) legt fest, welche Werkzeuge das Modell bekommt: `agent` wie bisher mit den Dateiwerkzeugen, `termine` ausschließlich die vier Kalenderwerkzeuge. Er ist im Backend durchgesetzt, nicht in der Oberfläche: Im Terminumfang entsteht das Werkzeugangebot ohne die Dateiwerkzeuge und ohne das Arbeitsverzeichnis, und ein gespeichertes Arbeitsverzeichnis wird dort weder geprüft noch genannt. Der Umfang kann den Zugriff nur verkleinern, nicht vergrößern; ein unbekannter Wert aus einer von Hand bearbeiteten Datei bricht den Start ab, statt stillschweigend als breiter Umfang gelesen zu werden.
 - Schreibende Werkzeuge sind standardmäßig gesperrt, gelten nur für die laufende Sitzung und werden nie gespeichert. Sie legen neue Dateien an oder ersetzen genau eine eindeutig auffindbare Stelle; Löschen, Umbenennen und Ausführen gibt es nicht. Vor jedem Schreibvorgang wird der Unterschied gezeigt, geschrieben wird atomar, und bei Dateien lässt sich der Vorgang im Chat zurücknehmen – bei Terminen nicht, siehe [Termine anlegen](#termine-anlegen).
 - Die Ollama-Verbindung verwendet standardmäßig unverschlüsseltes HTTP; sie sollte nur in einem vertrauenswürdigen privaten Netzwerk betrieben werden.
 - Für einen produktiven Einsatz sollten TLS und gegebenenfalls Authentifizierung ergänzt werden.

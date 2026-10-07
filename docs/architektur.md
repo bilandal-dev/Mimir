@@ -14,7 +14,7 @@ flowchart LR
     Ollama[Ollama HTTP API]
     CalDAV[Nextcloud<br/>CalDAV]
 
-    UI -->|check_server, get_models<br/>send/cancel_chat<br/>get/set_server_url<br/>get/set_ssh_config, start_ollama_via_ssh<br/>get/set_agent_config, get/set_chat_config<br/>prepare_attachment, load/save/delete_chat_history<br/>list_tools, execute_tool, preview_tool_call,<br/>undo_write, set_write_enabled, get_write_state,<br/>reset_write_budget<br/>calendar_*, get/set_calendar_config<br/>calendar_event_open, calendar_event_save<br/>render_markdown| Backend
+    UI -->|check_server, get_models<br/>send/cancel_chat<br/>get/set_provider, get/set_server_url<br/>get/set_ssh_config, start_ollama_via_ssh<br/>get/set_agent_config, get/set_chat_config<br/>prepare_attachment, load/save/delete_chat_history<br/>list_tools, execute_tool, preview_tool_call,<br/>undo_write, set_write_enabled, get_write_state,<br/>reset_write_budget<br/>calendar_*, get/set_calendar_config<br/>calendar_event_open, calendar_event_save<br/>render_markdown| Backend
     Backend <--> Config
     Backend -->|GET /api/tags| Ollama
     Backend -->|POST /api/chat| Ollama
@@ -82,11 +82,21 @@ Die Kalenderleiste nimmt 260 px am rechten Rand ein. Ihre drei Knöpfe teilen si
 4. Das Frontend befüllt das Dropdown-Menü und aktiviert den Senden-Button. Eine bereits getroffene Wahl bleibt dabei erhalten, solange das Modell noch in der Liste steht; fehlt es, wird das erste Modell der Liste verwendet.
 5. Beim Senden liest das Frontend den aktuell im Dropdown gewählten Wert und übergibt genau dieses Modell mit der Anfrage. Der Retry-Knopf im normalen Chat verwendet die dann aktuelle Auswahl; im Agentenmodus wiederholt er den Zug mit dem Modell, das beim Senden gewählt war.
 
+### Provider
+
+Es gibt zwei Providers, und beide reden mit demselben Ollama: `remote` nimmt die eingetragene `server_url`, `local` immer `http://localhost:11434` auf diesem Rechner. In der Kopfzeile heißen sie **Server** und **Lokal**; die Werte bleiben `remote` und `local`, damit die Konfigurationsdatei lesbar bleibt und nicht zwei Namen für dieselbe Sache entstehen. Die Wahl steht in `ollama.json` unter `provider` und fehlt dort in einer alten Konfiguration – dann gilt `remote`, sonst würde eine bestehende Installation beim Start auf den lokalen Rechner zeigen.
+
+`OllamaSettings::get_base_url` ist die einzige Stelle, die die Adresse bestimmt. Jede Anfrage im Backend läuft darüber: Modellliste, Chat, Statusprüfung, Warteprüfung vor einem Wiederholungsversuch und die Erreichbarkeitsprüfung vor dem SSH-Start. Es gibt bewusst keinen zweiten Weg, sonst läge eine der beiden Anfragen an der falschen Adresse.
+
+`server_url` bleibt beim Wechsel unverändert und wird im lokalen Provider weder gelesen noch geschrieben: `set_base_url` lehnt dort ab und nennt den Weg zurück. Wer auf `remote` wechselt, arbeitet deshalb ohne erneutes Abtippen weiter.
+
+Der Provider wirkt auf den Umfang: `wirksamer_umfang` gibt im lokalen Provider den Terminumfang heraus, unabhängig von dem, was in `agent.scope` steht. Das passiert an jeder Stelle, an der Werkzeuge angeboten (`list_tools`) oder eine Schreibfreigabe geprüft wird (`preview_tool_call`, `execute_tool`, `execute_calendar_change`), und nicht nur in der Anzeige. `get_agent_config` und `set_agent_config` geben deshalb den wirksamen Umfang zurück, und `set_agent_config` lehnt `Scope::Agent` lokal ab. Details in [Konfiguration](konfiguration.md#provider-woher-die-modelle-kommen).
+
 ### Serverstatus und SSH-Start
 
 1. Beim Start und nach jeder manuellen Prüfung wird `GET /api/tags` mit einem Zeitlimit von **fünf Sekunden** aufgerufen. Das Laden der Modellliste ist ein eigener Aufruf und hat zehn Sekunden.
 2. Die Kopfzeile zeigt `Online`, `Offline`, `instabel`, `Prüfe ...` oder während des SSH-Starts `SSH startet ...` an.
-3. Wenn der Server offline ist, wird der Button `SSH starten` eingeblendet.
+3. Wenn der Server offline ist, wird der Button `SSH starten` eingeblendet – im lokalen Provider nicht, denn hier gibt es keinen Server im Netz zu starten. Ebenso fehlt dann der Knopf **Adresse**; beide werden bei jeder Statusänderung neu bewertet.
 4. Ist der Server bereits erreichbar, wird überhaupt keine SSH-Verbindung aufgebaut.
 5. `start_ollama_via_ssh` versucht zuerst die Anmeldung mit dem eingestellten Schlüssel, den OpenSSH-Standardpfaden oder dem `ssh-agent` im nichtinteraktiven Modus. Es wird genau **eine** SSH-Verbindung pro Startversuch aufgebaut.
 6. Meldet OpenSSH einen Authentifizierungsfehler, zeigt Mimir einen maskierten Passwortdialog. Host-Key-, Schlüssel- und Netzwerkfehler werden anhand des Exit-Codes und der Fehlermeldung getrennt und **nicht** als Passwortanforderung fehlinterpretiert.
@@ -185,6 +195,9 @@ Was TAB bewusst nicht tut:
 - `/ssh-key` zeigt den eingestellten privaten Schlüssel
 - `/ssh-key <pfad>` legt genau diesen Schlüssel fest; `~` wird aufgelöst
 - `/ssh-key aus` entfernt die Vorgabe, dann zählen wieder nur die OpenSSH-Standardpfade und der `ssh-agent`
+- `/scope` zeigt, wie weit das Modell reichen darf, mit beiden Umfängen und dem Weg zurück
+- `/scope agent` gibt die Dateiwerkzeuge im Arbeitsverzeichnis frei
+- `/scope termine` beschränkt das Modell auf die vier Kalenderwerkzeuge; gespeichert, nach Rückfrage
 - `/agent` schaltet den Agentenmodus ein oder aus
 - `/agent-dir` zeigt das Arbeitsverzeichnis des Agentenmodus und die maximale Schrittzahl
 - `/agent-dir <pfad>` setzt das feste Arbeitsverzeichnis nach Benutzerbestätigung
