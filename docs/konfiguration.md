@@ -1,9 +1,60 @@
 # Konfiguration
 
 Alles, was sich einstellen lässt und wo es gespeichert wird: Provider, Serveradresse,
-SSH, Kontextfenster, Systemanweisung und Verlauf.
+SSH, Kontextfenster, Systemanweisung, Verlauf und Schema der Oberfläche.
 
 Die Einstellungen liegen als JSON in `~/.config/com.bilandal.mimir/ollama.json`.
+
+## Die eingebaute Engine
+
+Bei `provider: "local"` rechnet Mimir selbst, ohne Ollama auf diesem Rechner. Der
+Ablauf ist derselbe wie im Netz, nur die Quelle der Antwort ist eine andere.
+
+**Wie sie arbeitet.** `engine.rs` lädt das Modell aus Mimirs eigenem Modellordner,
+wendet die im Modell mitgelieferte Chat-Vorlage an und erzeugt Token für Token. Der
+Werkzeugkreis, die Kalenderwerkzeuge, der Abbruch und die Oberfläche sehen davon
+nichts: Es kommen dieselben Chunks auf demselben Kanal, die auch ein Ollama schickt.
+Deshalb liegt in `engine.rs` kein HTTP-Server und kein eigener Nachrichtenweg – der
+Rest der Anwendung wüsste sonst, woher die Token kommen, und es gäbe zwei davon.
+
+**Werkzeugaufrufe ohne Werkzeugfeld.** Ein Ollama-Modell bekommt die Werkzeuge als
+Feld im Auftrag und antwortet mit einem eigenen Feld. Die eingebaute Engine kennt nur
+Text, also läuft der Weg anders herum: Die Werkzeugbeschreibung steht als Anweisung in
+der Systemnachricht, und der Aufruf kommt als JSON-Abschnitt im Text zurück
+(`engine/werkzeug.rs`). Der Code dafür ist nachsichtig beim Format – beide
+Schreibweisen, Argumente als Objekt oder als Text, ein Codezaun – und streng beim
+Inhalt. **Was nicht lesbar ist, bleibt Text.** Ein halb geschriebener Aufruf, ein
+angebrochener Rahmen, ein Name, den kein Werkzeug trägt: nichts davon wird
+ausgeführt, sondern dem Benutzer angezeigt.
+
+**Was die Engine nicht kann.** Sie rechnet nur auf der CPU. Ohne Grafik ist das
+spürbar langsam, und daran ändert ein späterer Build mit GPU-Unterstützung etwas –
+nicht aber diese Datei. Ein Kontextfenster über 16384 Token wird abgelehnt: Der
+KV-Speicher liegt bei etwa 0,5 MiB je Token, und 16384 sind auf einem 3B-Modell rund
+8 GiB.
+
+**Was „empfohlen" bedeutet und was nicht.** `modelle::passt_zu` prüft zwei Dinge:
+einen Prozessor mit AVX2 oder NEON und genug freien Arbeitsspeicher. Fehlt eines,
+ist das Modell **nicht empfohlen** – und es trotzdem zur Auswahl gestellt. Der Grund
+steht auf der Karte, nicht statt des Modells: Auf einem Rechner ohne AVX2 gäbe es
+sonst nichts zu laden, und die Engine wäre unerreichbar, obwohl sie im Programm
+steckt. Der Satz nennt die fehlende Menge in GB statt die Zahlen nebeneinander zu
+stellen, weil „3 GB frei, gebraucht 4 GB" niemandem etwas sagt und „dafür fehlen
+dir 1 GB" schon.
+
+Ein geladenes Modell, das der Katalog nicht mehr empfiehlt, steht in der ersten
+Gruppe und **nicht** noch einmal im Rest – es ist sonst zweimal in derselben Liste.
+
+**Grenzen, die aus Sicherheitsgründen gelten.** Ein Rahmen im Text, den der Benutzer
+selbst schreibt, wird nie als Befehl gelesen – deshalb trägt der Rahmen ein
+Nullbreitenzeichen im Namen, das Modelle beim Schreiben weglassen. Eine Antwort, deren
+Ende aus einem dreifach wiederholten Abschnitt besteht, wird abgeschnitten: Das ist
+eine Schleife, und sie würde sonst unbegrenzt Rechenzeit verbrauchen.
+
+**Zum Bauen.** llama.cpp kommt als Rust-Bindung mit (`llama-cpp-2`) und wird über
+CMake gebaut. `cmake` und ein C++-Übersetzer sind deshalb **Bau-Werkzeuge, keine
+Laufzeit-Abhängigkeiten**: Das gebaute Mimir braucht beides nicht, und wer es aus
+dem Quelltext baut, braucht beides nur einmal.
 
 ## Provider: woher die Modelle kommen
 
@@ -22,8 +73,10 @@ Deshalb gibt es zwei Einstellungen: den **Provider** und die Adresse.
 
 - `remote` (Vorgabe) benutzt `server_url`. Fehlt das Feld `provider` in einer älteren
   Konfiguration, gilt das weiterhin – bestehende Installationen starten unverändert.
-- `local` benutzt immer die Vorgabeadresse `http://localhost:11434` auf diesem
-  Rechner. Ein Ollama auf diesem Rechner liefe unter keiner anderen Adresse.
+- `local` rechnet auf diesem Rechner mit der [eingebauten
+  Engine](#die-eingebaute-engine). **Ollama wird dafür nicht gebraucht** – weder
+  installiert noch gestartet. Die Modelle lädt Mimir selbst und legt sie in
+  `~/.config/com.bilandal.mimir/modelle/` ab.
 
 Gestellt wird der Provider in der Kopfzeile über die Auswahl **Ollama** (**Server** oder
 **Lokal**) oder im Chat:
@@ -39,11 +92,17 @@ wer zurückwechselt, muss die Adresse nicht neu eintragen. Was beim Wechsel pass
 Der Chatverlauf wird verworfen (er gehört zum anderen Server) und die Modellliste neu
 geladen.
 
-Ein Wechsel prüft nichts: Ein lokales Ollama kann laufen oder nicht. Läuft es nicht,
-zeigt die Kopfzeile das wie bei jedem anderen Server als „Offline“. Die Knöpfe
+Ein Wechsel auf **Server** prüft nichts: Ein Ollama kann laufen oder nicht. Läuft es
+nicht, zeigt die Kopfzeile das wie bei jeder anderen Adresse als „Offline“. Die Knöpfe
 **Adresse** und **SSH starten** sind im lokalen Provider ausgeblendet und
 `/server-url` lehnt dort ab – beides hätte keine Wirkung, und eine Änderung, die
 nichts bewirkt, sollte man nicht als Erfolg melden.
+
+Ein Wechsel auf **Lokal** prüft ebenfalls nichts, und braucht es nicht: Die Engine ist
+Teil von Mimir. Sobald die Modellliste gelesen ist, steht die Kopfzeile auf
+`Lokal: bereit`; fehlt ein Modell, das ist das der Fall, den die Oberfläche anders
+anzeigt – mit der Begründung aus [`hardware.rs`](../src-tauri/src/hardware.rs), statt
+mit einer Adresse, an der niemand lauscht.
 
 Im lokalen Provider gilt außerdem immer der [Terminumfang](#der-umfang-des-modells):
 `wirksamer_umfang` in `src-tauri/src/lib.rs` gibt dort die Kalenderwerkzeuge heraus, und
@@ -207,6 +266,33 @@ steht: Das Modell läuft dann auf diesem Rechner und bekommt dort keine
 Dateiwerkzeuge. Gespeichert wird trotzdem, was eingestellt war, damit der gespeicherte
 Umfang über einen Providerwechsel hinweg erhalten bleibt.
 
+
+## Schema: hell oder dunkel
+
+```json
+{
+  "theme": "dunkel"
+}
+```
+
+- `dunkel` (Vorgabe) ist der bisherige Stand: schwarzer Grund, Cyan als Text und
+  Akzent. Fehlt das Feld in einer älteren Konfiguration, gilt das weiterhin.
+- `hell` dreht die Helligkeit um. Die Töne sind nicht gespiegelt, sondern
+  durchgerechnet: Der Akzent wird zu einem dunklen Türkis, weil Cyan als Text auf
+  Weiß unlesbar wäre, und die Warnfarben werden dunkler, damit sie als Warnung
+  erkennbar bleiben statt als Kante im Bild zu verschwinden.
+
+Gestellt wird das über den Knopf **Schema** oben links in der Kopfzeile; er sagt,
+welches Schema gerade gilt, und schaltet beim Klick um. Die Wahl gehört in die
+Konfiguration und nicht in den Speicher des Fensters, weil sie eine Eigenschaft
+dieses Geräts ist und keinen Neustart überstehen soll, bei dem sie wieder weg ist.
+
+Kann die Konfiguration nicht geschrieben werden, wechselt die Oberfläche nicht und
+meldet den Fehler im Protokoll: Ein Schema anzeigen, das nach dem nächsten Start
+wieder verschwunden wäre, wäre eine Lüge in der Anzeige.
+
+Die Farben stehen als Variablen in `src/styles.css` und sonst nirgends. Wer ein
+drittes Schema braucht, ergänzt dort einen Block – nicht die einzelnen Regeln.
 
 ## Kontextfenster, Systemanweisung und Verlauf
 

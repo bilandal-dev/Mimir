@@ -1,0 +1,44 @@
+# Was Cargo beim Bauen in die Umgebung der Bauskripte legt.
+#
+# **Warum diese Datei nötig ist.** llama.cpp lässt beim Übersetzen seinen Compiler
+# einmal auf *dem Rechner, auf dem gebaut wird*, eine Probe machen: Kann er AVX2,
+# wird AVX2 eingeschaltet. Das Ergebnis hängt damit vom Baurechner ab und nicht
+# vom Rechner, auf dem Mimir später laufen soll. Genau daran ist die erste Fassung
+# der eingebauten Engine gescheitert: Auf diesem Rechner gebaut (Pentium Silver
+# N6000, **kein** AVX2) stürzte das Programm beim Laden des Modells mit `SIGILL` ab,
+# mitten in einer Anweisung, die diese CPU nicht kennt.
+#
+# Ein `SIGILL` ist der schlechteste Ausgang: Nicht „langsamer", sondern beendet.
+# Wer ein Programm weiterreicht, gibt es an Rechner, die es nicht gebaut haben.
+#
+# **Deshalb ist die Übersetzung festgelegt** auf das, was jeder x86-Rechner kann,
+# auf dem Mimir laufen soll. Der Preis ist Geschwindigkeit, und der ist ehrlich zu
+# benennen: Auf einem Rechner mit AVX2 rechnet dieselbe Engine mehrere Male so
+# schnell. Wer sie auf einem bestimmten Rechner voll ausnutzen will, überschreibt
+# die Werte beim Aufruf:
+#
+#     GGML_AVX2=ON GGML_FMA=ON GGML_F16C=ON cargo build --release
+#
+# und verteilt diese Binary nicht weiter.
+#
+# **Warum nicht in `build.rs`.** Build-Skripte der Abhängigkeiten laufen vor dem
+# eigenen. Die Flags müssen gesetzt sein, bevor `llama-cpp-sys-2` seine
+# Übersetzung beginnt, und das Skript dieses Pakets ist genau das, worauf es
+# ankommt. `cargo:cmake_var` aus dem eigenen Skript käme zu spät und würde ohnehin
+# nicht gelesen.
+#
+# **SSE4.2 ist die Untergrenze**, weil sie der kleinste gemeinsame Nenner ist.
+# Ältere x86-Prozessoren haben sie nicht; für sie gibt es diese Binary nicht, und
+# dafür gibt es keine Engine, die schneller rechnet.
+[env]
+GGML_AVX = "OFF"
+GGML_AVX2 = "OFF"
+GGML_AVX_VNNI = "OFF"
+GGML_AVX512 = "OFF"
+GGML_AVX512_VBMI = "OFF"
+GGML_AVX512_VNNI = "OFF"
+GGML_AVX512_BF16 = "OFF"
+GGML_FMA = "OFF"
+GGML_F16C = "OFF"
+GGML_BMI2 = "OFF"
+GGML_SSE42 = "ON"

@@ -9,7 +9,14 @@
 <body>
 
     <header>
-        <h2>Mimir</h2>
+        <div class="header-brand">
+            <!-- Das Schema der ganzen Oberfläche, deshalb ganz links und nicht
+                 zwischen den Bedienelementen des Chats. Der Text am Knopf sagt,
+                 welches Schema gerade gilt – wie bei den anderen Umschaltern in
+                 dieser Leiste. -->
+            <button type="button" id="theme-toggle-btn" class="header-button theme-toggle" aria-pressed="false" title="Zwischen hellem und dunklem Schema wechseln">Schema: dunkel</button>
+            <h2>Mimir</h2>
+        </div>
         <div class="header-controls">
             <div class="server-actions">
                 <!-- Woher die Modelle kommen. Vorher stand die Wahl nur in der
@@ -51,8 +58,8 @@
 
             <!-- Rein visuell: die Anzeige für Tastatur und Screenreader läuft
                  über aria-busy an der Antwortblase (main.js:runChatAttempt). -->
-            <div class="chat-activity" aria-hidden="true">
-                <span class="activity-spinner"></span>
+            <div class="chat-activity">
+                <span class="activity-spinner" aria-hidden="true"></span>
                 <span class="activity-label">Antwort wird erzeugt</span>
             </div>
         </div>
@@ -126,6 +133,22 @@
             <div class="dialog-actions">
                 <button type="button" id="server-url-cancel">Abbrechen</button>
                 <button type="submit" id="server-url-save">Übernehmen</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- Die lokalen Modelle. Steht als eigener Dialog, weil das Herunterladen
+         eine eigene Entscheidung mit eigenen Folgen ist: Zwei Gigabyte auf die
+         Platte, von denen niemand sonst etwas weiß. Und weil es nicht in den
+         Chat gehört: Ein Download, der zwanzig Minuten läuft, ist kein Chat. -->
+    <dialog id="modelle-dialog" class="modelle-dialog">
+        <form id="modelle-form">
+            <h3>Modelle auf diesem Rechner</h3>
+            <p id="modelle-hinweis"></p>
+            <div id="modelle-liste" class="modelle-liste"></div>
+            <p id="modelle-status" class="field-status" role="status"></p>
+            <div class="dialog-actions">
+                <button type="button" id="modelle-schliessen">Schließen</button>
             </div>
         </form>
     </dialog>

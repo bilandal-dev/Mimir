@@ -29,31 +29,51 @@ Ollamas HTTP-API; das Frontend muss den Server nicht selbst erreichen.
   ohne Dateizugriff und ohne Arbeitsverzeichnis, jede Änderung weiterhin als
   sichtbarer Unterschied vorab bestätigt
 - **Dateien anhängen** ohne Mimir Zugriff auf das Dateisystem zu geben
+- **Helles oder dunkles Schema**, umschaltbar oben links und gemerkt für dieses Gerät
 
 ## Voraussetzungen
 
-**Ein erreichbarer Ollama-Server.** Sonst nichts.
+**Zum Benutzen gar nichts.** Mimir bringt seine Engine mit: Über **Ollama: Lokal**
+lädt es ein Modell herunter und rechnet damit auf diesem Rechner, ohne dass Ollama
+installiert wäre.
 
-Läuft Ollama auf demselben Rechner, genügt `http://localhost:11434`. Läuft es woanders,
-trägst du die Adresse beim ersten Start ein – siehe [Erster Start](#erster-start).
+Für den Serverbetrieb genügt ein erreichbarer Ollama. Läuft er auf demselben Rechner,
+ist das `http://localhost:11434`; läuft er woanders, trägst du die Adresse beim ersten
+Start ein – siehe [Erster Start](#erster-start).
 
 Für den Komfortbefehl `/server-start`, der Ollama über SSH auf dem Server neu startet,
 braucht Mimir zusätzlich ein lokales `ssh`-Programm und einen Schlüssel. Das ist
 freiwillig; ohne SSH funktioniert alles andere genauso.
 
+**Zum Bauen** sind Rust, `cmake` und ein C++-Übersetzer nötig, weil Mimirs Engine
+llama.cpp mitbringt. Auf Arch:
+
+```bash
+sudo pacman -S --needed base-devel rust cmake webkit2gtk-4.1 gtk3
+```
+
+Die Engine wird ohne AVX2 übersetzt, damit das Programm auf jedem Rechner läuft,
+auf dem es gebaut wurde – siehe [`.cargo/config.toml`](.cargo/config.toml). Das
+kostet Geschwindigkeit auf einem Rechner, der AVX2 könnte.
+
 ## Installation
 
 Mimir wird aus dem Quelltext gebaut. Es gibt kein fertiges Paket: Wer es haben
 will, klont das Repository und baut es selbst. Der Build dauert einmal rund
-17 Minuten, danach ist die Binary da.
+20 Minuten, davon etwa die Hälfte für die eingebaute Engine, danach ist die
+Binary da.
 
 ### Linux
 
-Werkzeug und Bibliotheken — auf Arch:
+Werkzeug und Bibliotheben — auf Arch:
 
 ```bash
-sudo pacman -S --needed base-devel rust webkit2gtk-4.1 gtk3
+sudo pacman -S --needed base-devel rust cmake webkit2gtk-4.1 gtk3
 ```
+
+`cmake` und ein C++-Übersetzer sind nur für den Bau nötig, nicht für den
+Gebrauch: Mimirs Engine ist llama.cpp, und die wird als Rust-Bindung mitgeliefert.
+Zum Ausführen des gebauten Programms reichen Rust und die Systembibliotheken.
 
 Dann bauen und starten:
 
@@ -66,9 +86,10 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 
 Drei Dinge, die den ersten Build aufhalten:
 
-- **Er braucht Platz.** Rund 1,3 GB landen in `src-tauri/target/`. Das ist kein
-  Versehen, sondern `lto = true` und `codegen-units = 1` in `Cargo.toml`
-  geschuldet.
+- **Er braucht Platz und Zeit.** Rund 1,8 GB landen in `src-tauri/target/`, und
+  rund 20 Minuten vergehen. Der Platz ist kein Versehen, sondern `lto = true` und
+  `codegen-units = 1` in `Cargo.toml` geschuldet; die Zeit braucht das C++ von
+  llama.cpp, das einmal übersetzt werden muss.
 - **Nicht in ein `tmpfs` bauen.** Ein `/tmp` von 4 GB reicht nicht; dort bricht
   der Linker mit `Disk quota exceeded` ab, obwohl der Quelltext in Ordnung ist.
   `/var/tmp` oder das Home-Verzeichnis sind sicher.
@@ -179,15 +200,46 @@ Die Auswahl **Ollama** in der Kopfzeile – **Server** oder **Lokal** – entsch
 woher die Modelle kommen:
 
 - **Server** nimmt die eingetragene Adresse aus dem Netz, wie oben beschrieben
-- **Lokal** nimmt das Ollama auf diesem Rechner, immer unter
-  `http://localhost:11434`
+- **Lokal** rechnet auf diesem Rechner, mit der in Mimir eingebauten Engine und
+  einem Modell, das Mimir selbst herunterlädt. **Ollama wird dafür nicht
+  gebraucht** – weder installiert noch gestartet.
 
 Das sind zugleich `/provider remote` und `/provider local`.
+
+### Das eigene Modell
+
+Bei **Lokal** steht oben in der Auswahl der Eintrag **＋ Modell herunterladen …**.
+Hinter ihm liegt die Modellwahl. Sie empfiehlt nach Arbeitsspeicher und Prozessor
+dieses Rechners – und **zeigt trotzdem alle Modelle**, auch die nicht empfohlenen,
+mit einer Begründung statt einer Auslassung.
+
+Das ist Absicht: Eine Empfehlung ist ein Rat, kein Verbot. Auf einem Rechner ohne
+AVX2 oder mit wenig Speicher empfiehlt Mimir nichts – aber die Modelle sind
+vorhanden und lauchbar, nur langsamer oder mit weniger Kontext. Wer sie weglässt,
+macht die eingebaute Engine auf genau den Rechnern unerreichbar, für die sie
+eingebaut wurde.
+
+Der Download ist eine Datei in Mimirs eigenem Verzeichnis, und die Engine rechnet
+damit direkt. Zwei Dinge muss man wissen:
+
+- **Der erste Satz dauert, und du siehst es.** Beim ersten Senden wird das Modell
+  geladen; die Ladeanzeige sagt das, statt leer zu bleiben. Danach erscheint die
+  Antwort Stück für Stück – auf einem Rechner ohne Grafik mit einem kleinen Modell
+  sind das gut 30 Sekunden und ebenso viele Bildschirmupdates.
+- **Kleine Modelle sind kleine Modelle.** Der Katalog besteht aus Qwen2.5-Instruct
+  in Q4_K_M. Das 0,5B-Modell verwechselt Tage und Uhrzeiten; für Termine ist das
+  1,5B-Modell die untere brauchbare Stufe. Zu jedem Eintrag steht die ehrliche
+  Einschränkung dabei – auch im Fenster, in dem man lädt.
+
+Ohne Grafik rechnet alles auf der CPU, und es ist entsprechend langsam. Das ist keine
+Eigenschaft von Mimir, sondern von dem, was ein Rechner ohne GPU hergeben kann.
 
 Der Wechsel bleibt über einen Neustart erhalten und verändert die eingetragene Adresse
 nicht. Er setzt den Chatverlauf zurück – er gehört zum anderen Server – und lädt die
 Modellliste neu. Ein Wechsel prüft nichts: Läuft das Ollama, das du gewählt hast,
-nicht, zeigt die Kopfzeile das wie bei jeder anderen Adresse.
+nicht, zeigt die Kopfzeile das wie bei jeder anderen Adresse. Bei **Lokal** gibt es
+nichts zu prüfen – die Engine ist Teil von Mimir, und die Kopfzeile steht auf
+`Lokal: bereit`, sobald die Modellliste gelesen ist.
 
 Im lokalen Provider gibt es nur den Terminumfang, also die vier Kalenderwerkzeuge und
 keinen Dateizugriff. `/scope agent` wird dort abgelehnt. Der Grund ist die Größe des
@@ -231,7 +283,7 @@ Alles im Chat, mit `/` beginnend. `/help` zeigt dieselbe Liste in der Anwendung.
 ## Wo die Einstellungen liegen
 
 ```
-~/.config/com.bilandal.mimir/ollama.json          Server, SSH, Agent, Chat, Kalender
+~/.config/com.bilandal.mimir/ollama.json          Server, SSH, Agent, Chat, Kalender, Schema
 ~/.config/com.bilandal.mimir/calendar-secret.json App-Passwort des Kalenders, nur diese Sitzung
 ```
 
@@ -241,7 +293,12 @@ einer eigenen Datei mit restriktiven Rechten und wird beim Beenden verworfen.
 ## Daten
 
 Mimir schickt deine Nachrichten an den Server, den du eingetragen hast, und sonst
-nirgendwo hin. Es gibt keinen Telemetrie, keinen Update-Check und keine Analytics.
+nirgendwo hin. Bei **Ollama: Lokal** bleiben sie auf diesem Rechner: Die Engine ist
+eingebaut, und es geht nichts über eine Verbindung hinaus. Das Herunterladen eines
+Modells geht an die Quelle des Katalogs – an Hugging Face, ohne Konto, und ohne
+irgendetwas über dich mitzuschicken.
+
+Es gibt keinen Telemetrie, keinen Update-Check und keine Analytics.
 
 Der Agentenmodus liest ausschließlich im Verzeichnis, das mit `/agent-dir` gesetzt ist,
 und nur nach Bestätigung. Schreibvorgänge gibt es nur mit `/agent-write` und werden
@@ -267,5 +324,6 @@ Näheres in [docs/entwicklung.md](docs/entwicklung.md#sicherheits--und-datenhinw
   [Installation](#installation) stammen aus den Anforderungen von Tauri, nicht
   von einer Messung auf diesen Systemen. Sie sind unvollständig geprüft; wer sie
   braucht, sollte sie auf dem eigenen Zielrechner nachvollziehen.
-- Nur Ollama. Es gibt keine Anbindung an andere Modellanbieter.
+- Nur Ollama im Netz und Mimir selbst lokal. Es gibt keine Anbindung an andere Modellanbieter.
+- Die eingebaute Engine rechnet auf der CPU. Auf einem Rechner ohne Grafik ist das entsprechend langsam.
 - Die Anzeige spricht Deutsch.

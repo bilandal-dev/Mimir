@@ -486,6 +486,30 @@ struct OllamaConfig {
     /// Kalenderleiste. Leer, solange keine Instanz eingetragen ist.
     #[serde(default)]
     calendar: crate::calendar::CalendarConfig,
+    /// Helligkeit der Oberfläche.
+    #[serde(default)]
+    theme: Theme,
+}
+
+/// Die Helligkeit der Oberfläche.
+///
+/// Schwarz mit Cyan ist der Stand, den es immer gab, und das ist auch der
+/// Default: Eine Konfiguration ohne dieses Feld bleibt dunkel, und niemand
+/// bekommt eine Oberfläche, die plötzlich anders aussieht als vorher.
+///
+/// Gespeichert wird die Wahl des Benutzers und nicht die Eigenschaft des
+/// Systems. Sie gilt für dieses Gerät und diesen Benutzer, und sie ist beim
+/// Umschalten sofort sichtbar – deshalb gehört sie in die Konfiguration und
+/// nicht in ein Verzeichnis, das nebenbei auf andere Programme wirkt.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Theme {
+    /// Der bisherige Stand: schwarzer Grund, Cyan als Text und Akzent.
+    #[default]
+    Dunkel,
+    /// Heller Grund, dieselben Töne als Akzent. Nicht gespiegelt, sondern
+    /// durchgerechnet – die Warnfarben bleiben Warnfarben.
+    Hell,
 }
 
 /// Woher die Modelle kommen.
@@ -526,6 +550,18 @@ impl Provider {
     /// keinen Grund hat, in dessen Arbeitsverzeichnis zu stöbern.
     fn erlaubt_dateizugriff(self) -> bool {
         matches!(self, Provider::Remote)
+    }
+
+    /// Ob die Antwort aus der eingebauten Engine kommt.
+    ///
+    /// **Bewusst eine eigene Frage und nicht die Gegenprobe von
+    /// [`Provider::erlaubt_dateizugriff`].** Beide stehen heute für dasselbe, aber
+    /// sie meinen Unterschiedliches: Die eine sagt, was ein kleines Modell darf,
+    /// die andere, woher die Token kommen. Ein Provider, der später nur den Zugriff
+    /// einschränkt, muss nicht umgebaut werden – und einer mit eingebauter Engine
+    /// bliebe nicht ohne Rechenweg.
+    fn ist_lokal_eingebaut(self) -> bool {
+        matches!(self, Provider::Local)
     }
 
     /// Die Adresse, unter der dieser Provider antwortet.
@@ -697,6 +733,7 @@ fn test_settings() -> OllamaSettings {
             agent: AgentConfig::default(),
             chat: ChatConfig::default(),
             calendar: crate::calendar::CalendarConfig::default(),
+            theme: Theme::default(),
         }),
         config_path: std::env::temp_dir().join("mimir-test-ollama.json"),
         history_path: std::env::temp_dir().join("mimir-test-chat-history.json"),
@@ -726,6 +763,7 @@ impl OllamaSettings {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
+                theme: Theme::default(),
             },
             Err(error) => return Err(format!("Ollama-Konfiguration nicht lesbar: {}", error)),
         };
@@ -926,6 +964,26 @@ impl OllamaSettings {
         self.persist_config(&candidate)?;
         config.provider = provider;
         Ok(provider)
+    }
+
+    async fn get_theme(&self) -> Theme {
+        self.get_config().await.theme
+    }
+
+    /// Merkt sich die Helligkeit der Oberfläche.
+    ///
+    /// Geprüft wird nichts, weil es nichts zu prüfen gibt: Das Schema kann nur
+    /// eine von zwei Darstellungen sein. Kann die Datei nicht geschrieben werden,
+    /// bleibt der alte Wert im Speicher stehen – die Oberfläche zeigt dann für
+    /// diese Sitzung das Neue und nach dem Neustart wieder das Alte, was ehrlich
+    /// ist und besser als eine Anzeige, die etwas behauptet, was nicht gilt.
+    async fn set_theme(&self, theme: Theme) -> Result<Theme, String> {
+        let mut config = self.config.write().await;
+        let mut candidate = config.clone();
+        candidate.theme = theme;
+        self.persist_config(&candidate)?;
+        config.theme = theme;
+        Ok(theme)
     }
 
     async fn set_base_url(&self, server_url: &str) -> Result<String, String> {
@@ -3398,6 +3456,25 @@ async fn send_chat_message(
     let _ = control.cancel.send(false);
     let base_url = settings.get_base_url().await;
     let chat = settings.get_config().await.chat;
+
+    // Der lokale Provider redet nicht mit einem Ollama im Netz, sondern mit der in
+    // Mimir eingebauten Engine. Der Weg ab hier ist derselbe: dasselbe Ergebnis,
+    // dieselben Chunks auf demselben Kanal. Der Unterschied ist nur, woher die
+    // Zeilen kommen.
+    if settings.get_provider().await.ist_lokal_eingebaut() {
+        return chat_mit_engine(Zug {
+            app,
+            model,
+            messages,
+            tools,
+            system,
+            on_chunk,
+            control: &control,
+            chat: &chat,
+        })
+        .await;
+    }
+
     let client = ollama_client()?;
     let payload = OllamaRequest {
         model,
@@ -3441,6 +3518,177 @@ async fn send_chat_message(
                 max_attempts: MAX_CHAT_ATTEMPTS,
             },
         );
+    }
+}
+
+/// Der Zug über die eingebaute Engine.
+///
+/// **Was hier gleich bleibt und was nicht.** Der Aufrufer – der Werkzeugkreis und die
+/// Oberfläche – sieht genau das wie bei einem Ollama im Netz: Chunks auf demselben
+/// Kanal, ein `Err` mit einem deutschen Satz, ein Abbruch, der ankommt. Nur die
+/// Zeichen kommen aus `engine.rs` statt aus einer HTTP-Antwort.
+///
+/// **Warum es keinen Wiederholungsversuch gibt.** Bei einem Server ist ein zweiter
+/// Versuch sinnvoll: Der Auftrag ist unverändert abgeschickt worden, und ein
+/// Verbindungsabriss unterwegs bedeutet nur, dass die Antwort fehlt. Hier entsteht die
+/// Antwort durch Rechnen auf diesem Rechner; ein zweiter Versuch hieße, dasselbe
+/// noch einmal rechnen. Der Aufrufer entscheidet ohnehin über einen Neusend.
+///
+/// **Der Auftrag wird nicht im Hintergrund gerechnet.** `spawn_blocking` hält den
+/// Rechner belegt, bis der Zug fertig oder abgebrochen ist – das ist der Zweck. Der
+/// Abbruch wird zwischen zwei Token geprüft und nicht über einen Abbruchkanal, weil
+/// die Engine synchron rechnet und nichts nebenbei annehmen kann.
+async fn chat_mit_engine(zug: Zug<'_>) -> Result<(), String> {
+    let cancel = zug.control.cancel.subscribe();
+
+    // Derselbe Ordner wie beim Herunterladen: Sonst läge die Datei, die die
+    // Oberfläche anzeigt, neben der Datei, die die Engine lädt.
+    let pfad = modelle::aus_id(&zug.model)
+        .ok_or_else(|| format!("Unbekanntes Modell: {}", zug.model))?
+        .pfad_in(&modellordner(&zug.app)?);
+
+    if !pfad.exists() {
+        return Err(format!(
+            "Das Modell {} liegt nicht auf diesem Rechner. Unter „Ollama: Lokal“ kann es \
+             heruntergeladen werden.",
+            zug.model
+        ));
+    }
+
+    let nachrichten = engine::nachrichten(&zug.messages)?;
+    let anweisung = engine::werkzeug::anweisung(zug.tools.as_deref().unwrap_or(&[]));
+
+    let systemtext = [
+        zug.system.as_deref().filter(|text| !text.is_empty()),
+        Some(anweisung.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|text| !text.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
+
+    let n_ctx = zug.fenster();
+    let threads = engine::standard_threads();
+    // Zwei Kopien: Eine wandert in den Rechen-Thread, die andere bleibt hier für den
+    // Werkzeugaufruf am Ende. Der Kanal ist von beiden Seiten benutzbar – er ist
+    // eine Meldung nach außen, keine Antwort auf eine Anfrage.
+    let kanal_rechnen = zug.on_chunk.clone();
+    let kanal = zug.on_chunk.clone();
+
+    // `spawn_blocking`: Das Rechnen belegt den Rechner, und ein Thread aus dem
+    // Tokio-Vorrat würde währenddessen nichts anderes bedienen – auch nicht den
+    // Abbruch.
+    //
+    // **Zwei Meldungen, weil zwei Dinge passieren.** Das Laden des Modells ist ein
+    // eigener Vorgang: Bei zwei GiB sind das Sekunden, in denen nichts im Fenster
+    // geschieht. Ohne Meldung stünde dort eine leere Blase, und der Benutzer
+    // wüsste nicht, ob Mimir arbeitet oder hängt. Der Stream läuft danach Token für
+    // Token.
+    let lade_anzeige = zug.app.clone();
+    let antwort = tokio::task::spawn_blocking(move || {
+        let _ = lade_anzeige.emit("engine-status", engine::ladezustand());
+
+        let mut motor = engine::Engine::laden(&pfad, n_ctx, threads)?;
+
+        let _ = lade_anzeige.emit("engine-status", engine::rechenzustand());
+
+        // Jedes Token geht sofort als Chunk raus. `Channel::send` ist von hier aus
+        // erlaubt, weil der Kanal nicht an den Tokio-Thread gebunden ist – er ist
+        // eine Meldung nach außen, keine Antwort auf eine Anfrage.
+        let ausgabe = |teil: &str| {
+            let _ = kanal_rechnen.send(StreamChunk {
+                content: teil.to_string(),
+                thinking: String::new(),
+                tool_calls: Vec::new(),
+            });
+        };
+
+        motor.antwort(
+            &nachrichten,
+            Some(&systemtext),
+            &|| *cancel.borrow(),
+            &ausgabe,
+        )
+    })
+    .await
+    .map_err(|fehler| format!("Die Engine ist abgestürzt: {fehler}"))??;
+
+    if antwort == engine::ABBRUCH_TEXT {
+        return Err(antwort);
+    }
+
+    // Der Werkzeugkreis liest aus Text, nicht aus einem Feld. Die gesuchte Form steht
+    // in `engine/werkzeug.rs`.
+    //
+    // **Der Text wird hier nicht noch einmal gesendet.** Er ist bereits Token für
+    // Token hinausgegangen; ihn zu wiederholen hieße, ihn in der Blase zu verdoppeln.
+    let (aufrufe, _text) = engine::werkzeug::aufrufe_lesen(&antwort);
+
+    if !aufrufe.is_empty() {
+        let aufrufe: Vec<ToolCall> = aufrufe
+            .into_iter()
+            .map(|aufruf| ToolCall {
+                function: ToolCallFunction {
+                    name: aufruf.name,
+                    arguments: ToolArguments {
+                        value: aufruf.argumente,
+                    },
+                },
+            })
+            .collect();
+
+        // Geprüft wird derselbe Weg wie bei Ollama: Ein Name, den kein Werkzeug
+        // trägt, oder ein Argument, das kein Objekt ist, wird abgelehnt – nicht
+        // ausgeführt. Das Modell darf einen Aufruf verlangen, aber nur einen, der
+        // auch zurücklesbar ist.
+        for aufruf in &aufrufe {
+            aufruf.function.validated()?;
+        }
+
+        kanal
+            .send(StreamChunk {
+                content: String::new(),
+                thinking: String::new(),
+                tool_calls: aufrufe,
+            })
+            .map_err(|fehler| format!("Stream-Kanal-Fehler: {fehler}"))?;
+    }
+
+    Ok(())
+}
+
+/// Ein Zug, der über die eingebaute Engine läuft.
+///
+/// Die acht Angaben, die `send_chat_message` übergibt, kämen als Liste hier nicht
+/// lesbar: Sie werden in Gruppen benannt, die etwas gemeinsam haben. Das ist der
+/// Grund für diese kleine Struct – nicht die Bequemlichkeit, sondern die Lesbarkeit
+/// der beiden Aufrufe darüber und darunter.
+struct Zug<'a> {
+    app: tauri::AppHandle,
+    model: String,
+    messages: Vec<ChatMessage>,
+    /// Die Werkzeugschemata, falls der Umfang welche mitbringt.
+    tools: Option<Vec<serde_json::Value>>,
+    /// Die dauerhafte Systemanweisung des Benutzers.
+    system: Option<String>,
+    on_chunk: Channel<StreamChunk>,
+    control: &'a State<'a, ChatControl>,
+    chat: &'a ChatConfig,
+}
+
+impl Zug<'_> {
+    /// Das Kontextfenster für diesen Zug.
+    ///
+    /// Es folgt der eingestellten Kontextgröße, sonst dem, wofür das Modell trainiert
+    /// wurde. Ohne Begrenzung wüchse der Speicherbedarf mit jeder eingestellten Größe
+    /// mit, und ein 262144-Token-Fenster wäre auf einem Rechner mit acht GiB kein
+    /// Fenster, sondern ein Absturz.
+    fn fenster(&self) -> usize {
+        match self.chat.context_tokens {
+            0 => engine::STANDARDFENSTER,
+            gesetzt => gesetzt.clamp(256, engine::MAX_FENSTER),
+        }
     }
 }
 
@@ -3517,6 +3765,18 @@ async fn is_ollama_online_within(base_url: &str, timeout: Duration) -> bool {
 
 #[tauri::command]
 async fn check_server(settings: State<'_, OllamaSettings>) -> Result<ServerStatus, String> {
+    // Im eingebauten Provider gibt es keinen Server, nach dem gefragt werden könnte:
+    // Die Engine ist Teil dieses Programms. Sie wird beim Senden gestartet, und der
+    // Knopf **Prüfen** hätte nichts zu prüfen – er würde nur eine Adresse anschauen,
+    // an der nie jemand lauscht, und „Offline“ melden, während alles bereit ist.
+    if settings.get_provider().await.ist_lokal_eingebaut() {
+        return Ok(ServerStatus {
+            online: true,
+            server_url: crate::engine::QUELLE.to_string(),
+            last_contact: settings.last_contact(),
+        });
+    }
+
     let server_url = settings.get_base_url().await;
     let online = is_ollama_online(&server_url).await;
 
@@ -4038,12 +4298,144 @@ async fn get_provider(settings: State<'_, OllamaSettings>) -> Result<Provider, S
     Ok(settings.get_provider().await)
 }
 
+/// Die Helligkeit der Oberfläche.
+///
+/// Wird einmal beim Start gelesen. Der Befehl ist aus demselben Grund ein
+/// eigener wie der Provider: Die Oberfläche soll die Datei nicht selbst lesen
+/// und nicht raten, was in der Konfiguration steht.
+#[tauri::command]
+async fn get_theme(settings: State<'_, OllamaSettings>) -> Result<Theme, String> {
+    Ok(settings.get_theme().await)
+}
+
+/// Stellt die Oberfläche auf das helle oder das dunkle Schema um.
+///
+/// Die Rückgabe ist die gespeicherte Wahl und nicht die gewünschte: Kann die
+/// Konfiguration nicht geschrieben werden, meldet das der Befehl als Fehler,
+/// und die Oberfläche behält das Schema, das wirklich gilt.
+#[tauri::command]
+async fn set_theme(theme: Theme, settings: State<'_, OllamaSettings>) -> Result<Theme, String> {
+    settings.set_theme(theme).await
+}
+
 #[tauri::command]
 async fn set_provider(
     provider: Provider,
     settings: State<'_, OllamaSettings>,
 ) -> Result<Provider, String> {
     settings.set_provider(provider).await
+}
+
+// --- Die lokalen Modelle -------------------------------------------------------
+//
+// Der lokale Provider bringt seine Modelle nicht vom Ollama im Netz, sondern aus
+// Mimirs eigenem Ordner. Der Katalog (`modelle.rs`) sagt, was es gibt,
+// `hardware.rs` entscheidet, was auf diesen Rechner passt, und die Oberfläche
+// fragt beides mit einem einzigen Aufruf – damit sie nicht zwei Abfragen
+// zusammenbauen muss und dabei eine Kombination zeigen kann, die es nicht gibt.
+
+/// Ein Katalogeintrag in der Form, in der die Oberfläche ihn braucht.
+///
+/// Katalog und Freigabe kommen zusammen in einem Aufruf, weil sie dieselbe
+/// Entscheidung sind: Die Oberfläche soll nicht selbst rechnen, was auf den Rechner
+/// passt. Sie bekommt zu jedem Eintrag die Antwort mitgeliefert.
+#[derive(Serialize, Clone, Debug)]
+struct Angebot {
+    #[serde(flatten)]
+    eintrag: &'static modelle::Eintrag,
+    /// Ob Mimir angenommen darf, dass das Modell auf diesem Rechner läuft.
+    pub empfohlen: bool,
+    /// Ob es auf diesem Rechner liegt.
+    pub geladen: bool,
+}
+
+/// Alles, was die Modellauswahl im lokalen Betrieb für einen Zug braucht.
+#[derive(Serialize, Clone, Debug)]
+struct LokaleModelle {
+    pub angebote: Vec<Angebot>,
+    /// Was von den heruntergeladenen Dateien übrig ist. Steht hier, weil es
+    /// einen Ordner geben kann, der nicht leer ist, obwohl kein Modell von ihm
+    /// stammt – etwa ein abgebrochener Download.
+    pub unbekannt: Vec<modelle::Geladen>,
+    pub hardware: hardware::Hardware,
+}
+
+/// Der Ordner, in dem die Modelle liegen.
+///
+/// Unter den App-Daten und nicht in der Konfiguration: Ein Modell ist ein
+/// Datenbestand und mehrere hundert Megabyte groß, die Konfiguration soll klein
+/// und frei kopierbar bleiben.
+fn modellordner(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|fehler| format!("Der Modellordner ließ sich nicht bestimmen: {fehler}"))?
+        .join("modelle"))
+}
+
+#[tauri::command]
+async fn get_lokale_modelle(app: tauri::AppHandle) -> Result<LokaleModelle, String> {
+    let hardware = hardware::erkenne();
+    let ordner = modellordner(&app)?;
+    let geladen = modelle::geladene(&ordner);
+
+    let angebote = modelle::KATALOG
+        .iter()
+        .map(|eintrag| Angebot {
+            empfohlen: modelle::passt_zu(eintrag, &hardware),
+            geladen: geladen.iter().any(|modell| modell.id == eintrag.id),
+            eintrag,
+        })
+        .collect();
+
+    Ok(LokaleModelle {
+        angebote,
+        unbekannt: geladen
+            .into_iter()
+            .filter(|modell| !modell.im_katalog)
+            .collect(),
+        hardware,
+    })
+}
+
+/// Lädt ein Modell herunter. Läuft es schon, macht der Aufruf dort weiter.
+///
+/// Der Client ist ein eigener und nicht der für Ollama: Das Herunterladen folgt
+/// einer Weiterleitung auf das CDN des Anbieters, ein Chat mit einer vom Benutzer
+/// eingetragenen Adresse darf das nicht.
+#[tauri::command]
+async fn modell_installieren(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let eintrag = modelle::aus_id(&id).ok_or_else(|| format!("Unbekanntes Modell: {id}"))?;
+    let ordner = modellordner(&app)?;
+    let client = modelle::ladeclient()?;
+
+    modelle::installiere(
+        &client,
+        &ordner,
+        eintrag,
+        modelle::QUELLE_BASIS,
+        &|geladen| {
+            // Jedes Stückchen melden wäre bei zwei GiB eine Meldung je Paket. Es wird
+            // gemeldet, sobald sich der Anteil spürbar geändert hat – und weil die
+            // Meldung asynchron ist, kostet sie den Ladevorgang nichts.
+            let _ = app.emit(
+                "modell-fortschritt",
+                modelle::Fortschritt {
+                    id: eintrag.id,
+                    geladen,
+                    gesamt: (eintrag.groesse_mib as u64) * 1024 * 1024,
+                },
+            );
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn modell_loeschen(app: tauri::AppHandle, id: String) -> Result<u64, String> {
+    let eintrag = modelle::aus_id(&id).ok_or_else(|| format!("Unbekanntes Modell: {id}"))?;
+
+    modelle::loesche(&modellordner(&app)?, eintrag)
 }
 
 /// Wie weit Mimir eingerichtet ist.
@@ -4722,6 +5114,12 @@ async fn list_tools(
     )
 }
 
+// Drei Module, die es vorher nicht gab und die alle drei zusammen den lokalen
+// Betrieb tragen: die eingebaute Engine, der Katalog mit dem Download und die
+// Hardware-Erkennung, nach der der Katalog sich richtet.
+pub mod engine;
+pub mod hardware;
+pub mod modelle;
 pub mod termine_validierung;
 pub mod termine_validierung_pruefungen;
 
@@ -6290,6 +6688,11 @@ pub fn run() {
             get_server_url,
             get_provider,
             set_provider,
+            get_theme,
+            set_theme,
+            get_lokale_modelle,
+            modell_installieren,
+            modell_loeschen,
             get_einrichtung,
             set_server_url,
             get_agent_config,
@@ -6398,6 +6801,7 @@ mod tests {
         SshFailure,
         StreamChunk,
         StreamFailure,
+        Theme,
         ToolCall,
         ToolOutput,
         LIST_EVENTS_TOOL,
@@ -7037,6 +7441,7 @@ mod tests {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
+                theme: Theme::default(),
             }),
             config_path: parent_path.join("ollama.json"),
             history_path: parent_path.join("chat-history.json"),

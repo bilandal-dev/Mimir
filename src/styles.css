@@ -2,7 +2,11 @@
    auf diese wenigen Töne zurückgeführt. Warnfarben stehen bewusst als eigene
    Konstanten daneben, damit sie nicht mit dem Akzent verwechselt werden:
    --danger (Rot) nur für den SSH-Neustart, --warn (Bernstein) für alles, was
-   schreibt oder ändert. */
+   schreibt oder ändert.
+
+   Hier steht das dunkle Schema, und `[data-theme='hell']` unten daneben das
+   helle. Beide listen dieselben Variablen auf: Was in dieser Datei eine Farbe
+   bekommt, steht in genau einer dieser beiden Blöcke, nirgends sonst. */
 :root {
     --bg-color: #000000;
     --chat-bg: #000000;
@@ -31,6 +35,83 @@
     --surface-raised: #0a0a0a;
     --danger: #ff5a5a;
     --warn: #ffd479;
+
+    /* Die Töne, die nicht zum Grundschema gehören, sondern eine eigene
+       Bedeutung haben: der Zustand des Servers, der Unterschied im Schreibfenster,
+       der Hinweis auf einen vollen Kontext. Sie standen vorher als Zahlen an
+       ihren Stellen, und dort hätte das helle Schema nichts ändern können. */
+    --status-online: #00ff00;
+    --status-offline: #ff0000;
+    --status-unstable: #ffaa00;
+    --status-checking: #ffff00;
+    --on-danger: #ffffff;
+    --on-warn: #000000;
+    /* Bewusst in beiden Schemata derselbe Ton: Ein dunkles Bernstein ist im
+       hellen Schema zu dunkel für einen gefüllten Knopf, aber als Rahmen
+       deutlich genug auf beiden. */
+    --warn-border: #b8860b;
+    --undone: #7a7a7a;
+    --failed: #ff8080;
+    --context-warning: #ffb454;
+    --field-error: #ff8a7a;
+    --backdrop: rgba(0, 0, 0, 0.75);
+    --code-bg: #2c2c2c;
+    --output-bg: #101010;
+    --diff-add-bg: #0d2f16;
+    --diff-add-text: #7ee29a;
+    --diff-remove-bg: #2f0f0f;
+    --diff-remove-text: #ff9a9a;
+    --diff-note-bg: #111;
+    /* Die Kalenderleiste ist ein eigener Bereich und nicht die Fortsetzung des
+       Chats. Im dunklen Schema fällt das nicht auf, weil beides Schwarz ist. */
+    --panel-bg: #000000;
+
+    /* Damit der Aufklappmenü der Auswahlfelder mitzieht. Ohne das zeigte der
+       Browser im hellen Schema eine schwarze Liste. */
+    --color-scheme: dark;
+}
+
+/* Das helle Schema. Nicht gespiegelt, sondern durchgerechnet: Cyan als Text auf
+   Weiß wäre unlesbar, deshalb wird der Akzent zu einem dunklen Türkis, und die
+   Warnfarben werden dunkler, damit sie als Warnung erkennbar bleiben statt als
+   Kante im Bild zu verschwinden. */
+[data-theme='hell'] {
+    --bg-color: #eef3f3;
+    --chat-bg: #ffffff;
+    --text-color: #0a3d3f;
+    --accent-color: #0f7b7e;
+    --accent-hover: #0a5c5f;
+    --input-bg: #ffffff;
+    --border-color: #6f8f90;
+    --button-text: #ffffff;
+    --text-muted: #47696b;
+    --surface: #e9efef;
+    --surface-raised: #dde6e6;
+    --danger: #c22f2f;
+    --warn: #8a5a00;
+
+    --status-online: #157f3a;
+    --status-offline: #c22f2f;
+    --status-unstable: #a86a00;
+    --status-checking: #6b6b00;
+    --on-danger: #ffffff;
+    --on-warn: #ffffff;
+    --warn-border: #b8860b;
+    --undone: #6f6f6f;
+    --failed: #b3261e;
+    --context-warning: #a35b00;
+    --field-error: #b3402f;
+    --backdrop: rgba(20, 40, 40, 0.45);
+    --code-bg: #e2ebeb;
+    --output-bg: #f1f6f6;
+    --diff-add-bg: #dff3e2;
+    --diff-add-text: #145c2a;
+    --diff-remove-bg: #fbe3e3;
+    --diff-remove-text: #9c2626;
+    --diff-note-bg: #e2ebeb;
+    --panel-bg: #eef4f4;
+
+    --color-scheme: light;
 }
 
 body {
@@ -60,6 +141,23 @@ header h2 {
     line-height: 1.2;
 }
 
+/* Der Knopf für das Schema und der Name stehen als eine Einheit links, weil der
+   Kopf sonst den Knopf in die Mitte der Zeile schöbe. */
+.header-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--gap);
+    min-height: 30px;
+}
+
+/* Damit der Knopf in beiden Schemata lesbar bleibt: gefüllt, wenn gerade das
+   helle Schema gilt. Sonst wäre er im hellen Fenster ein Rahmen ohne Inhalt. */
+.theme-toggle[aria-pressed="true"] {
+    background: var(--accent-color);
+    color: var(--button-text);
+    border-color: var(--accent-color);
+}
+
 .header-controls,
 .server-actions,
 .model-control {
@@ -79,23 +177,23 @@ header h2 {
 }
 
 .server-status.online {
-    color: #00ff00;
+    color: var(--status-online);
 }
 
 .server-status.offline {
-    color: #ff0000;
+    color: var(--status-offline);
 }
 
 /* Zwischen „da“ und „weg“: Der Server hat vor Kurzem geantwortet, dieser eine
    Test ist aber ins Leere gelaufen. Rot waere eine Luege, und ein Neustartangebot
    schadet hier mehr als es hilft. */
 .server-status.unstable {
-    color: #ffaa00;
+    color: var(--status-unstable);
 }
 
 .server-status.checking,
 .server-status.starting {
-    color: #ffff00;
+    color: var(--status-checking);
 }
 
 /* Bewusst kleiner als die Standardsteuerung: Diese Knöpfe sitzen zweireihig im
@@ -119,7 +217,7 @@ header select {
     background-size: 5px 5px;
     border: var(--border-width) solid var(--border-color);
     color: var(--text-color);
-    color-scheme: dark;
+    color-scheme: var(--color-scheme);
     padding: var(--control-pad-y) 32px var(--control-pad-y) 10px;
     border-radius: var(--radius);
     font-size: 14px;
@@ -423,7 +521,7 @@ dialog {
 }
 
 dialog::backdrop {
-    background: rgba(0, 0, 0, 0.75);
+    background: var(--backdrop);
 }
 
 dialog h3 {
@@ -502,7 +600,7 @@ dialog label {
 }
 
 .context-warning {
-    color: #ffb454;
+    color: var(--context-warning);
 }
 
 .visually-hidden {
@@ -565,7 +663,7 @@ dialog label {
     flex: none;
     width: 260px;
     border-left: var(--border-width) solid var(--border-color);
-    background: var(--input-bg);
+    background: var(--panel-bg);
     overflow-y: auto;
 }
 
@@ -586,7 +684,7 @@ dialog label {
     border-bottom: var(--border-width) solid var(--border-color);
     position: sticky;
     top: 0;
-    background: var(--input-bg);
+    background: var(--panel-bg);
 }
 
 .calendar-head h3 {
@@ -626,7 +724,7 @@ dialog label {
 }
 
 .calendar-state.error {
-    color: #ff8a7a;
+    color: var(--field-error);
 }
 
 /* Die Auswahl der Kalender erscheint als Block unter dem Kopf. */
@@ -751,7 +849,7 @@ dialog label {
 }
 
 .calendar-dialog-error {
-    color: #ff8a7a;
+    color: var(--field-error);
     font-size: 0.85em;
     margin: 0 0 10px;
 }
@@ -916,7 +1014,7 @@ dialog label {
 }
 
 .agent-step-undone .step-toggle {
-    color: #7a7a7a;
+    color: var(--undone);
     text-decoration: line-through;
 }
 
@@ -963,21 +1061,21 @@ dialog label {
 }
 
 .diff-add {
-    background: #0d2f16;
-    color: #7ee29a;
+    background: var(--diff-add-bg);
+    color: var(--diff-add-text);
 }
 
 .diff-remove {
-    background: #2f0f0f;
-    color: #ff9a9a;
+    background: var(--diff-remove-bg);
+    color: var(--diff-remove-text);
 }
 
 .diff-equal {
-    color: #6f8f8f;
+    color: var(--text-muted);
 }
 
 .diff-note {
-    background: #111;
+    background: var(--diff-note-bg);
     color: var(--accent-hover);
     font-style: italic;
 }
@@ -996,13 +1094,13 @@ dialog label {
 }
 
 .write-toggle {
-    border-color: #b8860b;
+    border-color: var(--warn-border);
     color: var(--warn);
 }
 
 .write-toggle[aria-pressed="true"] {
     background: var(--warn);
-    color: #000000;
+    color: var(--on-warn);
 }
 
 
@@ -1054,7 +1152,7 @@ dialog label {
 
 .agent-step-rejected .step-toggle,
 .agent-step-failed .step-toggle {
-    color: #ff8080;
+    color: var(--failed);
 }
 
 .step-output {
@@ -1062,7 +1160,7 @@ dialog label {
     padding: 8px 10px;
     max-height: 220px;
     overflow: auto;
-    background: #101010;
+    background: var(--output-bg);
     border-left: 2px solid var(--border-color);
     color: var(--accent-color);
     font-size: 0.95em;
@@ -1129,6 +1227,7 @@ dialog label {
     font-size: 0.9em;
     color: var(--accent-hover);
 }
+
 
 @keyframes waiting-spin {
     from {
@@ -1289,7 +1388,7 @@ dialog label {
 .message.ai.markdown code {
     padding: 2px 5px;
     border-radius: var(--radius-sm);
-    background: #2c2c2c;
+    background: var(--code-bg);
     color: var(--accent-hover);
     font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     font-size: 0.95em;
@@ -1420,7 +1519,7 @@ dialog button[type='submit']:hover:not(:disabled) {
 }
 
 #start-server-btn:hover:not(:disabled) {
-    color: #ffffff;
+    color: var(--on-danger);
     background: var(--danger);
     border-color: var(--danger);
 }
@@ -1582,4 +1681,108 @@ dialog button[type='submit']:hover:not(:disabled) {
 .tools-locked {
     border-top-style: dashed;
     color: var(--text-muted);
+}
+
+/* --- Die lokalen Modelle --------------------------------------------------- */
+
+/* Der Dialog braucht mehr Breite als ein Formular mit einem Feld: Es stehen
+   zwei Spalten nebeneinander, und die schmalere Variante würde jeden Eintrag
+   über mehrere Zeilen zerreißen. */
+dialog.modelle-dialog {
+    width: min(640px, calc(100% - 40px));
+}
+
+.modelle-liste {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: min(52vh, 420px);
+    overflow-y: auto;
+    margin-bottom: 4px;
+}
+
+/* Ein Eintrag ist eine Karte, keine Tabellenzeile: Name, Platzbedarf und
+   Lizenz gehören zusammen, und die Anmerkung braucht Platz, die in einer Zeile
+   nicht ist. */
+.modell {
+    border: var(--border-width) solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+}
+
+.modell.empfohlen {
+    border-color: var(--accent-color);
+}
+
+.modell-kopf {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.modell-name {
+    font-weight: 600;
+}
+
+.modell-groesse {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.modell-zeile {
+    margin: 6px 0 0;
+    font-size: 0.9em;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+.modell-anmerkung {
+    /* Die ehrliche Einschränkung steht bewusst nicht kleiner als die
+       Beschreibung: Sie ist der Grund, aus dem jemand das kleine Modell nimmt. */
+    color: var(--text-color);
+}
+
+/* Der Grund, warum dieses Modell nicht empfohlen ist. Er steht unten auf der
+   Karte, weil er die Entscheidung betrifft und nicht das Modell. In Bernstein
+   wie alles, was schreibt oder ändert – hier ist es eine Warnung vor langsamen
+   Antworten, und das gehört in dieselbe Farbfamilie wie der Schreibmodus. */
+.modell-grund {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: var(--border-width) solid var(--border-color);
+    color: var(--warn);
+}
+
+.modell-aktionen {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.modell-aktionen button {
+    font-size: 0.88em;
+    padding: 5px 10px;
+}
+
+/* Der Fortschritt als Balken. `progress` ist hier richtig, weil der Browser
+   den Wert kennt – und weil er neben dem Text stehen kann, ohne dass
+   JavaScript Breiten in Pixeln rechnen muss. */
+.modell-fortschritt {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.modell-fortschritt progress {
+    flex: 1;
+    height: 8px;
+}
+
+.modell-fortschritt span {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    white-space: nowrap;
 }

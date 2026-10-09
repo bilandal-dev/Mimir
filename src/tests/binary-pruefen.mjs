@@ -43,6 +43,12 @@ if (!existsSync(binär)) {
  *
  * Ein Muster, das `192.168.2.1` trifft, trifft auch jede andere Adresse in
  * diesem /16; die verkürzte Form ist Absicht, sie deckt ein ganzes Netz ab.
+ *
+ * `QUELLE_BASIS` in `modelle.rs` ist kein Fehler und wird deshalb nicht gesucht:
+ * Das ist die Adresse, von der die Katalogeinträge kommen – ein einzelner, im
+ * Quelltext sichtbarer Wert ohne Geheimnis darin. Sie wird in
+ * `wasSollteStehen` genannt, damit sie als bekannt gilt und nicht beim nächsten
+ * Mal als Fund erscheint.
  */
 const FREMDE_ADRESSEN = [
   {
@@ -241,6 +247,7 @@ for (const { muster, begruendung, ausgenommen } of FREMDE_ADRESSEN) {
 const wasSollteStehen = () => {
   console.log('  - localhost:11434 als Vorgabewert, änderbar mit /server-url');
   console.log('  - 0.0.0.0 als Bindungsadresse im Startskript für Ollama');
+  console.log('  - huggingface.co als Quelle der Katalogeinträge');
   console.log('  - Feldnamen wie app_password – keine Werte');
 };
 

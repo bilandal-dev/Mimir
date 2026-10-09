@@ -32,8 +32,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server",
-    "longDescription": "Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server",
+    "shortDescription": "Chat-Oberfläche für ein Ollama im Netz oder ein eingebautes Modell",
+    "longDescription": "Chat-Oberfläche für ein Ollama im Netz oder ein eingebautes Modell",
     "category": "DeveloperTool"
   }
 }

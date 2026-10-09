@@ -3,7 +3,15 @@
 Bauen, Prüfen und Verteilen. Für alle, die an Mimir arbeiten oder es für ihr eigenes
 System bauen.
 
-Voraussetzungen sind Rust/Cargo und die benötigten Tauri-Systemabhängigkeiten. Für den normalen Chat wird ein erreichbarer Ollama-Server benötigt; für den SSH-Start zusätzlich ein lokales `ssh`-Programm und entweder ein vorbereiteter SSH-Schlüssel/`ssh-agent` oder die Berechtigung für den Passwort-Fallback.
+Voraussetzungen zum Bauen sind Rust/Cargo, **CMake und ein C++-Übersetzer** – Mimir
+bringt llama.cpp als Rust-Bindung mit, und die wird über CMake gebaut. Dazu kommen die
+benötigten Tauri-Systemabhängigkeiten. Für den Chat mit einem Modell im Netz wird ein
+erreichbarer Ollama-Server benötigt; **für das eingebaute Modell nicht**, das rechnet
+Mimir selbst. Für den SSH-Start zusätzlich ein lokales `ssh`-Programm und entweder ein
+vorbereiteter SSH-Schlüssel/`ssh-agent` oder die Berechtigung für den Passwort-Fallback.
+
+CMake ist ein Bau-Werkzeug und keine Laufzeitabhängigkeit. Das fertige Mimir braucht
+es nicht; wer aus dem Quelltext baut, braucht es einmal.
 
 Anwendung im Entwicklungsmodus starten:
 
@@ -111,7 +119,10 @@ Arch die Binary aus dem Quelltext.
 ### Windows und macOS
 
 Beide lassen sich nur auf diesen Systemen zuverlässig bauen, und beide brauchen
-mehr als Rust.
+mehr als Rust. Auf beiden ist der C++-Teil keine Zusatzanforderung mehr, sondern
+die Bedingung: Die Visual Studio Build Tools bzw. die Command Line Tools bringen
+den Übersetzer für llama.cpp gleich mit, und CMake ist auf beiden vorhanden oder
+wird mitinstalliert.
 
 **Windows**
 
@@ -399,7 +410,7 @@ Geprüft wird nicht die Oberfläche, sondern die Stelle, an der aus dem eingeste
 
 Der Grund für ein eigenes Skript ist derselbe wie bei der Datumsangabe: Ein Fehler im Umfang sieht man im Chat nicht. Er äußert sich nicht als Textfehler, sondern darin, dass das Modell ein Werkzeug sieht, das es nicht sehen soll, oder einen Termin anlegt, den niemand wollte.
 
-Stand der Prüfungen: 369 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlich gibt es einen Nachbau des Ablaufs unter jsdom mit 129 Prüfungen; er liegt nicht im Repository und ist deshalb von hier aus nicht nachprüfbar. Sechs seiner Prüfungen brauchen einen wirklich erreichbaren Ollama-Server und werden ohne ihn ausdrücklich übersprungen, statt eine Ersatzliste vorzutäuschen.
+Stand der Prüfungen: 435 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlich gibt es einen Nachbau des Ablaufs unter jsdom mit 129 Prüfungen; er liegt nicht im Repository und ist deshalb von hier aus nicht nachprüfbar. Sechs seiner Prüfungen brauchen einen wirklich erreichbaren Ollama-Server und werden ohne ihn ausdrücklich übersprungen, statt eine Ersatzliste vorzutäuschen.
 
 
 ## Sicherheits- und Datenhinweise
@@ -420,6 +431,28 @@ Stand der Prüfungen: 369 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlic
 - Schreibende Werkzeuge sind standardmäßig gesperrt, gelten nur für die laufende Sitzung und werden nie gespeichert. Sie legen neue Dateien an oder ersetzen genau eine eindeutig auffindbare Stelle; Löschen, Umbenennen und Ausführen gibt es nicht. Vor jedem Schreibvorgang wird der Unterschied gezeigt, geschrieben wird atomar, und bei Dateien lässt sich der Vorgang im Chat zurücknehmen – bei Terminen nicht, siehe [Termine anlegen](#termine-anlegen).
 - Die Ollama-Verbindung verwendet standardmäßig unverschlüsseltes HTTP; sie sollte nur in einem vertrauenswürdigen privaten Netzwerk betrieben werden.
 - Für einen produktiven Einsatz sollten TLS und gegebenenfalls Authentifizierung ergänzt werden.
+
+### Die eingebaute Engine
+
+**Der Benutzer sieht, was passiert.** Beim ersten Senden wird das Modell geladen
+(das ist der Vorgang, der am längsten dauert und am wenigsten sichtbar war), danach
+geht **jedes Token sofort** als Chunk auf denselben Kanal, den auch ein Ollama im
+Netz benutzt. Ein Aufruf, der rechnet, ist an zwei Dingen erkennbar: an der
+Ladeanzeige mit dem Zustand der Engine und daran, dass der Text Zeile für Zeile
+wächst. Vorher kam die Antwort erst fertig am Ende – bei diesem Rechner sind das
+30 Sekunden, in denen das Fenster leer blieb und der Benutzer nicht wusste, ob Mimir
+hängt oder arbeitet.
+
+
+- **Ein lokaler Nachrichtentext ist ein Konto wert, wenn er das Fenster verlässt.** Beim lokalen Provider verlässt er den Rechner nicht: Die Engine rechnet hier, und es gibt keine Verbindung, über die er ginge. Das ist der einzige Betrieb, in dem Mimir ohne jede Netzverbindung auskommt.
+- **Der Download eines Modells geht an Hugging Face** – ohne Konto, ohne Token, und ohne etwas über den Benutzer mitzuschicken: abgeschickt werden nur die Adresse der Datei und ein Bereich, falls ein abgebrochener Ladevorgang fortgesetzt wird. Es wird **kein Hash und keine Kennung des Rechners** übertragen.
+- Der Ladeclient folgt einer Weiterleitung, weil Hugging Face auf `resolve/main/…` immer auf seinen CDN verweist – ohne das käme kein Modell an. Er folgt aber **höchstens fünfmal und ausschließlich über HTTPS**: Das Ziel nennt die Gegenstelle, und ein HTTP-Ziel würde die Datei unterwegs unverschlüsselt machen.
+- **Die Größenangabe im Katalog ist gerundet, und das war ein Fehler.** `groesse_mib` steht aufgerundet, weil 468,64 MiB keine lesbare Zahl sind. Aus dieser Angabe folgt keine Bytezahl, sondern eine Spanne – und es stand dort `== erwartet`. Der Download lief bis 100 %, wurde als „unvollständig" verworfen, und der Knopf kam zurück: Das ist der Fehler, den man „der Knopf tut nichts" nennt, obwohl er alles getan hat. Geprüft wird jetzt über `vollstaendig`, mit 1 % nach oben und dem Kleineren aus 1 % und einer MiB nach unten – letzteres, weil eine feste MiB-Grenze bei einer kleinen Datei deren Hälfte als vollständig gelten ließe.
+- **Die Engine ist ohne AVX2 gebaut, und das ist Absicht.** llama.cpp lässt beim Übersetzen den Compiler *auf dem Baurechner* einmal eine Probe machen: Kann er AVX2, wird AVX2 eingeschaltet. Damit hängt das Ergebnis vom Rechner ab, auf dem gebaut wurde, nicht von dem, auf dem Mimir laufen soll. Auf einem Rechner ohne AVX2 gebaut, endete das Programm mit `SIGILL` mitten im Laden des Modells – nicht langsamer, sondern beendet. Die Bauflags stehen deshalb in `.cargo/config.toml`; sie setzen SSE4.2 als Untergrenze. Wer schneller rechnen will, überschreibt sie beim Bauen (`GGML_AVX2=ON …`) und verteilt diese Binary nicht weiter.
+- **Ein Rahmen im Text ist kein Befehl.** Die Engine liest Werkzeugaufrufe aus einem Textabschnitt, und dieselbe Zeichenfolge in einer Nachricht des Benutzers würde ohne Vorkehrung beim nächsten Zug als Befehl gelesen. Der Rahmenname trägt deshalb ein Nullbreitenzeichen, das Modelle beim Schreiben weglassen und Menschen nicht sehen.
+- **Ein nicht lesbarer Werkzeugaufruf wird nie ausgeführt.** Was nicht in ein Objekt passt oder einen Namen trägt, den kein Werkzeug führt, bleibt Text und wird angezeigt. Der Name wird vor der Ausführung wie bei Ollama geprüft.
+- Die Antwort ist auf 8192 Token und das Kontextfenster auf 16384 begrenzt. Der zweite Wert ist eine Rechengrenze, keine Vorsicht: Der KV-Speicher liegt bei etwa 0,5 MiB je Token.
+- **Das Modell ist eine Datei von einem Dritten.** Mimir prüft ihre Länge, nicht ihre Herkunft – eine Prüfsumme gibt es für diese Dateien nicht. Ein Katalogeintrag nennt die Quelle; wer einen anderen Inhalt in den Modellordner legt, hat ein Modell gewählt, das Mimir nicht kennt, und es wird in der Liste als solches ausgewiesen.
 
 ### Kalender
 

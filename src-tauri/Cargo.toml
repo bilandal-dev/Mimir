@@ -1,7 +1,7 @@
 [package]
 name = "mimir"
 version = "0.1.1"
-description = "Schlanke Desktop-Oberfläche für einen eigenen Ollama-Server"
+description = "Chat-Oberfläche für ein Ollama im Netz oder ein eingebautes Modell"
 # `authors` landet im `Maintainer`-Feld des Debian-Pakets. Mit dem Vorgabewert
 # "you" erzeugte `cargo tauri build` ein Paket, das als Betreiber „you" führt –
 # sichtbar in jeder Paketverwaltung, die es installiert.
@@ -12,7 +12,7 @@ authors = ["bilandal-dev <noreply@github.com>"]
 license = "MIT"
 edition = "2021"
 repository = "https://github.com/bilandal-dev/Mimir"
-keywords = ["ollama", "chat", "tauri"]
+keywords = ["ollama", "chat", "tauri", "llama"]
 categories = ["gui"]
 # Es gibt zwei Binaries: die Anwendung und `termine-validierung`, ein Werkzeug
 # für den Abgleich mit einem echten Modell. Ohne diese Zeile weiß `cargo run` bei
@@ -64,6 +64,24 @@ futures-util = "0.3"
 ammonia = "4.2"
 pulldown-cmark = "0.13.4"
 zeroize = "1.8"
+# Hardware-Erkennung: Prozessor, Arbeitsspeicher und Befehlssätze. Ohne sie
+# kann Mimir kein Modell für den Rechner vorschlagen, auf dem es läuft – und
+# das auf jedem System, auch Windows. `sysinfo` liest das über die
+# Betriebssystem-Schnittstellen, `default-features = false` lässt Komponenten,
+# Netzwerk, Prozesse und Benutzer weg, weil hier nichts davon gebraucht wird
+# (und `multithread` fällt dabei auch ab). `disk` ist für die Platzprüfung vor
+# einem Download da – ein Modell, das den Speicher nicht findet, ist ein
+# abgebrochener Download.
+sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }
+
+# Die eingebaute Engine. llama.cpp bringt ihr C++ mit, und der Bauvorgang läuft
+# über CMake – deshalb braucht das Bauen `cmake` und einen C++-Übersetzer, nicht
+# nur Rust. Das ist der Preis dafür, dass der Benutzer nichts installieren muss.
+# Bewusst ohne `cuda`/`metal`/`vulkan`: Die Katalogeinträge sind klein, und eine
+# ausgelagerte Grafik würde das Modell nur bei den Rechnern beschleunigen, die
+# ohnehin ein Ollama daneben haben.
+llama-cpp-2 = { version = "0.1.159", default-features = false, features = ["sampler"] }
+
 # Kalender: CalDAV antwortet mit WebDAV-Multistatus in XML, und Termine brauchen
 # echte Zeitpunkte samt Zeitzone. DieICS- und RRULE-Aufbereitung ist bewusst
 # selbst geschrieben, damit nur diese Abhängigkeiten dazukommen.

@@ -17,6 +17,12 @@ const serverStatus = document.getElementById('server-status');
 const checkServerBtn = document.getElementById('check-server-btn');
 const startServerBtn = document.getElementById('start-server-btn');
 const serverUrlBtn = document.getElementById('server-url-btn');
+const modelleDialog = document.getElementById('modelle-dialog');
+const modelleForm = document.getElementById('modelle-form');
+const modelleListe = document.getElementById('modelle-liste');
+const modelleHinweis = document.getElementById('modelle-hinweis');
+const modelleStatus = document.getElementById('modelle-status');
+const modelleSchliessen = document.getElementById('modelle-schliessen');
 const serverUrlDialog = document.getElementById('server-url-dialog');
 const serverUrlForm = document.getElementById('server-url-form');
 const serverUrlInput = document.getElementById('server-url-input');
@@ -97,6 +103,7 @@ const certificateFingerprint = document.getElementById('certificate-fingerprint'
 const certificateHint = document.getElementById('certificate-hint');
 const certificateTrust = document.getElementById('certificate-trust');
 const certificateCancel = document.getElementById('certificate-cancel');
+const themeToggleBtn = document.getElementById('theme-toggle-btn');
 
 // Chat-Verlauf im Speicher halten, damit Ollama den Kontext kennt
 let messageHistory = [];
@@ -145,6 +152,12 @@ const WRITE_TOOL_NAMES = ['write_file', 'edit_file', ...CALENDAR_TOOL_NAMES];
 const SCOPE_NAMES = ['agent', 'termine'];
 const PROVIDER_NAMES = ['remote', 'local'];
 
+// Die beiden Schemata der Oberfläche, genau so heißen sie in der Konfiguration.
+// Diese Liste ist die Grenze: Kommt aus dem Backend etwas anderes, gilt das
+// dunkle Schema – eine unbekannte Angabe darf die Oberfläche nicht in einen
+// Zustand setzen, für den es keine Farben gibt.
+const THEME_NAMES = ['dunkel', 'hell'];
+
 // Woher die Modelle kommen. Das ist keine Sitzungseinstellung wie der
 // Agentenmodus, sondern ein gespeicherter Zustand: Wer auf das lokale Ollama
 // wechselt, will das nach einem Neustart wieder so vorfinden.
@@ -153,6 +166,12 @@ const PROVIDER_NAMES = ['remote', 'local'];
 // Beim lokalen Provider gilt der Terminumfang, egal was gespeichert ist – das
 // Backend setzt das durch, und dieser Wert hier folgt ihm nur für die Anzeige.
 let provider = 'remote';
+
+// Welches Schema gerade gilt. Gespeichert ist die Wahl des Benutzers, deshalb
+// steht sie in der Konfiguration und wird beim Start geholt – siehe
+// `ladeSchema`. Solange sie nicht geholt ist, gilt das dunkle, und das ist auch
+// das, was ohne die Angabe in der Konfiguration erscheint.
+let theme = 'dunkel';
 
 function lokalesOllama() {
     return provider === 'local';
@@ -222,11 +241,56 @@ function updateRetryNotice(text) {
 }
 
 if (eventApi?.listen) {
+    // Der Ladevorgang meldet über dieses Ereignis, wie weit er ist. Ohne es bliebe
+    // zwei Minuten lang eine Zahl stehen, die sich nicht bewegt – und das ist bei
+    // zwei Gigabyte der Unterschied zwischen „arbeitet“ und „hängt“.
+    eventApi.listen('modell-fortschritt', (event) => {
+        if (!fortschrittsZiel || !event?.payload?.gesamt) return;
+
+        const anteil = Math.min(100, (event.payload.geladen / event.payload.gesamt) * 100);
+        fortschrittsZiel.balken.value = anteil;
+        fortschrittsZiel.text.textContent = `${Math.floor(anteil)} %`;
+    });
+
+    // Der Zustand der eingebauten Engine. Ohne diese Meldung stünde in der Zeit,
+    // in der das Modell geladen wird, eine leere Antwortblase – und der Benutzer
+    // wüsste nicht, ob Mimir arbeitet oder hängt. Beim Server im Netz sagt die
+    // Kopfzeile „Prüfe …“ dasselbe, nur schneller.
+    eventApi.listen('engine-status', (event) => {
+        setEngineStatus(event?.payload || '');
+    }).catch((error) => console.error('Engine-Listener fehlgeschlagen:', error));
+
     eventApi.listen('chat-retry', (event) => {
         const attempt = Number(event.payload?.attempt ?? 0);
         const maxAttempts = Number(event.payload?.max_attempts ?? 0);
         updateRetryNotice(`Verbindung unterbrochen – neuer Versuch ${attempt}/${maxAttempts} ...`);
     }).catch((error) => console.error('Retry-Listener fehlgeschlagen:', error));
+}
+
+/**
+ * Zeigt, was die eingebaute Engine gerade tut – an derselben Stelle, an der beim
+ * Server im Netz der Zustand steht.
+ *
+ * **Warum in der Kopfzeile und nicht in der Ladeanzeige.** Beim Server im Netz
+ * steht in der Kopfzeile, was gerade passiert: „Prüfe …", „Online", „instabel".
+ * Die eingebaute Engine ist für den Benutzer derselbe Fall – nur der Ort, an dem
+ * die Tokens herkommen, ist ein anderer. Ein Zustand an zwei Stellen oder an
+ * einer zweiten wäre eine neue Sprache für dieselbe Sache: „Antwort wird erzeugt"
+ * unten und „Lokal: rechnet" oben meint dasselbe zweimal, und die untere Zeile
+ * erscheint erst, wenn schon etwas passiert ist. Genau davor soll der Benutzer
+ * geschützt werden.
+ *
+ * Die Farbe folgt der des Servers: Gelb für „gerade unterwegs", Grün für „bereit".
+ */
+function setEngineStatus(zustand) {
+    if (!lokalesOllama()) return;
+
+    if (!zustand) {
+        setServerStatus('online', 'Lokal: bereit');
+        return;
+    }
+
+    setServerStatus('checking', `Lokal: ${zustand} …`);
 }
 
 function setGenerating(active) {
@@ -274,7 +338,14 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
 function setServerStatusFromProbe(status) {
     if (status.online) {
         setLastContact(status.last_contact ?? nowSeconds());
-        setServerStatus('online', 'Server: Online');
+
+        // Im lokalen Provider kommt „online“ von der eingebauten Engine, und die
+        // hat keine Adresse. Deshalb steht hier, was tatsächlich antwortet – sonst
+        // stünde „Server: Online“ über einem Fenster, in dem gar kein Server läuft.
+        setServerStatus(
+            'online',
+            lokalesOllama() ? 'Lokal: bereit' : 'Server: Online',
+        );
         return true;
     }
 
@@ -299,6 +370,14 @@ async function loadModels() {
     // Aussetzer hat damit jede Auswahl zerstört und den Senden-Knopf gesperrt –
     // auf einer schwankenden Strecke also nach jedem zweiten Satz.
     const listeVorhanden = [...modelSelect.options].some((option) => option.value !== '');
+
+    // Im lokalen Betrieb gibt es keinen Server, nach dem gefragt werden könnte.
+    // Die Liste kommt aus Mimir selbst: Was auf der Platte liegt, und was Mimir
+    // für diesen Rechner empfiehlt. Dieselbe Auswahl wie beim Server – deshalb
+    // derselbe Knopf und nicht ein zweiter daneben.
+    if (lokalesOllama()) {
+        return loadLocalModels(previouslySelected);
+    }
 
     setServerStatus('checking', 'Server: Prüfe ...');
 
@@ -408,6 +487,463 @@ function starteModelllistenWiederholung() {
     }, MODELLLISTE_PAUSE_MS);
 }
 
+// ------------------------------------------------- Die Modelle im lokalen Betrieb
+//
+// Im entfernten Betrieb fragt Mimir die Modelle beim Server. Lokal gibt es keinen
+// Server, also kommt die Liste aus Mimir selbst: erst die Modelle, die auf diesem
+// Rechner liegen, dann die Empfehlungen für diesen Rechner.
+//
+// Beide Gruppen stehen in **einer** Auswahl, der des Servers. Eine zweite Auswahl
+// daneben wäre eine zweite Wahrheit über „welches Modell läuft jetzt“ – und die
+// steht dann im Kopf, während das Chatfenster die andere zeigt.
+
+/// Was zuletzt vom Backend kam. Für den Dialog, damit er beim Öffnen nichts
+/// erneut abfragt, und für den Fortschritt, der ohne diese Daten nichts anzeigen
+/// kann.
+let lokaleModelle = null;
+let ladevorgang = null;
+
+/// Wohin der Fortschritt geschrieben wird, solange ein Ladevorgang läuft.
+let fortschrittsZiel = null;
+
+// --- Der Aufbau der Liste, ohne DOM ---
+//
+// Die beiden Funktionen hier entscheiden, was in der Auswahl steht, und nichts
+// davon braucht ein Fenster. Sie stehen deshalb für sich, damit
+// `lokale-modelle.test.mjs` sie ohne Browser prüfen kann: „ohne geladenes Modell
+// gibt es nichts zu wählen“ ist eine Entscheidung, keine Darstellung.
+
+/// Der Wert des Eintrags, der den Dialog öffnet. Kein Modell kann so heißen: Die
+/// Kennungen kommen aus dem Katalog und enthalten kein `+` und keinen Unterstrich.
+const MODELLE_DIALOG = '__modelle__';
+
+/**
+ * Teilt die Angebote in die drei Gruppen der Auswahl.
+ *
+ * Getrennt wird nach „liegt es hier“, nicht nach „ist es empfohlen“: Ein
+ * heruntergeladenes Modell gehört in die erste Gruppe, auch wenn der Katalog es
+ * heute nicht mehr vorschlägt – der Benutzer hat es sich ausgesucht.
+ *
+ * **Die dritte Gruppe ist der Grund, warum es hier überhaupt drei sind.** Modelle,
+ * die der Katalog kennt, aber für diesen Rechner nicht empfiehlt, stehen trotzdem
+ * drin – unter eigener Überschrift und ohne „empfohlen“ im Text. Sie wegzulassen
+ * hieße: Auf einem Rechner ohne AVX2 oder zu wenig Speicher gäbe es nichts zu
+ * laden, und die Engine wäre unerreichbar, obwohl sie im Programm steckt. Das ist
+ * eine Entscheidung über den Rechner, keine über die Verfügbarkeit: Wer ein Modell
+ * herunterladen kann, kann es auch benutzen – nur eben langsamer oder mit weniger
+ * Kontext. Die Empfehlung sagt, was sinnvoll ist; die Auswahl sagt, was es gibt.
+ */
+function gruppeAngebote(angebote) {
+    return {
+        geladen: angebote.filter((angebot) => angebot.geladen),
+        empfohlen: angebote.filter((angebot) => !angebot.geladen && angebot.empfohlen),
+        ohneEmpfehlung: angebote.filter((angebot) => !angebot.geladen && !angebot.empfohlen),
+    };
+}
+
+/// Liest eine Größe so, wie sie im Katalog steht: MB, und ab einem GB mit einer
+/// Nachkommastelle. Ohne Nachkommastelle läge „2 GB“ zwischen zwei echten Größen
+/// und niemand wüsste, welche gemeint ist.
+function groessentext(mib) {
+    return mib >= 1024
+        ? `${(mib / 1024).toFixed(1).replace('.', ',')} GB`
+        : `${mib} MB`;
+}
+
+/**
+ * Der Satz, der erklärt, warum **dieses** Modell nicht empfohlen ist.
+ *
+ * **Warum das hier steht und nicht im Backend.** Das Backend entscheidet, *ob*
+ * empfohlen wird – es kennt den freien Speicher und die Befehlssätze. Was der
+ * Benutzer *liest*, ist eine Frage der Darstellung: „3 GB frei, gebraucht 4 GB“
+ * ist eine Zahl, mit der niemand etwas anfangen kann, „dafür fehlen dir 1 GB
+ * Arbeitsspeicher“ ist ein Satz, mit dem man es kann.
+ *
+ * **Der Prozessor-Satz fehlt hier bewusst.** Er steht über allen Karten im Dialog,
+ * und es ist derselbe für jedes Modell: Ihn dreimal zu wiederholen hieße, dreimal
+ * dasselbe zu lesen. Hier steht nur, was **dieses** Modell betrifft – und das ist
+ * bei mehreren Karten etwas anderes, denn der Speicherbedarf ist pro Karte
+ * verschieden.
+ *
+ * Die Hardware kommt als Parameter und nicht aus der globalen Liste: So lässt sich
+ * diese Funktion ohne Fenster prüfen, und das ist sie wert – sie entscheidet, was
+ * der Benutzer über seinen Rechner erfährt, und das steht sonst nirgends.
+ */
+function empfehlungsgrund(angebot, hardware = lokaleModelle?.hardware) {
+    if (!hardware) return 'Für diesen Rechner nicht empfohlen.';
+
+    const frei = hardware.ram_frei_gib;
+
+    if (frei === null || frei === undefined) {
+        return 'Der freie Arbeitsspeicher ließ sich nicht auslesen. '
+            + 'Laden ist trotzdem möglich.';
+    }
+
+    if (frei < angebot.ram_mindestens_gib) {
+        return `Dafür fehlen dir ${angebot.ram_mindestens_gib - frei} GB Arbeitsspeicher: `
+            + `frei sind ${frei} GB. Laden ist trotzdem möglich.`;
+    }
+
+    // Der Speicher reicht, es liegt am Prozessor – der Fall auf diesem Rechner.
+    // Der Verweis oben ist hier richtig, weil dort genau das steht; bei einem
+    // anderen Grund hätte er in die Irre geführt.
+    return 'Der Arbeitsspeicher reicht dafür, der Prozessor nicht – der Grund dafür '
+        + 'steht oben. Laden ist trotzdem möglich.';
+}
+
+// --- Ende der prüfbaren Stücke ---
+
+/**
+ * Füllt die Modellauswahl mit dem, was lokal da ist und was Mimir empfiehlt.
+ *
+ * Zurückgegeben wird die Liste der anwendbaren Modelle – nicht der Rückgabewert
+ * des Servers, aber dieselbe Form. `/server-status` und die Wiederholung beim
+ * Fehlschlag erwarten beides gleich.
+ */
+async function loadLocalModels(bisher) {
+    const generation = ++modelLoadGeneration;
+
+    try {
+        const antwort = await invoke('get_lokale_modelle');
+
+        // Ein neuerer Aufruf hat schon geantwortet: Deren Liste zählt, nicht
+        // diese. Sonst würde ein langsamer zweiter Aufruf die gerade geladene
+        // Auswahl wieder überschreiben.
+        if (generation !== modelLoadGeneration) return null;
+
+        lokaleModelle = antwort;
+        zeichneLokaleModellliste(bisher);
+
+        // Die Statuszeile wird hier gesetzt, weil das Laden der Liste der einzige
+        // Kontakt mit dem lokalen Betrieb ist: Es geht kein HTTP an einen Server,
+        // und ohne diesen Aufruf stünde im Kopf dauerhaft „Prüfe …“.
+        setLastContact(nowSeconds());
+        setServerStatus('online', 'Lokal: bereit');
+
+        return antwort.angebote
+            .filter((angebot) => angebot.geladen)
+            .map((angebot) => angebot.id);
+    } catch (error) {
+        if (generation !== modelLoadGeneration) return null;
+
+        console.error('Lokale Modelle nicht lesbar:', error);
+        modelSelect.replaceChildren(new Option('Modelle nicht lesbar', ''));
+        modelSelect.disabled = true;
+        sendBtn.disabled = true;
+
+        return null;
+    }
+}
+
+
+/**
+ * Zeichnet die Auswahl: geladene Modelle zuerst, danach die Empfehlungen, danach
+ * der Rest des Katalogs.
+ *
+ * Ohne ein einziges geladenes Modell bleibt nur das Senden gesperrt – es gibt dann
+ * nichts, womit man starten könnte, und eine Auswahl, die beim Senden scheitert,
+ * ist schlechter als eine sichtbar leere Liste.
+ *
+ * Die Auswahl selbst bleibt dabei bedienbar. Über einen Eintrag kommt man in den
+ * Dialog, und der ist der einzige Weg dorthin: Eine gesperrte Auswahl hat genau
+ * dann nichts, womit man ein Modell beschaffen kann – der lokale Betrieb endete auf
+ * einem Rechner ohne Modell in einer Sackgasse.
+ *
+ * **Was nicht empfohlen wird, steht trotzdem drin.** Der Grund dafür steht über der
+ * Liste, nicht statt der Modelle: Wer auf einem Rechner ohne AVX2 ein Modell laden
+ * kann, sollte es auch können. Die Empfehlung ist ein Rat, kein Verbot – und der
+ * Preis eines Ratschlags, dem man nicht folgt, ist eine langsamere Antwort, keine
+ * kaputte Anwendung.
+ */
+function zeichneLokaleModellliste(bisher) {
+    if (!lokaleModelle) return;
+
+    const { geladen, empfohlen, ohneEmpfehlung } = gruppeAngebote(lokaleModelle.angebote);
+
+    modelSelect.replaceChildren();
+
+    if (geladen.length > 0) {
+        const gruppe = document.createElement('optgroup');
+        gruppe.label = 'Auf diesem Rechner';
+        geladen.forEach((angebot) => gruppe.appendChild(
+            new Option(`${angebot.name} · ${angebot.quantisierung}`, angebot.id),
+        ));
+        modelSelect.appendChild(gruppe);
+    }
+
+    if (empfohlen.length > 0) {
+        const gruppe = document.createElement('optgroup');
+        gruppe.label = geladen.length > 0
+            ? 'Empfehlung für diesen Rechner'
+            : 'Empfehlung für diesen Rechner – noch nicht geladen';
+        empfohlen.forEach((angebot) => gruppe.appendChild(
+            new Option(`${angebot.name} · ${angebot.groesse_mib} MB · laden`, angebot.id),
+        ));
+        modelSelect.appendChild(gruppe);
+    }
+
+    // Der Rest des Katalogs, mit seiner Begründung in der Überschrift. Ohne sie
+    // stünde hier eine Modellliste, die so täte, als wären alle gleich gut.
+    if (ohneEmpfehlung.length > 0) {
+        const gruppe = document.createElement('optgroup');
+        gruppe.label = empfohlen.length > 0
+            ? 'Weitere Modelle – hier nicht empfohlen'
+            : 'Modelle – für diesen Rechner nicht empfohlen, aber ladbar';
+        ohneEmpfehlung.forEach((angebot) => gruppe.appendChild(
+            new Option(`${angebot.name} · ${angebot.groesse_mib} MB · laden`, angebot.id),
+        ));
+        modelSelect.appendChild(gruppe);
+    }
+
+    // Nicht wählbar, damit niemand darauf wartet: Der Grund ist eine Auskunft und
+    // kein Modell. Steht er in der Liste, sieht man ihn ohne den Dialog zu öffnen.
+    if (empfohlen.length === 0) {
+        const grund = new Option(
+            lokaleModelle.hardware?.einordnung?.hinweis
+                || 'Für diesen Rechner empfiehlt Mimir kein Modell.',
+            '',
+        );
+        grund.disabled = true;
+        modelSelect.insertBefore(grund, modelSelect.firstChild);
+    }
+
+    const unbekannt = new Option('＋ Modell herunterladen …', MODELLE_DIALOG);
+    modelSelect.appendChild(unbekannt);
+
+    modelSelect.disabled = false;
+    sendBtn.disabled = geladen.length === 0;
+
+    if (geladen.length > 0) {
+        modelSelect.value = geladen.some((angebot) => angebot.id === bisher)
+            ? bisher
+            : geladen[0].id;
+    } else {
+        modelSelect.value = MODELLE_DIALOG;
+    }
+}
+
+/**
+ * Öffnet den Dialog mit den Modellen und der Auskunft über den Rechner.
+ *
+ * Der Dialog wird gefüllt, bevor er aufgeht: Ein Fenster, das erst beim Öffnen
+ * seinen Inhalt holt, ist für einen Bruchteil einer Sekunde leer und wirkt kaputt.
+ */
+function openModelDialog() {
+    if (!lokaleModelle) {
+        modelleStatus.textContent = 'Lade die Angaben zu diesem Rechner …';
+        modelleListe.replaceChildren();
+        modelleDialog.showModal();
+        invoke('get_lokale_modelle').then((antwort) => {
+            lokaleModelle = antwort;
+            zeichneLokaleModelle();
+        }).catch((error) => {
+            modelleStatus.textContent = `Fehler: ${error}`;
+        });
+        return;
+    }
+
+    zeichneLokaleModelle();
+    modelleDialog.showModal();
+}
+
+/// Zeichnet den Inhalt des Dialogs.
+function zeichneLokaleModelle() {
+    if (!lokaleModelle) return;
+
+    const hardware = lokaleModelle.hardware;
+    const teile = [];
+
+    if (hardware.prozessor) teile.push(hardware.prozessor);
+    teile.push(`${hardware.threads} Threads`);
+    if (hardware.ram_frei_gib !== null) teile.push(`${hardware.ram_frei_gib} GB frei`);
+    if (hardware.ram_gib !== null) teile.push(`${hardware.ram_gib} GB insgesamt`);
+
+    modelleHinweis.textContent = `${teile.join(' · ')}.`
+        + (hardware.einordnung.hinweis ? ` ${hardware.einordnung.hinweis}` : '');
+
+    if (lokaleModelle.unbekannt.length > 0) {
+        const namen = lokaleModelle.unbekannt
+            .map((modell) => `${modell.id} (${modell.groesse_mib} MB)`)
+            .join(', ');
+        modelleHinweis.textContent += ` Im Ordner liegt außerdem: ${namen}. `
+            + 'Diese Dateien kennt Mimir nicht – sie können ein abgebrochener Download sein.';
+    }
+
+    modelleListe.replaceChildren();
+
+    for (const angebot of lokaleModelle.angebote) {
+        modelleListe.appendChild(karteVonModell(angebot));
+    }
+}
+
+/// Eine Karte für einen Katalogeintrag.
+function karteVonModell(angebot) {
+    const karte = document.createElement('div');
+    karte.className = angebot.empfohlen ? 'modell empfohlen' : 'modell';
+
+    const kopf = document.createElement('div');
+    kopf.className = 'modell-kopf';
+
+    const name = document.createElement('span');
+    name.className = 'modell-name';
+    // **Die Beschriftung ist der ganze Unterschied.** Empfohlenene Modelle tragen
+    // ein „– Empfehlung“, alle anderen nicht – und trügen sie es auch, wäre die
+    // Auszeichnung bedeutungslos. Wer nicht empfohlen wird, bekommt statt unten
+    // einen Satz, der sagt, woran es liegt; ohne den stünde ein Modell da, als
+    // hätte jemand es nur vergessen zu bewerten.
+    name.textContent = angebot.empfohlen
+        ? `${angebot.name} – Empfehlung`
+        : angebot.geladen
+            ? angebot.name
+            : `${angebot.name} – hier nicht empfohlen`;
+
+    const groesse = document.createElement('span');
+    groesse.className = 'modell-groesse';
+    groesse.textContent = `${groessentext(angebot.groesse_mib)} · ${angebot.quantisierung}`;
+
+    kopf.append(name, groesse);
+
+    const beschreibung = document.createElement('p');
+    beschreibung.className = 'modell-zeile';
+    beschreibung.textContent = angebot.beschreibung;
+
+    const anmerkung = document.createElement('p');
+    anmerkung.className = 'modell-zeile modell-anmerkung';
+    anmerkung.textContent = angebot.anmerkung;
+
+    const lizenz = document.createElement('p');
+    lizenz.className = 'modell-zeile';
+    lizenz.textContent = `Lizenz: ${angebot.lizenz} · mindestens ${angebot.ram_mindestens_gib} GB frei`;
+
+    karte.append(kopf, beschreibung, anmerkung, lizenz);
+
+    // Und der Grund, warum dieses Modell nicht empfohlen ist. Er steht am Ende der
+    // Karte, weil er die Entscheidung betrifft und nicht das Modell – und er steht
+    // dort auch dann, wenn der Knopf zum Laden da ist. Wer es trotzdem lädt, weiß
+    // womit er rechnet.
+    if (!angebot.empfohlen && !angebot.geladen) {
+        const grund = document.createElement('p');
+        grund.className = 'modell-zeile modell-grund';
+        grund.textContent = empfehlungsgrund(angebot);
+        karte.appendChild(grund);
+    }
+
+    // Während ein Ladevorgang läuft, gibt es hier nichts zu drücken: Ein zweiter
+    // Versuch auf dieselbe Datei wäre genau das, was die Teildatei verhindert.
+    if (ladevorgang === angebot.id) {
+        karte.appendChild(fortschrittsBalken());
+        return karte;
+    }
+
+    const aktionen = document.createElement('div');
+    aktionen.className = 'modell-aktionen';
+
+    if (angebot.geladen) {
+        const benutzen = document.createElement('button');
+        benutzen.type = 'button';
+        benutzen.textContent = 'Verwenden';
+        benutzen.addEventListener('click', () => {
+            modelSelect.value = angebot.id;
+            zeichneLokaleModellliste(angebot.id);
+            modelleDialog.close();
+        });
+
+        const entfernen = document.createElement('button');
+        entfernen.type = 'button';
+        entfernen.textContent = 'Löschen';
+        entfernen.addEventListener('click', async () => {
+            entfernen.disabled = true;
+            entfernen.textContent = 'Lösche …';
+
+            try {
+                const gewonnen = await invoke('modell_loeschen', { id: angebot.id });
+                modelleStatus.textContent = `${angebot.name} entfernt. `
+                    + `${groessentext(Math.round(gewonnen / (1024 * 1024)))} wieder frei.`;
+                await loadLocalModels(modelSelect.value);
+                zeichneLokaleModellle();
+            } catch (error) {
+                entfernen.disabled = false;
+                entfernen.textContent = 'Löschen';
+                modelleStatus.textContent = `Fehler: ${error}`;
+            }
+        });
+
+        aktionen.append(benutzen, entfernen);
+    } else {
+        const laden = document.createElement('button');
+        laden.type = 'button';
+        laden.textContent = 'Herunterladen';
+        laden.disabled = ladevorgang !== null;
+        laden.addEventListener('click', () => starteLadevorgang(angebot.id));
+
+        aktionen.append(laden);
+    }
+
+    karte.appendChild(aktionen);
+    return karte;
+}
+
+/// Der Balken, der den Fortschritt zeigt.
+function fortschrittsBalken() {
+    const huelle = document.createElement('div');
+    huelle.className = 'modell-fortschritt';
+
+    const balken = document.createElement('progress');
+    balken.max = 100;
+    balken.value = 0;
+    huelle.appendChild(balken);
+
+    const text = document.createElement('span');
+    text.textContent = '0 %';
+    huelle.appendChild(text);
+
+    // Die Karte wird neu gezeichnet, sobald sich der Wert nennenswert ändert.
+    // Das ist billiger, als einen Balken in einer Liste zu suchen, die gerade
+    // gezeichnet wird.
+    fortschrittsZiel = { balken, text };
+    return huelle;
+}
+
+/**
+ * Startet den Ladevorgang für einen Katalogeintrag.
+ *
+ * Das Backend meldet über ein Ereignis, nicht über den Rückgabewert: Ein Download
+ * von zwei Gigabyte kann zehn Minuten dauern, und solange would der Knopf gesperrt
+ * bleiben, ohne dass man sieht, wie weit es ist.
+ */
+async function starteLadevorgang(id) {
+    ladevorgang = id;
+    modelleStatus.textContent = '';
+    zeichneLokaleModelle();
+
+    try {
+        await invoke('modell_installieren', { id });
+
+        ladevorgang = null;
+        const geladen = lokaleModelle?.angebote.find((angebot) => angebot.id === id);
+        modelleStatus.textContent = `${geladen ? geladen.name : id} ist geladen.`;
+        await loadLocalModels(id);
+        zeichneLokaleModelle();
+        // Die Meldung nennt, was jetzt geht und was beim ersten Mal Zeit braucht:
+        // Das Modell wird beim ersten Senden geladen, und auf einem Rechner ohne
+        // Grafik kann das bei zwei Gigabyte eine Weile dauern. Eine Meldung ohne
+        // diesen Hinweis ließe den Benutzer denken, es hängt.
+        const lokaler = lokalesOllama();
+        appendMessageToUI(
+            'system',
+            `${geladen ? geladen.name : id} liegt jetzt auf diesem Rechner. `
+            + (lokaler
+                ? 'Beim ersten Senden lädt Mimir es in die eingebaute Engine; das kann '
+                    + 'ein paar Sekunden dauern. Danach rechnet alles auf diesem Rechner.'
+                : 'Es wird erst verwendet, wenn oben „Ollama: Lokal“ gewählt ist.')
+        );
+    } catch (error) {
+        ladevorgang = null;
+        modelleStatus.textContent = `Fehler: ${error}`;
+        zeichneLokaleModelle();
+    }
+}
+
 // ------------------------------------------------------------------- Provider
 //
 // Der Provider beantwortet die Frage „woher kommen die Modelle". Er ist die
@@ -513,6 +1049,55 @@ async function ladeProvider() {
     return provider;
 }
 
+// Stellt die Oberfläche auf ein Schema um und schreibt den Knopf dazu.
+//
+// Das Attribut sitzt am `<html>` und nicht an einem Container: Das Farbschema
+// steht in `:root` und wird für alles gelesen, was im Fenster steht – auch für
+// den Rahmen des Fensters und für Fenster, die geöffnet werden, während das
+// Schema schon steht. Dunkel ist das, was ohne Attribut erscheint, deshalb wird
+// es auch weggenommen statt als Attribut gesetzt.
+function zeigeSchema(gewuenscht) {
+    theme = THEME_NAMES.includes(gewuenscht) ? gewuenscht : 'dunkel';
+
+    if (theme === 'hell') {
+        document.documentElement.setAttribute('data-theme', 'hell');
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+    }
+
+    themeToggleBtn.setAttribute('aria-pressed', String(theme === 'hell'));
+    themeToggleBtn.textContent = `Schema: ${theme}`;
+    themeToggleBtn.title = theme === 'hell'
+        ? 'Zum dunklen Schema wechseln'
+        : 'Zum hellen Schema wechseln';
+}
+
+// Liest das gespeicherte Schema beim Start.
+//
+// Das Backend muss erst antworten, deshalb erscheint für einen Moment das
+// dunkle. Ein Aufblitzen beim Start ist unangenehm, aber besser als die andere
+// Reihenfolge: Ohne diese Abfrage wüsste die Oberfläche erst beim ersten Klick,
+// welche Helligkeit der Benutzer eigentlich gewählt hat.
+async function ladeSchema() {
+    try {
+        zeigeSchema(await invoke('get_theme'));
+    } catch (error) {
+        console.error('Schema nicht lesbar:', error);
+        zeigeSchema('dunkel');
+    }
+}
+
+// Der Umschalter. Angezeigt wird erst das Schema, das gespeichert werden
+// konnte: Ein Wechsel, der nicht in die Konfiguration passt, wäre sonst nach
+// dem nächsten Start spurlos wieder verschwunden.
+themeToggleBtn.addEventListener('click', () => {
+    const gewuenscht = theme === 'hell' ? 'dunkel' : 'hell';
+
+    invoke('set_theme', { theme: gewuenscht })
+        .then(zeigeSchema)
+        .catch((error) => console.error('Schema nicht speicherbar:', error));
+});
+
 // Beim Start soll ohne Mausklick getippt werden können. WebKitGTK setzt den
 // Fokus beim ersten Zeichnen des Fensters gern wieder auf das Dokument zurück,
 // und beim Start ist das Fenster womöglich noch gar nicht fokussiert. Deshalb
@@ -571,6 +1156,46 @@ async function zeigeErsteinrichtung() {
     }
 
     if (stand.server_eingetragen) {
+        return;
+    }
+
+    // Der lokale Provider kommt ohne Ollama aus: Mimir rechnet selbst. Die Anleitung
+    // für einen Server zu zeigen wäre hier falsch – sie spräche von einem Terminal
+    // und einem Port, von denen es nichts zu bedienen gibt.
+    if (lokalesOllama()) {
+        const zeilen = [
+            'Willkommen bei Mimir.',
+            '',
+            'Oben ist „Ollama: Lokal“ gewählt. Dafür braucht Mimir nichts auf diesem',
+            'Rechner: Die Engine ist eingebaut, das Modell wird in Mimir heruntergeladen.',
+            '',
+            '1. In der Liste oben rechts auf „＋ Modell herunterladen …“ gehen.',
+            '2. Ein Modell wählen. Welche empfohlen werden, hängt an Arbeitsspeicher',
+            '   und Prozessor dieses Rechners.',
+            '3. Fertig. Der erste Satz dauert auf einem kleinen Modell eine Weile –',
+            '   danach geht es schneller.',
+        ];
+
+        // Wie die Anleitung unten: Eine eigene Blase mit der Rolle `setup`, keine
+        // Systemzeile – zentriert und in Monospace wäre eine Liste mit Einrückungen
+        // unlesbar.
+        const blase = document.createElement('div');
+        blase.classList.add('message', 'setup');
+        blase.textContent = zeilen.join('\n');
+        chatContainer.appendChild(blase);
+
+        const knopf = document.createElement('button');
+        knopf.type = 'button';
+        knopf.className = 'setup-button';
+        knopf.textContent = 'Modelle ansehen';
+        knopf.addEventListener('click', () => {
+            blase.remove();
+            knopf.remove();
+            openModelDialog();
+        });
+
+        blase.after(knopf);
+        scrollToBottom();
         return;
     }
 
@@ -653,6 +1278,11 @@ ladeProvider()
     .finally(loadModels)
     .finally(zeigeErsteinrichtung)
     .catch((error) => console.error('Modelle nicht ladbar:', error));
+
+// Das Schema läuft daneben und nicht in dieser Kette: Es betrifft nur die
+// Anzeige, und ein Fehler dabei darf weder die Modelle noch die Anleitung
+// aufhalten.
+ladeSchema();
 focusPromptInput();
 
 // Arbeitsverzeichnis und Schrittzahl für die Beschriftung des Umschalters holen.
@@ -4001,6 +4631,10 @@ async function runChatAttempt(model, messages, bubble, options = {}) {
     } finally {
         chatContainer.classList.remove('loading');
         bubble.setAttribute('aria-busy', 'false');
+        // Danach ist die Engine wieder frei, und die Kopfzeile sagt es. Bleibt der
+        // Zustand vom letzten Zug stehen, liest er sich wie eine Meldung über etwas,
+        // das nicht mehr läuft.
+        setEngineStatus('');
     }
 }
 
@@ -4286,6 +4920,44 @@ startServerBtn.addEventListener('click', startOllamaViaSsh);
 // Die Auswahl im Kopf geht denselben Weg wie `/provider`: ein Wechsel ändert
 // Server, Umfang, Modelle und Verlauf, und das an zwei Stellen zu pflegen hieße,
 // dass eines von beidem irgendwann stehen bleibt.
+modelleSchliessen.addEventListener('click', () => modelleDialog.close());
+
+modelleForm.addEventListener('submit', (ereignis) => ereignis.preventDefault());
+
+// Ein Eintrag, der noch nicht geladen ist, kann kein Modell sein. Statt ihn
+// auszuwählen und beim Senden zu scheitern, öffnet sich der Dialog – genau wie
+// beim Eintrag „Modell herunterladen“.
+function bearbeiteModellwahl() {
+    if (!lokalesOllama()) return;
+
+    // Das Fenster kann über den Klick und über die Änderung zweimal kommen. Ein
+    // zweites `showModal()` auf ein offenes Fenster wirft, und der Benutzer sähe
+    // einen Fehler, ohne etwas falsch gemacht zu haben.
+    if (modelleDialog.open) return;
+
+    const gewaehlt = modelSelect.value;
+
+    if (gewaehlt === MODELLE_DIALOG) {
+        openModelDialog();
+        return;
+    }
+
+    const angebot = lokaleModelle?.angebote.find((eintrag) => eintrag.id === gewaehlt);
+
+    if (angebot && !angebot.geladen) {
+        modelSelect.value = MODELLE_DIALOG;
+        openModelDialog();
+    }
+}
+
+modelSelect.addEventListener('change', bearbeiteModellwahl);
+
+// Und zusätzlich auf den Klick. Solange nichts geladen ist, steht der Eintrag
+// „Modell herunterladen“ schon als gewählt in der Liste – ein Klick darauf ändert
+// nichts und löst kein `change` aus. Genau das war der Weg, der nicht führte:
+// Der Knopf tat so, als gäbe es nichts zu tun.
+modelSelect.addEventListener('click', bearbeiteModellwahl);
+
 providerSelect.addEventListener('change', async () => {
     // Der Wert steht schon auf der neuen Wahl, sobald dieses Ereignis kommt.
     // `wechsleProvider` stellt ihn zurück, wenn der Benutzer abbricht oder das

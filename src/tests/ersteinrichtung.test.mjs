@@ -64,6 +64,7 @@ async function holeTextAsync(optionen) {
       server_eingetragen = false,
       kalender_eingetragen = false,
       server_vorgabe = 'http://localhost:11434',
+      lokal = false,
     } = optionen || {};
 
     const sandkasten = {
@@ -121,6 +122,12 @@ async function holeTextAsync(optionen) {
         },
       },
       openServerUrlDialog: () => gefangen.push({ rolle: 'aufruf', inhalt: 'dialog' }),
+      openModelDialog: () => gefangen.push({ rolle: 'aufruf', inhalt: 'modelldialog' }),
+      // Die Anleitung fragt den Provider, um zu entscheiden, welchen Text sie zeigt.
+      // Hier steht die Antwort fest, statt sie zu raten: Eine Prüfung, die sich auf
+      // einen Aufruf verlässt, den es im Sandkasten nicht gibt, würde den Text
+      // prüfen, den nie jemand sieht.
+      lokalesOllama: () => lokal,
       scrollToBottom() {},
       focusPromptInput() {},
     };
@@ -159,6 +166,36 @@ gleich(
 // weiß nicht, wohin mit dem Finger.
 erst.knoepfe[0]?._klick?.();
 gleich('der Knopf öffnet den Adressdialog', erst.nachrichten.some((m) => m.rolle === 'aufruf'), true);
+
+console.log();
+console.log('— Mit eingebauter Engine —');
+// Der lokale Provider kommt ohne Ollama aus. Eine Anleitung, die ein Terminal und
+// einen Port nennt, wäre hier falsch: Es gibt nichts zu bedienen.
+const lokalErst = await holeTextAsync({ lokal: true });
+const lokalText = lokalErst.nachrichten[0]?.inhalt || '';
+
+console.log();
+console.log(lokalText);
+console.log();
+
+gleich('lokal: genau eine Nachricht', lokalErst.nachrichten.length, 1);
+gleich('lokal: ein Knopf', lokalErst.knoepfe.length, 1);
+gleich('lokal: nennt das Herunterladen', /heruntergeladen/.test(lokalText), true);
+gleich('lokal: kein ollama serve', /ollama serve/.test(lokalText), false);
+gleich('lokal: kein ollama list', /ollama list/.test(lokalText), false);
+gleich('lokal: keine Terminal-Anweisung', /Terminal/.test(lokalText), false);
+gleich('lokal: keine Adresse', /11434/.test(lokalText), false);
+
+// Der Knopf muss den Modelldialog öffnen – sonst stünde die Anleitung da und der
+// Benutzer wüsste nicht, wohin mit dem Finger. `holeTextAsync` gibt die Liste als
+// Referenz auf den gefangenen Behälter zurück, deshalb wirkt der Klick hier direkt
+// auf `lokalErst`.
+lokalErst.knoepfe[0]?._klick?.({ preventDefault() {} });
+gleich(
+  'lokal: der Knopf öffnet den Modelldialog',
+  lokalErst.nachrichten.some((m) => m.rolle === 'aufruf' && m.inhalt === 'modelldialog'),
+  true,
+);
 
 console.log();
 console.log('— Was drin sein muss —');

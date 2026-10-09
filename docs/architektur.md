@@ -14,7 +14,7 @@ flowchart LR
     Ollama[Ollama HTTP API]
     CalDAV[Nextcloud<br/>CalDAV]
 
-    UI -->|check_server, get_models<br/>send/cancel_chat<br/>get/set_provider, get/set_server_url<br/>get/set_ssh_config, start_ollama_via_ssh<br/>get/set_agent_config, get/set_chat_config<br/>prepare_attachment, load/save/delete_chat_history<br/>list_tools, execute_tool, preview_tool_call,<br/>undo_write, set_write_enabled, get_write_state,<br/>reset_write_budget<br/>calendar_*, get/set_calendar_config<br/>calendar_event_open, calendar_event_save<br/>render_markdown| Backend
+    UI -->|check_server, get_models<br/>send/cancel_chat<br/>get/set_provider, get/set_server_url<br/>get/set_theme<br/>get/set_ssh_config, start_ollama_via_ssh<br/>get/set_agent_config, get/set_chat_config<br/>prepare_attachment, load/save/delete_chat_history<br/>list_tools, execute_tool, preview_tool_call,<br/>undo_write, set_write_enabled, get_write_state,<br/>reset_write_budget<br/>calendar_*, get/set_calendar_config<br/>calendar_event_open, calendar_event_save<br/>render_markdown| Backend
     Backend <--> Config
     Backend -->|GET /api/tags| Ollama
     Backend -->|POST /api/chat| Ollama
@@ -40,7 +40,7 @@ Bewusst ohne CalDAV- und ohne ICS-Bibliothek: CalDAV ist `PROPFIND` und `REPORT`
 Das Frontend liegt vollständig in `src/` und benötigt keinen JavaScript-Build-Schritt.
 
 - `src/index.html` enthält die statische Benutzeroberfläche.
-- `src/styles.css` definiert das Elflord-Farbschema, die Chat-Darstellung und die Markdown-Stile. Rahmenmaß, Eckenradius, Abstände und Innenabstände stehen als Variablen in `:root`, damit alle Bedienelemente gleich aussehen. Zwei Werte sind bewusst direkt am Bedienelement notiert: die Höhe der Eingabeleinzeile (48 px, weil `main.js` das Feld nach dem Senden auf genau diesen Wert zurücksetzt) und die kleineren Innenabstände der beiden Knopfreihen, die zweireihig sitzen.
+- `src/styles.css` definiert das Elflord-Farbschema, die Chat-Darstellung und die Markdown-Stile. Rahmenmaß, Eckenradius, Abstände und Innenabstände stehen als Variablen in `:root`, damit alle Bedienelemente gleich aussehen. Zwei Werte sind bewusst direkt am Bedienelement notiert: die Höhe der Eingabeleinzeile (48 px, weil `main.js` das Feld nach dem Senden auf genau diesen Wert zurücksetzt) und die kleineren Innenabstände der beiden Knopfreihen, die zweireihig sitzen. Die Farben stehen in genau zwei Blöcken: `:root` für das dunkle Schema und `[data-theme='hell']` für das helbe; jede andere Stelle liest nur die Variablen.
 - `src/main.js` verwaltet Modelle, Slash-Befehle, Chat-Verlauf, Benutzereingaben und das Streaming.
 
 Das Frontend verwendet die globale Tauri-Schnittstelle `window.__TAURI__`. Dadurch bleiben WebView und Rust-Backend klar voneinander getrennt, während die Kommunikation über typisierte Tauri-Commands und Channels erfolgt.
@@ -68,6 +68,8 @@ Das Backend liegt in `src-tauri/` und übernimmt alle Netzwerkanfragen sowie die
 
 Rahmen und Knöpfe folgen einer gemeinsamen Regel, damit die Anwendung an jeder Stelle gleich wirkt. Rahmenstärke, Eckenradius, Abstände, Innenabstände und die Farben stehen dafür als Variablen in `:root` am Anfang von `src/styles.css`; was früher je nach Ort anders kodiert war, hängt daran. Zwei Ausnahmen sind bewusst und mit Begründung direkt am Bedienelement notiert: die Höhe der Eingabeleinzeile (48 px, weil `main.js` das Feld nach dem Senden auf genau diesen Wert zurücksetzt) und die kleineren Innenabstände der Knopfreihen, die zweireihig sitzen.
 
+Die Oberfläche gibt es in zwei Schemata, und beide sind vollständig über dieselben Variablen definiert: `:root` trägt das dunkle, `[data-theme='hell']` das helle. Das Attribut sitzt am `<html>`, weil die Farben für alles im Fenster gelten, auch für die Fenster, die währenddessen geöffnet werden; dunkel ist das, was ohne Attribut erscheint, damit eine alte Installation unverändert startet. Die Wahl steht als `theme` in `ollama.json` und wird über `get_theme` und `set_theme` gelesen und geschrieben. Der Umschalter oben links wechselt erst dann die Anzeige, wenn das Backend die Wahl bestätigt hat: Ein Schema anzuzeigen, das nicht gespeichert werden konnte, wäre eine Zusage ohne Deckung. Beim Start erscheint deshalb für einen Moment das dunkle Schema, bis das Backend geantwortet hat.
+
 Ein Knopf hat immer einen Rahmen. Die Füllung unterscheidet nur die Bedeutung, nicht die Form: ausführend gefüllt (Senden, „Anmelden", „Verbinden", „Speichern", „Ausführen", „Schreiben", „Zertifikat bestätigen"), zurückhaltend mit Rahmen (Abbrechen, Umschalter im Ruhezustand), Rot nur für den SSH-Neustart und Bernstein für alles, was schreibt oder ändert (Schreibmodus, Schreibschritt, Unterschiedszusammenfassung). Fokus ist über die Tastatur sichtbar, und der Abstand zwischen Bedienelement und Text bleibt überall gleich.
 
 Die Kalenderleiste nimmt 260 px am rechten Rand ein. Ihre drei Knöpfe teilen sich eine eigene Reihe unter der Überschrift „Kalender", weil sie in dieser Breite sonst umbrechen und die Leiste unruhig wirkt. Unter 720 px Fensterbreite startet die Leiste eingeklappt, damit die Unterhaltung nicht auf einen Rest reduziert wird; der Knopf **Kalender: an** im Kopf holt sie zurück. Die Entscheidung fällt nur beim Start: Ein späteres Verbreitern des Fensters holt die Leiste nicht von selbst zurück. Eingeklappt pausiert die automatische Aktualisierung, damit der Server im LAN nicht umsonst angesprochen wird – ein ausdrückliches `/termine` holt dagegen weiterhin Termine. Das Fenster startet deshalb mit 1080 px Breite.
@@ -84,9 +86,29 @@ Die Kalenderleiste nimmt 260 px am rechten Rand ein. Ihre drei Knöpfe teilen si
 
 ### Provider
 
-Es gibt zwei Providers, und beide reden mit demselben Ollama: `remote` nimmt die eingetragene `server_url`, `local` immer `http://localhost:11434` auf diesem Rechner. In der Kopfzeile heißen sie **Server** und **Lokal**; die Werte bleiben `remote` und `local`, damit die Konfigurationsdatei lesbar bleibt und nicht zwei Namen für dieselbe Sache entstehen. Die Wahl steht in `ollama.json` unter `provider` und fehlt dort in einer alten Konfiguration – dann gilt `remote`, sonst würde eine bestehende Installation beim Start auf den lokalen Rechner zeigen.
+Es gibt zwei Providers, und sie beschaffen die Modelle auf zwei verschiedene Arten: `remote` nimmt die eingetragene `server_url` und spricht mit dem Ollama dahinter, `local` rechnet in der eingebauten Engine auf diesem Rechner. In der Kopfzeile heißen sie **Server** und **Lokal**; die Werte bleiben `remote` und `local`, damit die Konfigurationsdatei lesbar bleibt und nicht zwei Namen für dieselbe Sache entstehen. Die Wahl steht in `ollama.json` unter `provider` und fehlt dort in einer alten Konfiguration – dann gilt `remote`, sonst würde eine bestehende Installation beim Start auf den lokalen Rechner zeigen.
 
-`OllamaSettings::get_base_url` ist die einzige Stelle, die die Adresse bestimmt. Jede Anfrage im Backend läuft darüber: Modellliste, Chat, Statusprüfung, Warteprüfung vor einem Wiederholungsversuch und die Erreichbarkeitsprüfung vor dem SSH-Start. Es gibt bewusst keinen zweiten Weg, sonst läge eine der beiden Anfragen an der falschen Adresse.
+`OllamaSettings::get_base_url` ist die einzige Stelle, die die Adresse bestimmt, und sie gilt nur für `remote`. Jede Anfrage an ein Ollama läuft darüber: Modellliste, Chat, Statusprüfung, Warteprüfung vor einem Wiederholungsversuch und die Erreichbarkeitsprüfung vor dem SSH-Start. Es gibt bewusst keinen zweiten Weg, sonst läge eine der beiden Anfragen an der falschen Adresse.
+
+`local` fragt keine Adresse ab, weil es keine gibt. `check_server` meldet dort „bereit“, `send_chat_message` ruft `chat_mit_engine` statt `send_chat_attempt`, und die Modellliste kommt aus `get_lokale_modelle` statt aus `/api/tags`. Für den Benutzer bleibt die Oberfläche dieselbe: derselbe Kopf, dieselbe Auswahl, dieselben Chunks auf demselben Kanal.
+
+### Die eingebaute Engine
+
+`engine.rs` bringt llama.cpp als Rust-Bindung mit (`llama-cpp-2`). Sie lädt das Modell aus Mimirs Modellordner, wendet die im GGUF mitgelieferte Chat-Vorlage an und erzeugt Token für Token über eine Stichprobenkette.
+
+**Der entscheidende Entwurf: Die Engine bildet Ollamas Antwortform nach.** Der Werkzeugkreis, die Termine, das Zählen der Kontextbelegung, der Abbruch und die Oberfläche erwarten Newline-JSON mit `message.content` und `done`. Genau das erzeugt `engine.rs`. Deshalb liegt dort kein HTTP-Server und kein eigener Nachrichtenweg – der Rest der Anwendung wüsste sonst, dass es zwei Quellen für Token gibt, und es müsste sie unterscheiden.
+
+Die Werkzeugschemata, die ein Ollama als Feld im Auftrag bekäme, gehen hier als Anweisung in die Systemnachricht; der Aufruf kommt als JSON-Rahmen im Text zurück und wird in `engine/werkzeug.rs` gelesen. Was nicht lesbar ist, bleibt Text und wird nicht ausgeführt.
+
+Das Rechnen läuft in `spawn_blocking`, weil es den Rechner belegt und ein Thread aus dem Tokio-Vorrat währenddessen nichts anderes bedienen würde – auch nicht den Abbruch. Der Abbruch wird deshalb zwischen zwei Token geprüft, nicht über einen Kanal.
+
+**Jedes Token geht sofort auf den Kanal.** `antwort()` nimmt einen Rückruf, der je
+Token aufgerufen wird; die Kanalkopie geht in `spawn_blocking` mit und sendet von
+dort. Das ist keine Bequemlichkeit: Auf einem Rechner ohne Grafik dauert ein Token
+gut eine Zehntelsekunde und eine ganze Antwort damit eine halbe Minute. Kam sie
+erst am Ende, stünde in dieser Zeit eine leere Blase im Fenster. Vorher das Laden
+des Modells, jetzt der Zustand als Ereignis `engine-status`, und der Text
+Stück für Stück.
 
 `server_url` bleibt beim Wechsel unverändert und wird im lokalen Provider weder gelesen noch geschrieben: `set_base_url` lehnt dort ab und nennt den Weg zurück. Wer auf `remote` wechselt, arbeitet deshalb ohne erneutes Abtippen weiter.
 
@@ -236,6 +258,12 @@ Mimir/
 │   ├── src/
 │   │   ├── lib.rs          # Commands, Ollama-Konfiguration und API
 │   │   ├── main.rs         # Rust-Einstiegspunkt
+│   │   ├── engine.rs       # Eingebaute Engine: llama.cpp, Modell laden, Token
+│   │   ├── engine/
+│   │   │   ├── werkzeug.rs # Werkzeugaufrufe ohne Werkzeugfeld
+│   │   │   └── */tests.rs  # Tests daneben, je Modul
+│   │   ├── modelle.rs      # Katalog, Hardware-Abgleich, Download
+│   │   ├── hardware.rs     # Prozessor, Arbeitsspeicher, Befehlssätze
 │   │   ├── calendar.rs     # Kalendereinstellungen und Sitzungszustand
 │   │   └── calendar/
 │   │       ├── client.rs   # CalDAV-Netzteil
