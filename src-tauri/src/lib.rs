@@ -2534,9 +2534,13 @@ fn write_atomically(plan: &WritePlan) -> Result<(), String> {
             // deshalb steht er hier ausgeschrieben.
             options.custom_flags(0o400000).mode(mode);
         }
+        // Unter Windows gibt es keine Rechtebits am Dateisystem, und `mode`
+        // existiert dort nicht einmal als Methode. Die Datei bekommt einfach
+        // die Rechte, die Windows ihr ohnehin gibt – deshalb steht hier
+        // ausdrücklich nichts.
         #[cfg(not(unix))]
         {
-            options.mode(0o644);
+            let _ = mode;
         }
 
         let mut file = options
@@ -2690,12 +2694,20 @@ struct OllamaResponseChunk {
 /// eigenen Warte- und Health-Check-Regeln. Für den Chat deaktivieren wir das
 /// User-Timeout und setzen die Keepalive-Werte bewusst großzügiger.
 fn ollama_client_builder() -> reqwest::ClientBuilder {
-    Client::builder()
+    let baue = Client::builder()
         .redirect(Policy::none())
-        .tcp_user_timeout(None)
         .tcp_keepalive(Some(OLLAMA_TCP_KEEPALIVE))
         .tcp_keepalive_interval(Some(OLLAMA_TCP_KEEPALIVE_INTERVAL))
-        .tcp_keepalive_retries(Some(OLLAMA_TCP_KEEPALIVE_RETRIES))
+        .tcp_keepalive_retries(Some(OLLAMA_TCP_KEEPALIVE_RETRIES));
+
+    // Das User-Timeout gibt es nur unter Unix; dort setzt Reqwest es von
+    // selbst auf 30 Sekunden, und wir schalten es ab. Unter Windows entfällt
+    // der Aufruf ersatzlos – die Keepalive-Werte oben greifen trotzdem, und ein
+    // Aufruf einer Methode, die es dort nicht gibt, wäre ein Fehler.
+    #[cfg(unix)]
+    let baue = baue.tcp_user_timeout(None);
+
+    baue
 }
 
 pub fn build_ollama_chat_client() -> Result<Client, String> {
