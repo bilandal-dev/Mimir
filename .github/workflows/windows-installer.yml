@@ -1,0 +1,84 @@
+name: Windows-Installer
+
+# Zwei Anlässe, zwei Aufgaben:
+#
+# * Ein **Tag** (`v0.1.1`) ist eine Veröffentlichung: Es entsteht ein Release mit
+#   dem Installer als Anhang. Genau dort lädt ein Benutzer die Datei herunter.
+# * Ein Push auf `main` baut denselben Installer, legt ihn aber nur als
+#   Artefakt ab. Sonst entstünde bei jedem Commit ein Release, und die Seite
+#   füllte sich mit „Latest"-Versionen, zwischen denen nichts geändert wurde.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  installer:
+    # Ein echter Windows-Rechner, nicht Linux mit Kreuzübersetzung. Der Grund
+    # ist nicht Bequemlichkeit: llama.cpp wird über CMake gebaut, und dafür gibt
+    # es keine brauchbare Übersetzung – Visual Studios Build Tools sind auf
+    # diesem Runner bereits vorhanden.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust installieren
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cmake` bringt der Windows-Runner bereits mit. Es steht trotzdem hier,
+      # weil der Build sonst an einer Kette abhängt, die man auf der
+      # Fehlermeldung nicht sieht: Findet der Windows-Runner sie nicht mehr,
+      # bricht der Schritt hier mit einer klaren Aussage ab.
+      - name: CMake prüfen
+        shell: pwsh
+        run: |
+          $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+          if (-not $cmake) {
+            Write-Error "cmake fehlt. Ohne CMake lässt sich die eingebaute Engine nicht übersetzen."
+          }
+          cmake --version
+          Write-Host "C++-Übersetzer:"
+          cl 2>&1 | Select-Object -First 2
+
+      # Das Zielverzeichnis wiegt weit über ein Gigabyte, der Löwenanteil ist die
+      # übersetzte Engine. Ohne diesen Cache dauert jeder Lauf wieder rund
+      # zwanzig Minuten; damit sind es nach dem ersten Mal wenige.
+      - name: Cargo-Zwischenspeicher
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: windows-installer
+          max-size: 6GB
+
+      - name: Installer bauen
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # `nsis` ist die einzelne `.exe`, auf die ein Benutzer klickt; `msi`
+          # ist dieselbe Anwendung als Paket für die Systemverwaltung.
+          args: --bundles nsis,msi
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('Mimir {0}', github.ref_name) || '' }}
+          # Kein Entwurf: Ein Entwurf ist für Besucher des Repositories unsichtbar,
+          # und gerade die Herunterladbarkeit ist der Zweck der ganzen Übung.
+          releaseDraft: false
+          prerelease: false
+
+      - name: Installer hochladen
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mimir-Windows-Installer
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
