@@ -1,4 +1,5 @@
 mod calendar;
+mod mail;
 
 use ammonia::{Builder, UrlRelative};
 use futures_util::StreamExt;
