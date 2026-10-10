@@ -33,20 +33,26 @@ jobs:
       - name: Rust installieren
         uses: dtolnay/rust-toolchain@stable
 
+      # Visual Studios Build Tools sind auf dem Runner installiert, ihre Umgebung
+      # ist es nicht: Ohne diesen Schritt kennt weder `cl` noch CMake den Compiler,
+      # und die Übersetzung der Engine scheitert an einer Umgebungsvariable, die
+      # niemand im Protokoll sieht. Der Schritt richtet sie einmalig für alle
+      # folgenden Schritte ein.
+      - name: MSVC-Umgebung einrichten
+        uses: ilammy/msvc-dev-cmd@v1
+
       # `cmake` bringt der Windows-Runner bereits mit. Es steht trotzdem hier,
       # weil der Build sonst an einer Kette abhängt, die man auf der
-      # Fehlermeldung nicht sieht: Findet der Windows-Runner sie nicht mehr,
-      # bricht der Schritt hier mit einer klaren Aussage ab.
-      - name: CMake prüfen
+      # Fehlermeldung nicht sieht.
+      - name: CMake und Übersetzer prüfen
         shell: pwsh
         run: |
-          $cmake = Get-Command cmake -ErrorAction SilentlyContinue
-          if (-not $cmake) {
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
             Write-Error "cmake fehlt. Ohne CMake lässt sich die eingebaute Engine nicht übersetzen."
           }
           cmake --version
           Write-Host "C++-Übersetzer:"
-          cl 2>&1 | Select-Object -First 2
+          cl 2>&1 | Select-Object -First 2 | Out-String | Write-Host
 
       # Das Zielverzeichnis wiegt weit über ein Gigabyte, der Löwenanteil ist die
       # übersetzte Engine. Ohne diesen Cache dauert jeder Lauf wieder rund
