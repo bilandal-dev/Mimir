@@ -51,8 +51,12 @@ pub const QUELLE: &str = "eingebaute Engine (dieser Rechner)";
 /// Der Vorgang ist der längste Schweigepunkt des ganzen Ablaufs und der einzige,
 /// in dem wirklich nichts angezeigt wird – danach wächst der Text Token für
 /// Token. Ohne diese Meldung stünde in dieser Zeit eine leere Blase im Fenster.
+///
+/// **Die Wörter stehen unverändert in der Anzeige.** „Wird geladen" und nicht
+/// „Modell wird in die Engine geladen": Der Platz hat eine Zeile, und der Benutzer
+/// liest während des Wartens keinen Nebensatz, sondern ein Stichwort.
 pub fn ladezustand() -> &'static str {
-    "lädt Modell"
+    "wird geladen"
 }
 
 /// Der Zustand, in dem die Engine rechnet.

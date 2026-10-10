@@ -104,6 +104,7 @@ const certificateHint = document.getElementById('certificate-hint');
 const certificateTrust = document.getElementById('certificate-trust');
 const certificateCancel = document.getElementById('certificate-cancel');
 const themeToggleBtn = document.getElementById('theme-toggle-btn');
+const activityLabel = document.getElementById('activity-label');
 
 // Chat-Verlauf im Speicher halten, damit Ollama den Kontext kennt
 let messageHistory = [];
@@ -267,30 +268,33 @@ if (eventApi?.listen) {
     }).catch((error) => console.error('Retry-Listener fehlgeschlagen:', error));
 }
 
+/** Der Text, der beim Server im Netz in der Ladeanzeige steht. */
+const ANTWORT_TEXT = 'Antwort wird erzeugt';
+
 /**
  * Zeigt, was die eingebaute Engine gerade tut – an derselben Stelle, an der beim
- * Server im Netz der Zustand steht.
+ * Server im Netz „Antwort wird erzeugt" steht.
  *
- * **Warum in der Kopfzeile und nicht in der Ladeanzeige.** Beim Server im Netz
- * steht in der Kopfzeile, was gerade passiert: „Prüfe …", „Online", „instabel".
- * Die eingebaute Engine ist für den Benutzer derselbe Fall – nur der Ort, an dem
- * die Tokens herkommen, ist ein anderer. Ein Zustand an zwei Stellen oder an
- * einer zweiten wäre eine neue Sprache für dieselbe Sache: „Antwort wird erzeugt"
- * unten und „Lokal: rechnet" oben meint dasselbe zweimal, und die untere Zeile
- * erscheint erst, wenn schon etwas passiert ist. Genau davor soll der Benutzer
- * geschützt werden.
+ * **Warum hier und nicht in der Kopfzeile.** Beide Orte beantworten verschiedene
+ * Fragen, und der Benutzer stellt beim Warten nur eine: Was passiert gerade mit
+ * der Antwort? Die Kopfzeile beantwortet eine andere – ist Mimir überhaupt
+ * bereit –, und die ist im lokalen Betrieb mit „Lokal: bereit" dauerhaft
+ * beantwortet. Ein Zustand an beiden Stellen hieße, die dauerhafte Antwort auf
+ * eine vorübergehende Frage zu missbrauchen.
  *
- * Die Farbe folgt der des Servers: Gelb für „gerade unterwegs", Grün für „bereit".
+ * **Deshalb ersetzt der Zustand den Text statt daneben zu stehen.** Zwei Texte
+ * nebeneinander wären zwei Aussagen über denselben Vorgang; die längere gewinnt,
+ * nicht die genauere.
  */
 function setEngineStatus(zustand) {
-    if (!lokalesOllama()) return;
-
-    if (!zustand) {
-        setServerStatus('online', 'Lokal: bereit');
+    // Ohne lokalen Betrieb gibt es keinen Engine-Zustand, und der allgemeine Text
+    // bleibt stehen – er stimmt dann für den Server im Netz.
+    if (!lokalesOllama() || !zustand) {
+        activityLabel.textContent = ANTWORT_TEXT;
         return;
     }
 
-    setServerStatus('checking', `Lokal: ${zustand} …`);
+    activityLabel.textContent = zustand;
 }
 
 function setGenerating(active) {
@@ -4432,10 +4436,16 @@ async function runAgentTurn(model, messages, bubble) {
     cancelRequested = false;
     agent.writeCount = 0;
 
+    // **Vor dem `try`, weil der `catch` sie braucht.** Eine `const` im `try`-Block
+    // gilt nur dort; im `catch` wäre sie nicht definiert, und der Fehlerbericht
+    // selbst würde mit `ReferenceError` abbrechen. Dann bliebe genau das unsichtbar,
+    // was man sehen müsste – ein stiller Zug, und niemand wüsste, warum.
+    let termine = agent.scope === 'termine';
+
     try {
         await refreshAgentConfig();
 
-        const termine = agent.scope === 'termine';
+        termine = agent.scope === 'termine';
 
         // Das Arbeitsverzeichnis wird nur dort gebraucht, wo gelesen wird.
         if (!termine && !agent.root) {
@@ -4683,11 +4693,39 @@ function attachRetryAction(bubble, onRetry) {
     scrollToBottom();
 }
 
+// Das Werkzeugangebot, oder `null`, wenn es keines gibt.
+//
+// **Ein Fehler beim Holen ist hier kein Fehler des Zuges.** Er bedeutet nur, dass
+// es gerade keine Werkzeuge gibt: Im Terminumfang ohne Anmeldung etwa, wo
+// `list_tools` genau das sagt. Der Aufrufer entscheidet dann auf das einfache
+// Chatten zurückzufallen, statt den ganzen Zug zu verweigern.
+async function holeWerkzeugangebot() {
+    if (!werkzeugschleifeAktiv()) {
+        return null;
+    }
+
+    try {
+        const toolset = await loadAgentToolset();
+        return toolset?.tools?.length ? toolset : null;
+    } catch {
+        return null;
+    }
+}
+
 // Ein Chat-Versuch inklusive Abschluss-UI; erneut aufrufbar für Retries
 async function performChat(model, messages, bubble) {
-    // Mit Werkzeugen übernimmt die Schleife; im einfachen Chat bleibt es bei
-    // genau einer Anfrage.
-    if (werkzeugschleifeAktiv()) {
+    // **Die Werkzeugschleife läuft nur, wenn es Werkzeuge gibt.** Der Umfang
+    // allein genügt dafür nicht: Er benennt, *was* es geben könnte, nicht ob es
+    // da ist. Ohne Anmeldung gibt es keine Kalender und damit keine
+    // Kalenderwerkzeuge – und eine Frage wie „Hallo" darf daran nicht hängen.
+    //
+    // Sonst wäre das Modell im lokalen Provider kein Chatmodell, sondern nur ein
+    // Werkzeugbediener: Jede Unterhaltung wäre ein Werkzeugzug, und die
+    // einfachste Frage daran scheiterte. Ein eingebautes Modell ist ein
+    // vollständiges LLM; Werkzeuge sind das, was es *zusätzlich* bekommt.
+    const toolset = await holeWerkzeugangebot();
+
+    if (toolset) {
         await runAgentTurn(model, messages, bubble);
         return;
     }

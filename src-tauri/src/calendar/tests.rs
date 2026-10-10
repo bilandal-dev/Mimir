@@ -68,13 +68,17 @@ fn a_full_webdav_address_from_nextcloud_is_understood() {
     // übernommen hätte Mimir daraus
     // `…/principals/users/<name>/calendars/…` gebaut und nichts gefunden.
     let kopiert = CalendarConfig {
-        server_url: "https://cloud.example.org/remote.php/dav/principals/users/benutzer".to_string(),
+        server_url: "https://cloud.example.org/remote.php/dav/principals/users/benutzer"
+            .to_string(),
         username: String::new(),
         calendars: Vec::new(),
         server_certificate: None,
     };
     assert_eq!(kopiert.instance_base(), "https://cloud.example.org");
-    assert_eq!(kopiert.username_from_dav_path().as_deref(), Some("benutzer"));
+    assert_eq!(
+        kopiert.username_from_dav_path().as_deref(),
+        Some("benutzer")
+    );
     assert_eq!(
         kopiert.dav_root().unwrap(),
         "https://cloud.example.org/remote.php/dav"

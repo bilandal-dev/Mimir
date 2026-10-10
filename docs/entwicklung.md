@@ -434,14 +434,17 @@ Stand der Prüfungen: 435 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlic
 
 ### Die eingebaute Engine
 
-**Der Benutzer sieht, was passiert.** Beim ersten Senden wird das Modell geladen
-(das ist der Vorgang, der am längsten dauert und am wenigsten sichtbar war), danach
-geht **jedes Token sofort** als Chunk auf denselben Kanal, den auch ein Ollama im
-Netz benutzt. Ein Aufruf, der rechnet, ist an zwei Dingen erkennbar: an der
-Ladeanzeige mit dem Zustand der Engine und daran, dass der Text Zeile für Zeile
-wächst. Vorher kam die Antwort erst fertig am Ende – bei diesem Rechner sind das
-30 Sekunden, in denen das Fenster leer blieb und der Benutzer nicht wusste, ob Mimir
-hängt oder arbeitet.
+**Der Benutzer sieht, was passiert – unten links, wo beim Server der Chat läuft.**
+Dort steht beim Server im Netz `Antwort wird erzeugt`, und bei einem lokalen Modell
+steht an derselben Stelle `wird geladen` oder `rechnet`. Der Kopfzeile bleibt
+`Lokal: bereit`: Sie beantwortet die andere Frage – ist Mimir überhaupt bereit –,
+und die ist im lokalen Betrieb dauerhaft mit ja beantwortet. Zwei Stellen für
+dieselbe Frage wären zwei Aussagen, und die langlebigere gewänne.
+
+Dazu kommt der Strom selbst: **Jedes Token geht sofort als Chunk** auf denselben
+Kanal, den auch ein Ollama im Netz benutzt. Ein Aufruf, der rechnet, ist also an
+zwei Dingen erkennbar – am Zustand in der Kopfzeile und daran, dass der Text
+Zeile für Zeile wächst. Vorher kam die Antwort erst fertig am Ende.
 
 
 - **Ein lokaler Nachrichtentext ist ein Konto wert, wenn er das Fenster verlässt.** Beim lokalen Provider verlässt er den Rechner nicht: Die Engine rechnet hier, und es gibt keine Verbindung, über die er ginge. Das ist der einzige Betrieb, in dem Mimir ohne jede Netzverbindung auskommt.

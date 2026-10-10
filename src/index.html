@@ -60,7 +60,13 @@
                  über aria-busy an der Antwortblase (main.js:runChatAttempt). -->
             <div class="chat-activity">
                 <span class="activity-spinner" aria-hidden="true"></span>
-                <span class="activity-label">Antwort wird erzeugt</span>
+                <!-- **Ein Text, nicht zwei.** Beim Server im Netz steht hier
+                     „Antwort wird erzeugt", bei einem lokalen Modell der Zustand
+                     der Engine („wird geladen", „rechnet"). Das ist derselbe Platz
+                     und dieselbe Bedeutung: Was gerade mit der Antwort passiert.
+                     Zwei Texte nebeneinander wären zwei Aussagen über denselben
+                     Vorgang, und die längere gewinnt – nicht die genauere. -->
+                <span class="activity-label" id="activity-label">Antwort wird erzeugt</span>
             </div>
         </div>
 
