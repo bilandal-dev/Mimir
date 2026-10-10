@@ -1,6 +1,6 @@
 [package]
 name = "mimir"
-version = "0.1.1"
+version = "0.1.2"
 description = "Chat-Oberfläche für ein Ollama im Netz oder ein eingebautes Modell"
 # `authors` landet im `Maintainer`-Feld des Debian-Pakets. Mit dem Vorgabewert
 # "you" erzeugte `cargo tauri build` ein Paket, das als Betreiber „you" führt –
