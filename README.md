@@ -1,15 +1,32 @@
 # Mimir
 
-Mimir ist eine schlanke Desktop-Oberfläche für einen **eigenen Ollama-Server**.
-
-Die Anwendung ist kein Chat mit eingebautem Modell, sondern ein Fenster, durch das mit
-einem Ollama-Server gesprochen wird, den du selbst betreibst – auf einem Rechner im
-LAN, auf einem Server im Rechenzentrum oder auf dem eigenen. Modelle, Verlauf und
-Einstellungen bleiben damit bei dir.
+Mimir ist eine schlanke Desktop-Oberfläche für ein **eigenes Ollama** – entweder
+für einen Server, den du selbst betreibst, oder für eines, das in Mimir selbst
+läuft. Im ersten Fall redet Mimir über das Netz mit einem Ollama im LAN, auf einem
+Server im Rechenzentrum oder auf dem eigenen; im zweiten bringt Mimir die Engine
+mit und rechnet auf diesem Rechner. Modelle, Verlauf und Einstellungen bleiben
+damit in beiden Fällen bei dir.
 
 Mimir verwendet Tauri 2, ein statisches Frontend aus HTML, CSS und JavaScript sowie
 ein Rust-Backend. Modellliste, Chat-Anfragen und Streaming-Antworten kommen über
 Ollamas HTTP-API; das Frontend muss den Server nicht selbst erreichen.
+
+## Herunterladen
+
+Zum Benutzen ist nichts nötig – weder Rust noch CMake noch ein Ollama. Läuft Mimir
+mit **Ollama: Lokal**, rechnet die eingebaute Engine auf diesem Rechner.
+
+**Windows:** [⬇ Mimir für Windows herunterladen](https://github.com/bilandal-dev/Mimir/releases/latest)
+(auf der Release-Seite unter **Assets** die Datei `Mimir_…-setup.exe`)
+
+**Linux:** Mimir wird aus dem Quelltext gebaut, siehe [Installation](#installation). Ein
+vorcompiliertes Paket gibt es derzeit nicht.
+
+> **Windows warnt beim ersten Start.** Die Datei ist nicht von Microsoft
+> signiert, also erscheint *„Windows hat Ihre PC geschützt"*. Über *Weitere
+> Informationen → Trotzdem ausführen* geht es weiter. Das gilt für jede
+> `.exe`, die ohne Zertifikat gebaut wurde, und ist kein Hinweis auf ein
+> Problem mit Mimir.
 
 ## Was es kann
 
@@ -44,6 +61,14 @@ Start ein – siehe [Erster Start](#erster-start).
 Für den Komfortbefehl `/server-start`, der Ollama über SSH auf dem Server neu startet,
 braucht Mimir zusätzlich ein lokales `ssh`-Programm und einen Schlüssel. Das ist
 freiwillig; ohne SSH funktioniert alles andere genauso.
+
+**Unter Windows gilt derselbe Befehl**, mit einer Einschränkung beim Passwort:
+Mitrückt der Schlüssel, genügt das mitgelieferte `ssh.exe`. Gibt es nur ein
+Passwort, übergibt es dieses nicht ohne Rückfrage – das Windows-OpenSSH ignoriert
+`SSH_ASKPASS` je nach Version unterschiedlich. Dafür braucht es `plink.exe` aus
+[PuTTY](https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html); Mimir findet
+sie in den üblichen Installationsorten und im Suchpfad. Der Hostschlüssel muss dort
+vorher einmal mit `plink` bestätigt worden sein.
 
 **Zum Bauen** sind Rust, `cmake` und ein C++-Übersetzer nötig, weil Mimirs Engine
 llama.cpp mitbringt. Auf Arch:

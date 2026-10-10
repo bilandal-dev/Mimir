@@ -1283,6 +1283,51 @@ fn validate_ssh_port(port: u16) -> Result<u16, String> {
 /// bedeutet "Standardpfade plus ssh-agent". Da Mimir mit `-F /dev/null` startet,
 /// wird ein in `~/.ssh/config` konfiguriertes `IdentityFile` sonst ignoriert.
 /// `~/` wird aufgelöst, damit der Befehl wie in der Shell geschrieben werden kann.
+/// Das Verzeichnis, in das `~/` aufgelöst wird.
+///
+/// **Unter Windows gibt es `HOME` nicht.** Dort steht der Pfad in `USERPROFILE`,
+/// und ein Schlüssel liegt unter `C:\Users\Name\.ssh\`, nicht unter `/home/name/`.
+/// Wer allein `HOME` prüft, bekommt dort nichts zurück – und gerade `~/.ssh/…`,
+/// also die Angabe, die fast alle eingetragen haben, scheitert dann an einer
+/// Umgebungsvariable, die es auf dem System gar nicht gibt.
+fn home_directory() -> Option<String> {
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok();
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME").ok();
+
+    home.filter(|wert| !wert.is_empty() && !wert.contains('\0'))
+}
+
+/// Ob ein Pfad absolut ist – nach den Regeln des Systems, auf dem Mimir läuft.
+///
+/// Auf Windows zählt auch ein Netzwerkpfad (`\\server\freigabe`) als absolut;
+/// dort wäre ein zusätzlicher Zusammenbau mit dem Heimverzeichnis falsch.
+fn ist_absolut(pfad: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let bytes = pfad.as_bytes();
+        let laufwerk = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/');
+
+        laufwerk || pfad.starts_with(r"\\")
+    }
+    #[cfg(not(windows))]
+    {
+        pfad.starts_with('/')
+    }
+}
+
+/// Die Trennzeichen, an denen ein Pfad in Segmente zerfällt.
+///
+/// Windows akzeptiert beide Schrägstriche nebeneinander; wer nur auf `/` prüft,
+/// übersieht dort ein `..` und öffnet den Weg aus dem Benutzerverzeichnis heraus.
+fn pfadsegmente(pfad: &str) -> Vec<&str> {
+    pfad.split(['/', '\\']).collect()
+}
+
 fn normalize_ssh_identity_file(identity_file: &str) -> Result<String, String> {
     let value = identity_file.trim();
     if value.is_empty() {
@@ -1291,9 +1336,7 @@ fn normalize_ssh_identity_file(identity_file: &str) -> Result<String, String> {
 
     if value.len() > MAX_SSH_IDENTITY_BYTES
         || value.starts_with('-')
-        || value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
+        || value.chars().any(|character| character.is_control())
     {
         return Err("Der Pfad zur SSH-Identitätsdatei ist ungültig".to_string());
     }
@@ -1305,22 +1348,38 @@ fn normalize_ssh_identity_file(identity_file: &str) -> Result<String, String> {
         );
     }
 
-    let expanded = match value.strip_prefix("~/") {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(home) if !home.is_empty() && !home.contains('\\') && !home.contains('\0') => {
-                format!("{home}/{rest}")
+    // **Leerzeichen sind erlaubt.** Der Pfad geht als eigenes Argument an den
+    // Prozess und läuft durch keine Shell, womit `C:\Users\Kai Weber\.ssh\id_ed25519`
+    // harmlos ist. Es vorher zu verbieten, hieße, Windows-Pfade grundsätzlich
+    // abzulehnen – und der Name eines Benutzerverzeichnisses ist genau die Sorte
+    // Text, den Windows erzeugt, bevor jemand ihn korrigiert.
+    let expanded = match value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        Some(rest) => match home_directory() {
+            Some(home) => {
+                // `rest` kommt ohne führenden Trenner daher; ohne diesen wird aus
+                // `/home/kai` und `.ssh/id_ed25519` schlicht `/home/kai.ssh/id_ed25519`.
+                let trenner = if cfg!(windows) { '\\' } else { '/' };
+                format!("{home}{trenner}{rest}")
             }
-            _ => {
-                return Err("~ kann nicht aufgelöst werden, da HOME nicht verfügbar ist".to_string())
+            None => {
+                return Err(match cfg!(windows) {
+                    true => "~ kann nicht aufgelöst werden, da USERPROFILE nicht verfügbar ist",
+                    false => "~ kann nicht aufgelöst werden, da HOME nicht verfügbar ist",
+                }
+                .to_string())
             }
         },
         None => value.to_string(),
     };
 
-    if !expanded.starts_with('/') {
+    if !ist_absolut(&expanded) {
         return Err("Der Pfad zur SSH-Identitätsdatei muss absolut sein".to_string());
     }
-    if expanded.split('/').any(|segment| segment == "..") {
+
+    if pfadsegmente(&expanded).contains(&"..") {
         return Err("Der Pfad zur SSH-Identitätsdatei darf kein '..' enthalten".to_string());
     }
 
@@ -4239,10 +4298,158 @@ async fn run_ssh_with_password(config: &SshConfig, password: String) -> Result<(
     result
 }
 
-#[cfg(not(unix))]
+/// Der Passwort-Weg unter Windows.
+///
+/// **Warum hier ein anderes Programm läuft als unter Unix.** Unter Unix übergibt
+/// ein Hilfsskript über `SSH_ASKPASS` das Passwort an `ssh`. Genau das ist unter
+/// Windows keine verlässliche Grundlage: Das mitgelieferte OpenSSH ignoriert
+/// `SSH_ASKPASS` je nach Version sehr unterschiedlich, und die Variable
+/// `SSH_ASKPASS_REQUIRE`, die das erzwungene verwenden erst möglich macht, gibt es
+/// erst seit OpenSSH 8.4 – Windows 10 bringt aber 8.1 mit. Ein darauf gebauter
+/// Weg wäre einer, der je nach Windows-Version fällt oder hängt.
+///
+/// `plink.exe` aus PuTTY hat diese Eigenheit nicht und ist für Windows der
+/// etablierte Weg. Es bekommt das Passwort über `-pwfile`, also aus einer Datei
+/// und **nicht** über die Kommandozeile: Ein Argument im Aufruf würde jedes
+/// Werkzeug in der Prozessliste anzeigen – in der auch andere Benutzer des
+/// Rechners nachsehen können.
+#[cfg(windows)]
+struct Passwortdatei {
+    pfad: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for Passwortdatei {
+    fn drop(&mut self) {
+        entferne_geheimdatei(&self.pfad);
+    }
+}
+
+/// Überschreibt eine Datei und löscht sie danach.
+///
+/// Unter NTFS lässt sich ein bereits belegter Bereich nicht zuverlässig
+/// überschreiben; abgeschnitten und gelöscht wird trotzdem, damit das Passwort
+/// nicht als lesbarer Rest zurückbleibt.
+#[cfg(windows)]
+fn entferne_geheimdatei(pfad: &Path) {
+    if let Ok(mut datei) = std::fs::OpenOptions::new().write(true).open(pfad) {
+        let _ = datei.set_len(0);
+        let _ = datei.sync_all();
+    }
+    let _ = std::fs::remove_file(pfad);
+}
+
+#[cfg(windows)]
+fn passwortdatei_anlegen(password: &str) -> Result<Passwortdatei, String> {
+    for _ in 0..MAX_CONFIG_TEMP_ATTEMPTS {
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Das TEMP-Verzeichnis gehört dem Benutzer; Windows gibt es nicht für
+        // andere frei. Unter Linux wäre derselbe Ort für jeden lesbar, weshalb
+        // dort zusätzlich ein Verzeichnis mit `0700` nötig ist.
+        let pfad = std::env::temp_dir().join(format!(
+            "mimir-ssh-passwort-{}-{sequence}",
+            std::process::id()
+        ));
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pfad)
+        {
+            Ok(mut datei) => {
+                if let Err(error) = datei.write_all(password.as_bytes()) {
+                    let _ = std::fs::remove_file(&pfad);
+                    return Err(format!("SSH-Passwortdatei nicht schreibbar: {error}"));
+                }
+                return Ok(Passwortdatei { pfad });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("SSH-Passwortdatei nicht anlegbar: {error}")),
+        }
+    }
+
+    Err("SSH-Passwortdatei konnte nicht eindeutig angelegt werden".to_string())
+}
+
+/// Wo `plink.exe` liegt: die beiden üblichen Installationsorte, danach der Suchpfad.
+#[cfg(windows)]
+fn finde_plink() -> Option<PathBuf> {
+    const ORTE: &[&str] = &[
+        r"C:\Program Files\PuTTY\plink.exe",
+        r"C:\Program Files (x86)\PuTTY\plink.exe",
+    ];
+
+    for ort in ORTE {
+        let pfad = Path::new(ort);
+        if pfad.is_file() {
+            return Some(pfad.to_path_buf());
+        }
+    }
+
+    let suchpfad = std::env::var_os("PATH")?;
+    suchpfad
+        .to_string_lossy()
+        .split(';')
+        .filter(|verzeichnis| !verzeichnis.is_empty())
+        .map(|verzeichnis| Path::new(verzeichnis.trim()).join("plink.exe"))
+        .find(|kandidat| kandidat.is_file())
+}
+
+#[cfg(windows)]
+async fn run_ssh_with_password(config: &SshConfig, password: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
+    if password.is_empty() || password.len() > MAX_SSH_PASSWORD_BYTES {
+        return Err("Das SSH-Passwort ist ungültig".to_string());
+    }
+
+    let plink = finde_plink().ok_or_else(|| {
+        "Unter Windows kann das mitgelieferte ssh.exe kein Passwort ohne Rückfrage übergeben. \
+         Für den Passwort-Weg wird plink aus PuTTY gebraucht: \
+         https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html \
+         Der Schlüssel-Weg funktioniert ohne PuTTY – trage unter /ssh-target einen Schlüssel ein."
+            .to_string()
+    })?;
+
+    let datei = passwortdatei_anlegen(password.as_str())?;
+    let target = normalize_ssh_target(&config.target)?;
+    let port = validate_ssh_port(config.port)?;
+    let identity_file = normalize_ssh_identity_file(&config.identity_file)?;
+
+    let mut command = tokio::process::Command::new(&plink);
+    command
+        .kill_on_drop(true)
+        .arg("-ssh")
+        // Ohne `-batch` öffnet plink bei jedem unbekannten Host ein Fenster und
+        // wartet darauf, dass jemand ja sagt. Das ist in einer Anwendung, die im
+        // Hintergrund läuft, der falsche Ort für eine Rückfrage: Der Hostschlüssel
+        // muss vorher bekannt sein, sonst bricht der Versuch ab.
+        .arg("-batch");
+
+    if !identity_file.is_empty() {
+        command.arg("-i").arg(&identity_file);
+    }
+
+    // `-P` mit Großbuchstaben: plink hat den Port hier, während ssh `-p` dafür
+    // nimmt. Der Unterschied ist leicht zu übersehen und sähe wie ein
+    // Verbindungsfehler aus.
+    command
+        .arg("-P")
+        .arg(port.to_string())
+        .arg("-pwfile")
+        .arg(&datei.pfad)
+        .arg(target)
+        .arg(build_start_ollama_command())
+        .stdin(std::process::Stdio::null());
+
+    run_ssh_command(command)
+        .await
+        .map_err(|fehler| SshCommandError::into_message(fehler).replace("SSH-", "PuTTY-"))
+}
+
+#[cfg(not(any(unix, windows)))]
 async fn run_ssh_with_password(_config: &SshConfig, password: String) -> Result<(), String> {
     let _password = Zeroizing::new(password);
-    Err("Der Passwort-Fallback wird nur unter Unix, also Linux und macOS, unterstützt".to_string())
+    Err("Der Passwort-Fallback wird nur unter Linux, macOS und Windows unterstützt".to_string())
 }
 
 #[tauri::command]
