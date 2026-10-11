@@ -18,8 +18,6 @@ pub mod imap;
 pub mod smtp;
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use zeroize::Zeroize;
 
 /// So lang darf eine Serveradresse sein. Genug für einen Port, mehr nicht.
 #[allow(dead_code)]
@@ -132,7 +130,7 @@ impl MailConfig {
 ///
 /// Stattdessen liegt es im Schlüsselbund des Systems, siehe
 /// [`CredentialStore`]. Auf der Platte steht von ihm nichts.
-
+///
 /// Normalisiert eine Serveradresse und prüft sie.
 ///
 /// **Kein Vorgabewert, und das ist der Kern der Sache.** Jede Adresse, die hier

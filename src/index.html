@@ -340,6 +340,8 @@
                 <option value="smtps://smtp.gmail.com"></option>
                 <option value="imaps://mail.gmx.de"></option>
                 <option value="smtps://mail.gmx.de"></option>
+                <option value="imaps://imap.strato.de"></option>
+                <option value="smtps://smtp.strato.de"></option>
                 <option value="imaps://imap.icloud.com"></option>
                 <option value="smtps://smtp.icloud.com"></option>
                 <option value="imaps://imap.outlook.office365.com"></option>
@@ -365,6 +367,13 @@
                  kein Postfach-Passwort in der Hand. -->
             <p class="mail-hint">Gespeichert wird das App-Passwort im <strong>Schlüsselbund des Systems</strong>, nicht in einer Datei von Mimir. Ohne Schlüsselbund – etwa auf einem Rechner ohne Anmeldung – bleibt die Anmeldung nur für diese Sitzung erhalten.</p>
             <p class="mail-hint">Beide Server brauchen ein Zertifikat, das das System kennt. Mimir prüft es wie bei jeder anderen HTTPS-Verbindung; ein Mailserver mit einem selbstsignierten Zertifikat wird abgelehnt.</p>
+            <!-- **Strato verlangt das normale Postfachpasswort**, kein App-Passwort –
+                 und der Benutzername ist die vollständige Adresse. Das steht hier,
+                 weil es die häufigste Fehlerquelle ist: Wer stattdessen ein
+                 App-Passwort sucht, findet keins und hält die Anmeldung für kaputt.
+                 Bei Strato ist außerdem im Kundenlogin unter „E-Mail → E-Mail-
+                 Verwaltung" zu prüfen, ob der IMAP-Zugriff eingeschaltet ist. -->
+            <p class="mail-hint">Bei <strong>Strato</strong> gehört das normale Postfachpasswort hierher, nicht ein App-Passwort – und der Benutzername ist die vollständige Adresse. Prüfe im Kundenlogin, ob der IMAP-Zugriff eingeschaltet ist.</p>
             <p id="mail-dialog-error" class="mail-dialog-error" hidden></p>
             <div class="dialog-actions">
                 <button type="button" id="mail-cancel">Abbrechen</button>

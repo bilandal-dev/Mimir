@@ -4712,6 +4712,17 @@ function updateAgentStepsHead() {
         return;
     }
 
+    // **Im Postfach-Umfang gibt es kein Arbeitsverzeichnis**, und es wäre
+    // doppelt falsch, eines zu nennen: Es gibt keins, und die Werkzeuge dort
+    // schreiben nicht in Dateien. Vorher stand hier „in /tmp" unter einem
+    // Werkzeugschritt, der eine Mail verschickt.
+    if (agent.scope === 'mail') {
+        head.textContent = agent.writeEnabled
+            ? 'Postfach: lesen, Entwurf und Versand'
+            : 'Postfach: lesen und Entwurf';
+        return;
+    }
+
     const base = 'Nur lesende Werkzeuge';
     // Beide Grenzen kommen aus dem Backend, damit Anzeige und Durchsetzung nicht
     // auseinanderlaufen: die Anzahl der Schreibvorgänge und das Byte-Budget je Zug.

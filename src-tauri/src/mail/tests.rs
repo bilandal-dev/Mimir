@@ -33,9 +33,7 @@ fn trennt_mehrere_empfaenger_und_begrenzt_sie() {
     let drei = "a@example.org, b@example.org;c@example.org";
     assert_eq!(parse_recipients(drei).unwrap().len(), 3);
 
-    let zu_viele = std::iter::repeat("a@example.org,")
-        .take(MAX_MAIL_RECIPIENTS + 1)
-        .collect::<String>();
+    let zu_viele = "a@example.org,".repeat(MAX_MAIL_RECIPIENTS + 1);
     assert!(parse_recipients(&zu_viele).is_err());
 
     assert!(parse_recipients("  ").is_err());
@@ -115,8 +113,10 @@ fn standard_konfiguration_nennt_keinen_fremden_server() {
 
 #[test]
 fn waehlt_ordner_und_absender_vernuenftig() {
-    let mut config = MailConfig::default();
-    config.username = "kai@example.org".to_string();
+    let mut config = MailConfig {
+        username: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
 
     // Ohne eigene Adresse wird die Adresse des Benutzers verwendet: Wer als
     // `kai@example.org` angemeldet ist, will nicht als `kai` schreiben.
@@ -132,12 +132,16 @@ fn waehlt_ordner_und_absender_vernuenftig() {
 
 #[test]
 fn begrenzt_die_anzahl_gezeigter_nachrichten() {
-    let mut config = MailConfig::default();
-
-    config.max_entries = 0;
+    let config = MailConfig {
+        max_entries: 0,
+        ..MailConfig::default()
+    };
     assert_eq!(config.anzeige_grenze(), 1);
 
-    config.max_entries = 5000;
+    let config = MailConfig {
+        max_entries: 5000,
+        ..MailConfig::default()
+    };
     assert_eq!(config.anzeige_grenze(), MAX_MAIL_LIST_ENTRIES);
 }
 
@@ -226,15 +230,19 @@ fn der_schluesselbund_eintraeg_ist_je_konto_eigen() {
     // kommen.** Ohne den Server im Eintrag würde das Passwort von Kai an Kai
     // gehen, sobald ein zweiter Mailserver eingetragen ist – und niemand
     // bekäme es zu sehen.
-    let mut a = MailConfig::default();
-    a.username = "kai@example.org".to_string();
-    a.imap_server = "imaps://imap.gmail.com:993".to_string();
+    let a = MailConfig {
+        username: "kai@example.org".to_string(),
+        imap_server: "imaps://imap.gmail.com:993".to_string(),
+        ..MailConfig::default()
+    };
 
     let mut b = a.clone();
     b.imap_server = "imaps://imap.example.org:993".to_string();
 
-    let mut c = a.clone();
-    c.username = "anna@example.org".to_string();
+    let c = MailConfig {
+        username: "anna@example.org".to_string(),
+        ..a.clone()
+    };
 
     assert_ne!(schluesselbund_eintrag(&a), schluesselbund_eintrag(&b));
     assert_ne!(schluesselbund_eintrag(&a), schluesselbund_eintrag(&c));

@@ -36,15 +36,17 @@ vorcompiliertes Paket gibt es derzeit nicht.
   Versand bei Verbindungsabbruch vor dem ersten Token
 - **Markdown** mit Überschriften, Listen, Tabellen, Links, Zitaten und Codeblöcken,
   gegen unsicheres HTML und unsichere Links abgesichert
+- **Mailleiste** aus IMAP und SMTP: Nachrichten links, ein Klick öffnet sie, ein
+  Knopf lässt das gerade gewählte Modell sie zusammenfassen
 - **Kalenderleiste** aus einer Nextcloud-Instanz im eigenen Netz: Termine am rechten
   Rand, ein Klick öffnet den Termin zum Ändern
 - **Termine anlegen, ändern und löschen** im Agentenmodus, jeweils mit Vorschau des
   Unterschieds und ausdrücklicher Freigabe
 - **Agentenmodus** mit lesenden Werkzeugen, feste Sandbox, jeder Aufruf wird
   bestätigt; Schreiben nur nach Freischaltung und als sichtbarer Unterschied
-- **Umfang** wählbar: alles wie bisher oder nur die vier Kalenderwerkzeuge, dann
-  ohne Dateizugriff und ohne Arbeitsverzeichnis, jede Änderung weiterhin als
-  sichtbarer Unterschied vorab bestätigt
+- **Umfang** wählbar: alles wie bisher, nur die vier Kalenderwerkzeuge oder nur
+  das Postfach – dann ohne Dateizugriff und ohne Arbeitsverzeichnis, jede
+  Änderung weiterhin als sichtbarer Unterschied vorab bestätigt
 - **Dateien anhängen** ohne Mimir Zugriff auf das Dateisystem zu geben
 - **Helles oder dunkles Schema**, umschaltbar oben links und gemerkt für dieses Gerät
 
@@ -293,6 +295,7 @@ Alles im Chat, mit `/` beginnend. `/help` zeigt dieselbe Liste in der Anwendung.
 | `/scope` | zeigt oder stellt ein, wie weit das Modell reicht |
 | `/scope agent` | Dateiwerkzeuge im Arbeitsverzeichnis |
 | `/scope termine` | nur die vier Kalenderwerkzeuge, ohne Dateizugriff |
+| `/scope mail` | Postfach: lesen und Entwürfe; Senden nur mit Vorschau |
 | `/agent` | Agentenmodus ein oder aus, nur lesende Werkzeuge |
 | `/agent-write` | schreibende Werkzeuge freigeben oder sperren |
 | `/agent-dir` | zeigt das Arbeitsverzeichnis des Agentenmodus |
@@ -339,6 +342,7 @@ Näheres in [docs/entwicklung.md](docs/entwicklung.md#sicherheits--und-datenhinw
 | [docs/konfiguration.md](docs/konfiguration.md) | Server, SSH, Kontextfenster, Verlauf |
 | [docs/agentenmodus.md](docs/agentenmodus.md) | Werkzeuge, Bestätigung, Sandbox |
 | [docs/kalender.md](docs/kalender.md) | Nextcloud, Termine, Erinnerungen, Kategorien |
+| [docs/mail.md](docs/mail.md) | IMAP, SMTP, Gmail, Strato, Schlüsselbund, Versand |
 | [docs/architektur.md](docs/architektur.md) | Aufbau, Datenfluss, Gestaltung |
 
 ## Anmerkungen
