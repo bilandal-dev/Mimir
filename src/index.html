@@ -41,6 +41,11 @@
             </div>
             <div class="model-control">
                 <button type="button" id="calendar-toggle-btn" class="header-button" aria-pressed="true" title="Kalenderleiste am rechten Rand ein- oder ausblenden">Kalender: an</button>
+                <!-- Die Leiste sitzt **links**, der Kalender rechts: Eine Zeile
+                     liest sich von links nach rechts, und das Postfach ist der
+                     Text, an dem man arbeitet – der Kalender ist der Umweg
+                     daneben. -->
+                <button type="button" id="mail-toggle-btn" class="header-button" aria-pressed="true" title="Mailleiste am linken Rand ein- oder ausblenden">Mail: an</button>
                 <label for="model-select">Modell: </label>
                 <select id="model-select" disabled>
                     <option>Modelle werden geladen ...</option>
@@ -69,6 +74,23 @@
                 <span class="activity-label" id="activity-label">Antwort wird erzeugt</span>
             </div>
         </div>
+
+        <!-- **Die Mailleiste.** Wie der Kalender eine aside, aber links: Sie
+             steht vor dem Chat im Quelltext und bekommt ihn über CSS zugeordnet.
+             Angefangen wird mit dem Posteingang – der Ordner, den ein Mensch
+             zuerst öffnet. -->
+        <aside id="mail-panel" class="mail-panel" aria-label="Postfach">
+            <div class="mail-head">
+                <h3>Mail</h3>
+                <div class="mail-head-actions">
+                    <button type="button" id="mail-refresh" class="mail-icon-button" title="Postfach neu laden">Neu laden</button>
+                    <button type="button" id="mail-settings-btn" class="mail-icon-button" title="Mailkonto einstellen">Konto</button>
+                </div>
+            </div>
+            <p id="mail-state" class="mail-state">Kein Mailkonto eingetragen.</p>
+            <ul id="mail-list" class="mail-list"></ul>
+            <p id="mail-foot" class="mail-foot"></p>
+        </aside>
 
         <aside id="calendar-panel" class="calendar-panel" aria-label="Nächste Termine">
             <div class="calendar-head">
@@ -267,6 +289,70 @@
             <div class="dialog-actions">
                 <button type="button" id="calendar-cancel">Abbrechen</button>
                 <button type="submit" id="calendar-login-btn">Anmelden</button>
+            </div>
+        </form>
+    </dialog>
+
+    <!-- **Das Popup für eine Nachricht.** Kein Modal mit Knöpfen zum Schließen,
+         sondern ein Fenster über der Leiste: Der Kalender hat für Termine
+         dasselbe, und der Grund ist derselbe – wer eine Mail liest, will danach
+         weiterlesen und nicht erst die Oberfläche wegklicken. -->
+    <dialog id="mail-message-dialog">
+        <div class="mail-message">
+            <h3 id="mail-message-subject"></h3>
+            <p class="mail-message-meta">
+                <span id="mail-message-from"></span>
+                <span id="mail-message-date"></span>
+            </p>
+            <!-- **Als Text, nie als HTML.** Der Inhalt einer Mail ist Angriffseingabe
+                 von Fremden; im Fenster gerendert wäre ein Link, der aussieht wie
+                 ein Link, und ein Bild, das aussieht wie nichts. -->
+            <pre id="mail-message-text" class="mail-message-text"></pre>
+            <p id="mail-message-attachments" class="mail-message-attachments" hidden></p>
+            <div class="dialog-actions mail-message-actions">
+                <button type="button" id="mail-message-close">Schließen</button>
+                <!-- **Der Knopf, um den es hier geht.** Er legt den Text in den
+                     Chat und stellt die Frage. Die Antwort landet als Nachricht
+                     im Verlauf, nicht an der Mail – ein Ergebnis, das beim
+                     nächsten Klick weg wäre, wäre keines. -->
+                <button type="button" id="mail-message-summarize" class="mail-summarize-button">Zusammenfassen</button>
+            </div>
+        </div>
+    </dialog>
+
+    <dialog id="mail-dialog">
+        <form id="mail-form">
+            <h3>Mailkonto</h3>
+            <p>Mimir spricht IMAP und SMTP. Bei Gmail unter Einstellungen, Konten, <em>Sicherheit</em> ein <strong>App-Passwort</strong> erzeugen – das Hauptpasswort gehört nicht hierher.</p>
+
+            <label for="mail-imap-input">IMAP-Server</label>
+            <input type="text" id="mail-imap-input" placeholder="imaps://imap.example.org" autocomplete="off">
+            <label for="mail-smtp-input">SMTP-Server</label>
+            <input type="text" id="mail-smtp-input" placeholder="smtps://smtp.example.org" autocomplete="off">
+            <label for="mail-user-input">Benutzername</label>
+            <input type="text" id="mail-user-input" autocomplete="username">
+            <label for="mail-address-input">Absenderadresse</label>
+            <input type="text" id="mail-address-input" placeholder="kai@example.org" autocomplete="off">
+            <label for="mail-folder-input">Ordner</label>
+            <input type="text" id="mail-folder-input" placeholder="INBOX" autocomplete="off">
+            <label for="mail-password-input">App-Passwort</label>
+            <input type="password" id="mail-password-input" autocomplete="off">
+            <label class="mail-remember">
+                <input type="checkbox" id="mail-remember-input">
+                <span>Passwort merken</span>
+            </label>
+            <!-- **Wohin das gemerkte Passwort geht.** Anders als beim Kalender
+                 steht es hier *nicht* in einer Datei neben der Konfiguration,
+                 sondern im Schlüsselbund des Systems: unter Linux in
+                 gnome-keyring oder KWallet, unter macOS in der Keychain, unter
+                 Windows im Anmeldeverwaltung. Wer dieselbe Datei kopiert, hat
+                 kein Postfach-Passwort in der Hand. -->
+            <p class="mail-hint">Gespeichert wird das App-Passwort im <strong>Schlüsselbund des Systems</strong>, nicht in einer Datei von Mimir. Ohne Schlüsselbund – etwa auf einem Rechner ohne Anmeldung – bleibt die Anmeldung nur für diese Sitzung erhalten.</p>
+            <p class="mail-hint">Beide Server brauchen ein Zertifikat, das das System kennt. Mimir prüft es wie bei jeder anderen HTTPS-Verbindung; ein Mailserver mit einem selbstsignierten Zertifikat wird abgelehnt.</p>
+            <p id="mail-dialog-error" class="mail-dialog-error" hidden></p>
+            <div class="dialog-actions">
+                <button type="button" id="mail-cancel">Abbrechen</button>
+                <button type="submit" id="mail-login-btn">Anmelden</button>
             </div>
         </form>
     </dialog>

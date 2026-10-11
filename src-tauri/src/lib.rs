@@ -487,6 +487,10 @@ struct OllamaConfig {
     /// Kalenderleiste. Leer, solange keine Instanz eingetragen ist.
     #[serde(default)]
     calendar: crate::calendar::CalendarConfig,
+    /// Mailleiste. Leer, solange kein Konto eingetragen ist – und ohne
+    /// eingebauten Vorgabewert, damit keine fremde Adresse im Binary steht.
+    #[serde(default)]
+    mail: crate::mail::MailConfig,
     /// Helligkeit der Oberfläche.
     #[serde(default)]
     theme: Theme,
@@ -734,6 +738,7 @@ fn test_settings() -> OllamaSettings {
             agent: AgentConfig::default(),
             chat: ChatConfig::default(),
             calendar: crate::calendar::CalendarConfig::default(),
+            mail: crate::mail::MailConfig::default(),
             theme: Theme::default(),
         }),
         config_path: std::env::temp_dir().join("mimir-test-ollama.json"),
@@ -764,6 +769,7 @@ impl OllamaSettings {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
+                mail: crate::mail::MailConfig::default(),
                 theme: Theme::default(),
             },
             Err(error) => return Err(format!("Ollama-Konfiguration nicht lesbar: {}", error)),
@@ -811,6 +817,33 @@ impl OllamaSettings {
     /// Nimmt ein gespeichertes App-Passwort in den Sitzungszustand, wenn es zum
     /// eingetragenen Benutzer gehört. Wird beim Start aufgerufen, damit die
     /// Anmeldung nach einem Neustart nicht neu gemacht werden muss.
+    /// Holt das gemerkte App-Passwort in den Sitzungszustand zurück.
+    ///
+    /// **Ganz wie beim Kalender ohne `await`**, weil `setup` keine async
+    /// Funktion ist. Deshalb `try_read`: Eine nicht verfügbare Sperre ist kein
+    /// Fehler, sondern bedeutet „jetzt nicht" – und die Anmeldung wird beim
+    /// nächsten Senden ohnehin neu aufgebaut.
+    fn restore_mail_session(
+        &self,
+        session: &crate::mail::MailSession,
+        store: &crate::mail::CredentialStore,
+    ) -> bool {
+        let config = match self.config.try_read() {
+            Ok(config) => config,
+            Err(_) => return false,
+        };
+
+        if !config.mail.ist_eingerichtet() {
+            return false;
+        }
+
+        let Some(passwort) = store.lesen(&config.mail) else {
+            return false;
+        };
+
+        session.set_password(&passwort).is_ok()
+    }
+
     fn restore_calendar_session(&self, session: &crate::calendar::CalendarSession) -> bool {
         let config = match self.config.try_read() {
             Ok(config) => config,
@@ -1064,6 +1097,19 @@ impl OllamaSettings {
         self.persist_config(&candidate)?;
         config.calendar = candidate.calendar.clone();
         Ok(())
+    }
+
+    /// Merkt sich die Mailleiste.
+    async fn set_mail_config(
+        &self,
+        mail: crate::mail::MailConfig,
+    ) -> Result<crate::mail::MailConfig, String> {
+        let mut config = self.config.write().await;
+        let mut candidate = config.clone();
+        candidate.mail = mail.clone();
+        self.persist_config(&candidate)?;
+        config.mail = candidate.mail.clone();
+        Ok(mail)
     }
 
     async fn set_calendar_config(
@@ -6728,6 +6774,247 @@ async fn calendar_events(
     Ok(events)
 }
 
+// --------------------------------------- Mail (IMAP)
+//
+// Jeder Befehl prüft zuerst `config.ist_eingerichtet()` und das Passwort im
+// Sitzungszustand. Ohne beide gibt es keine Verbindung – und im Fehlerfall
+// wird **nicht** versucht, es irgendwo anders zu beschaffen.
+
+/// Die Mailleiste: Ordner, Nachrichten, Text.
+///
+/// Ohne eingetragenes Konto kommt hier nichts zurück. Das ist kein Fehler,
+/// sondern der Normalzustand nach der Installation – deshalb `Ok(vec![])`
+/// statt einer Meldung, die im Chat als Fehler stünde.
+#[tauri::command]
+async fn get_mail_config(
+    settings: State<'_, OllamaSettings>,
+) -> Result<crate::mail::MailConfig, String> {
+    Ok(settings.get_config().await.mail)
+}
+
+/// Merkt sich Server, Absender und Ordner.
+///
+/// Leere Felder werden zu leeren Feldern gespeichert, nicht zu Vorgabewerten:
+/// Ein eingebauter Server nähme einen jeden, der Mimir installiert, mit auf
+/// fremdes Postfach.
+#[tauri::command]
+async fn set_mail_config(
+    imap_server: Option<String>,
+    smtp_server: Option<String>,
+    username: Option<String>,
+    address: Option<String>,
+    folder: Option<String>,
+    max_entries: Option<usize>,
+    settings: State<'_, OllamaSettings>,
+) -> Result<crate::mail::MailConfig, String> {
+    let aktuell = settings.get_config().await.mail;
+
+    let config = crate::mail::MailConfig {
+        imap_server: match imap_server.as_deref() {
+            None => aktuell.imap_server.clone(),
+            Some(wert) if wert.trim().is_empty() => String::new(),
+            Some(wert) => crate::mail::normalize_server_url(wert, "IMAP")?,
+        },
+        smtp_server: match smtp_server.as_deref() {
+            None => aktuell.smtp_server.clone(),
+            Some(wert) if wert.trim().is_empty() => String::new(),
+            Some(wert) => crate::mail::normalize_server_url(wert, "SMTP")?,
+        },
+        username: match username.as_deref() {
+            None => aktuell.username.clone(),
+            Some(wert) if wert.trim().is_empty() => String::new(),
+            Some(wert) => crate::mail::normalize_username(wert)?,
+        },
+        address: match address.as_deref() {
+            None => aktuell.address.clone(),
+            Some(wert) if wert.trim().is_empty() => String::new(),
+            Some(wert) => crate::mail::normalize_address(wert, "Absender")?,
+        },
+        folder: match folder.as_deref() {
+            None => aktuell.folder.clone(),
+            Some(wert) if wert.trim().is_empty() => String::new(),
+            Some(wert) => {
+                let ordner = wert.trim();
+                if ordner.len() > 255 || ordner.chars().any(|c| c.is_control() || c == '"') {
+                    return Err("Der Ordnername ist ungültig".to_string());
+                }
+                ordner.to_string()
+            }
+        },
+        max_entries: max_entries.unwrap_or(aktuell.max_entries),
+    };
+
+    let mut alle = settings.get_config().await;
+    alle.mail = config.clone();
+    settings.set_mail_config(alle.mail.clone()).await?;
+
+    // Beim Wechsel des Kontos gehört das alte Passwort nicht mehr zum neuen:
+    // Sonst versuchte Mimir, sich mit dem Passwort des einen Kontos beim anderen
+    // anzumelden, und die Meldung spräche vom falschen Benutzer.
+    if config.username != aktuell.username {
+        // Der Sitzungszustand wird vom Aufrufer geleert; hier nur die Konfig.
+    }
+
+    Ok(config)
+}
+
+/// Nimmt das App-Passwort in den Sitzungszustand.
+#[tauri::command]
+async fn mail_login(
+    password: String,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<(), String> {
+    session.set_password(&password)
+}
+
+/// Meldet ab, ohne das gespeicherte Passwort zu löschen.
+#[tauri::command]
+async fn mail_logout(session: State<'_, crate::mail::MailSession>) -> Result<(), String> {
+    session.clear();
+    Ok(())
+}
+
+/// Merkt das App-Passwort im Schlüsselbund des Systems.
+///
+/// **Der Fehler ist eine Meldung, kein Abbruch.** Ein Rechner ohne laufenden
+/// Schlüsselbund – ein Server ohne Anmeldung, ein Container – kann kein Passwort
+/// aufbewahren. Die Sitzung bleibt davon unberührt; nur das Merken entfällt, und
+/// das steht in der Rückmeldung, damit niemand später an einer Anmeldung
+/// scheitert, die er einmal für dauerhaft gehalten hat.
+#[tauri::command]
+async fn mail_store_password(
+    password: String,
+    settings: State<'_, OllamaSettings>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<(), String> {
+    let config = settings.get_config().await.mail;
+
+    if !config.ist_eingerichtet() {
+        return Err("Es ist kein Mailkonto eingetragen".to_string());
+    }
+
+    stored.merken(&config, &password)?;
+
+    println!(
+        "Das Mail-App-Passwort liegt jetzt im Schlüsselbund des Systems, nicht in einer Datei von Mimir."
+    );
+
+    Ok(())
+}
+
+/// Vergisst das gemerkte Passwort.
+#[tauri::command]
+async fn mail_forget_password(
+    settings: State<'_, OllamaSettings>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<(), String> {
+    let config = settings.get_config().await.mail;
+    stored.vergessen(&config);
+    Ok(())
+}
+
+/// Holt das gemerkte Passwort zurück und meldet damit an.
+///
+/// Es gibt **keinen** Befehl, der das Passwort an die Oberfläche zurückgibt:
+/// JavaScript bekommt dieses Zeichen nie zu sehen, weder zum Prüfen noch zum
+/// Anzeigen. Der Befehl meldet nur, ob es geklappt hat.
+#[tauri::command]
+async fn mail_restore_password(
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<bool, String> {
+    let config = settings.get_config().await.mail;
+
+    if !config.ist_eingerichtet() {
+        return Ok(false);
+    }
+
+    let Some(passwort) = stored.lesen(&config) else {
+        return Ok(false);
+    };
+
+    session.set_password(&passwort)?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn mail_status(
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<crate::mail::MailStatus, String> {
+    let config = settings.get_config().await.mail;
+
+    Ok(crate::mail::MailStatus {
+        configured: config.ist_eingerichtet(),
+        logged_in: session.logged_in(),
+        imap_server: config.imap_server.clone(),
+        username: config.username.clone(),
+        folder: config.ordner().to_string(),
+        last_success: session.last_success(),
+        stored: stored.exists(&config.username),
+    })
+}
+
+/// Holt die Nachrichtenliste des eingestellten Ordners.
+#[tauri::command]
+async fn mail_messages(
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<Vec<crate::mail::imap::NachrichtKopf>, String> {
+    let config = settings.get_config().await.mail;
+
+    if !config.ist_eingerichtet() {
+        return Ok(Vec::new());
+    }
+
+    let Some(password) = session.password() else {
+        return Err("Nicht angemeldet. Mit /mail anmelden.".to_string());
+    };
+
+    let grenze = config.anzeige_grenze();
+    let mut verbindung =
+        crate::mail::imap::verbinde(&config.imap_server, &config.username, &password).await?;
+
+    let nachrichten =
+        crate::mail::imap::hole_nachrichten(&mut verbindung, config.ordner(), grenze).await?;
+    session.mark_success();
+
+    Ok(nachrichten)
+}
+
+/// Holt eine einzelne Nachricht mit Text.
+#[tauri::command]
+async fn mail_message(
+    nummer: u32,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<crate::mail::imap::NachrichtVoll, String> {
+    let config = settings.get_config().await.mail;
+
+    if !config.ist_eingerichtet() {
+        return Err("Es ist kein Mailkonto eingetragen".to_string());
+    }
+
+    let Some(password) = session.password() else {
+        return Err("Nicht angemeldet. Mit /mail anmelden.".to_string());
+    };
+
+    let mut verbindung =
+        crate::mail::imap::verbinde(&config.imap_server, &config.username, &password).await?;
+
+    let mut nachricht = crate::mail::imap::hole_text(&mut verbindung, nummer).await?;
+
+    // Auch im Fenster wird gekürzt: Der Text kommt von einem Fremden, und ein
+    // ungekürzter Rumpf würde die Oberfläche und den Kontext sprengen.
+    nachricht.text = crate::mail::kuerze(&nachricht.text, crate::mail::MAX_MAIL_TEXT_BYTES);
+    nachricht.kopf.betreff = crate::mail::kuerze_betreff(&nachricht.kopf.betreff);
+    session.mark_success();
+
+    Ok(nachricht)
+}
+
 /// Prüft das Zertifikat der Instanz, ohne Zugangsdaten zu senden, und nennt den
 /// Fingerabdruck. Das Aufrufen bestätigt nichts: Dafür gibt es
 /// `calendar_trust_certificate`.
@@ -6877,6 +7164,30 @@ pub fn run() {
             }
 
             app.manage(session);
+
+            // Dasselbe fuer Mail: Passwort im Sitzungszustand, gemerktes im
+            // Schluesselbund des Systems.
+            let mail_session = crate::mail::MailSession::default();
+            // Als Einheit, damit sie nach der Wiederherstellung noch bewegt
+            // werden kann – sie wandert unten in den verwalteten Zustand.
+            let mail_store = std::sync::Arc::new(crate::mail::CredentialStore);
+
+            // Ein gemerktes Passwort wird beim Start zurückgeholt, damit die
+            // Leiste nach einem Neustart etwas zeigt. **Das Passwort selbst
+            // bleibt im Backend**: Es wird über die Tauri-Schnittstelle nicht
+            // ausgegeben, und im Frontend steht danach nur „angemeldet".
+            if settings.restore_mail_session(&mail_session, &mail_store) {
+                app.emit(
+                    "mail-angemeldet",
+                    "Das gemerkte App-Passwort wurde wiederhergestellt",
+                )
+                .ok();
+            }
+
+            app.manage(mail_session);
+            app.manage(mail_store.clone());
+            app.manage(mail_store);
+
             app.manage(settings);
             app.manage(ChatControl::new());
 
@@ -6921,6 +7232,16 @@ pub fn run() {
             prepare_attachment,
             set_chat_config,
             get_calendar_config,
+            get_mail_config,
+            set_mail_config,
+            mail_login,
+            mail_logout,
+            mail_store_password,
+            mail_forget_password,
+            mail_restore_password,
+            mail_status,
+            mail_messages,
+            mail_message,
             set_calendar_config,
             calendar_status,
             calendar_login,
@@ -7661,6 +7982,7 @@ mod tests {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
+                mail: crate::mail::MailConfig::default(),
                 theme: Theme::default(),
             }),
             config_path: parent_path.join("ollama.json"),

@@ -641,6 +641,204 @@ dialog label {
     font-size: 0.9em;
 }
 
+/* --- Mailleiste ------------------------------------------------------------ */
+
+/*
+ * **Links, aus zwei Gründen.**
+ *
+ * Der erste ist die Leserichtung: Eine Zeile liest sich von links nach rechts,
+ * und das Postfach ist der Text, an dem gearbeitet wird. Der Kalender ist der
+ * Umweg daneben – er sagt einem, dass etwas ansteht, ohne dass man ihn öffnen
+ * muss.
+ *
+ * Der zweite ist der Platz: Sie steht vor dem Chat im Quelltext, und ohne
+ * `order` stünde sie links. Der Kalender steht danach und braucht keins.
+ */
+.main-area .mail-panel {
+    order: -1;
+}
+
+.mail-panel {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    width: 300px;
+    border-right: var(--border-width) solid var(--border-color);
+    background: var(--panel-bg);
+    overflow-y: auto;
+}
+
+.mail-panel.collapsed {
+    display: none;
+}
+
+/* Auf schmalen Fenstern nimmt eine Leiste zu viel Platz weg; sie startet dort
+   eingeklappt. Zwei Leisten nebeneinander brauchen mehr, als ein Fenster hat. */
+.mail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gap);
+    padding: 10px 12px;
+    border-bottom: var(--border-width) solid var(--border-color);
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg);
+}
+
+.mail-head h3 {
+    margin: 0;
+    font-size: 1em;
+}
+
+.mail-head-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.mail-icon-button {
+    font-size: 0.75em;
+    padding: 2px 6px;
+}
+
+.mail-state {
+    padding: 10px 12px;
+    color: var(--text-dim);
+    font-size: 0.85em;
+    margin: 0;
+}
+
+.mail-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+}
+
+.mail-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 12px;
+    border-bottom: var(--border-width) solid var(--border-color);
+    cursor: pointer;
+}
+
+.mail-item:hover,
+.mail-item:focus-visible {
+    background: var(--hover-bg);
+}
+
+/* Ungelesen: eine Linie links. Kein Fettdruck – der Betreff einer Mail ist
+   lang, und fett gesetzt bricht er in zwei Zeilen und macht die Liste
+   unlesbar. */
+.mail-item.unread {
+    border-left: 3px solid var(--accent-color);
+    padding-left: calc(12px - 3px);
+}
+
+.mail-item-from {
+    font-size: 0.85em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mail-item-subject {
+    font-size: 0.9em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mail-item-date {
+    font-size: 0.7em;
+    color: var(--text-dim);
+}
+
+.mail-foot {
+    padding: 8px 12px;
+    font-size: 0.7em;
+    color: var(--text-dim);
+    margin: 0;
+}
+
+/* --- Die Nachricht im Popup ----------------------------------------------- */
+
+#mail-message-dialog {
+    max-width: 720px;
+    width: 90vw;
+}
+
+.mail-message {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    min-height: 0;
+}
+
+.mail-message h3 {
+    margin: 0;
+    word-break: break-word;
+}
+
+.mail-message-meta {
+    display: flex;
+    gap: var(--gap);
+    flex-wrap: wrap;
+    margin: 0;
+    font-size: 0.8em;
+    color: var(--text-dim);
+}
+
+/*
+ * **`<pre>`, nicht HTML.** Der Inhalt einer Mail ist Angriffseingabe von
+ * Fremden. Gerendert gäbe er Links, die aussehen wie Links, und Bilder, die
+ * aussehen wie nichts; als Text kann er nichts davon. Es ist dieselbe
+ * Entscheidung wie bei der Antwort aus dem Modell, und aus demselben Grund.
+ */
+.mail-message-text {
+    flex: 1;
+    min-height: 0;
+    max-height: 55vh;
+    overflow-y: auto;
+    margin: 0;
+    padding: 12px;
+    background: var(--input-bg);
+    border: var(--border-width) solid var(--border-color);
+    border-radius: var(--border-radius);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: 0.9em;
+}
+
+.mail-message-attachments {
+    margin: 0;
+    font-size: 0.8em;
+    color: var(--text-dim);
+}
+
+.mail-message-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--gap);
+}
+
+.mail-summarize-button {
+    font-weight: 600;
+}
+
+.mail-hint {
+    font-size: 0.8em;
+    color: var(--text-dim);
+}
+
+.mail-dialog-error {
+    color: var(--error-color, #d9534f);
+    font-size: 0.85em;
+}
+
 /* --- Kalenderleiste -------------------------------------------------------- */
 /* Chat und Eingabe stehen in einer Spalte, die Leiste daneben. Ohne die Leiste
    bleibt die Höhe wie bisher, damit die Ladeanzeige an der Nachricht hängt. */

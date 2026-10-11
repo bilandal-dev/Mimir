@@ -450,3 +450,170 @@ pub fn kuerze_betreff(text: &str) -> String {
 #[cfg(test)]
 #[path = "mail/tests.rs"]
 mod tests;
+
+/// Der Sitzungszustand des Mailkontos.
+///
+/// **Das Passwort liegt hier, nicht in der Konfiguration.** `ollama.json` wird
+/// kopiert und übertragen; ein Postfach-Passwort gehört nicht in eine Datei, die
+/// dafür im Umlauf ist.
+pub struct MailSession {
+    secret: std::sync::Mutex<Option<zeroize::Zeroizing<String>>>,
+    /// Wann zuletzt erfolgreich geholt wurde. Für die Leiste.
+    last_success: std::sync::Mutex<Option<i64>>,
+}
+
+impl Default for MailSession {
+    fn default() -> Self {
+        Self {
+            secret: std::sync::Mutex::new(None),
+            last_success: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl MailSession {
+    /// Nimmt das App-Passwort in den Sitzungszustand.
+    pub fn set_password(&self, passwort: &str) -> Result<(), String> {
+        let wert = passwort.trim();
+
+        if wert.is_empty() {
+            return Err("Das App-Passwort darf nicht leer sein".to_string());
+        }
+
+        // Gmail-App-Passwörter sind 16 Zeichen. Diese Grenze fängt eine
+        // Tipperei im Prompt ab und nichts sonst – ein längeres Passwort wird
+        // nicht erfunden, sondern nur vermutlich falsch eingegeben.
+        if wert.len() > 128 {
+            return Err("Das App-Passwort ist unplausibel lang".to_string());
+        }
+
+        if wert.chars().any(|c| c.is_control() && c != '\t') {
+            return Err("Das App-Passwort enthält unerlaubte Zeichen".to_string());
+        }
+
+        *self
+            .secret
+            .lock()
+            .map_err(|_| "Sitzungszustand defekt".to_string())? =
+            Some(zeroize::Zeroizing::new(wert.to_string()));
+
+        Ok(())
+    }
+
+    pub fn password(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.secret.lock().ok().and_then(|wache| {
+            wache
+                .as_ref()
+                .map(|wert| zeroize::Zeroizing::new(wert.to_string()))
+        })
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut wache) = self.secret.lock() {
+            *wache = None;
+        }
+    }
+
+    pub fn logged_in(&self) -> bool {
+        self.secret
+            .lock()
+            .map(|wache| wache.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn mark_success(&self) {
+        if let Ok(mut wache) = self.last_success.lock() {
+            *wache = Some(crate::now_seconds());
+        }
+    }
+
+    pub fn last_success(&self) -> Option<i64> {
+        self.last_success.lock().ok().and_then(|wache| *wache)
+    }
+}
+
+/// Was die Leiste über den Zustand des Kontos wissen muss.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct MailStatus {
+    pub configured: bool,
+    pub logged_in: bool,
+    /// Die Adresse des IMAP-Servers – **ohne** Passwort, selbstverständlich.
+    pub imap_server: String,
+    pub username: String,
+    pub folder: String,
+    pub last_success: Option<i64>,
+    /// Ob ein Passwort gespeichert ist. Nie das Passwort selbst.
+    pub stored: bool,
+}
+
+/// Der Schlüsselbund-Dienst des Systems.
+///
+/// **Linux, macOS und Windows brauchen drei verschiedene Antworten** auf
+/// dieselbe Frage: `gnome-keyring`/`KWallet` über D-Bus, die Keychain, der
+/// Credential Manager. Das `keyring`-Crate bringt alle drei mit; Mimir spricht
+/// sie nicht selbst an. Ohne einen laufenden Dienst – ein Server ohne Desktop,
+/// eine frisch aufgesetzte Maschine – wird das Merken **nicht** erzwungen:
+/// Der Zugang bleibt möglich, er wird nur nicht über den Neustart hinweg
+/// behalten.
+pub struct CredentialStore;
+
+/// Der Name, unter dem das Passwort im Schlüsselbund liegt.
+const DIENST: &str = "com.bilandal.mimir";
+/// Der Eintrag darin. Aus Konto **und** Server gebaut, damit zwei Konten auf
+/// derselben Maschine sich nicht ins Gehege kommen.
+fn eintrag(config: &MailConfig) -> String {
+    format!(
+        "mail:{}@{}",
+        config.username.trim(),
+        config.imap_server.trim()
+    )
+}
+
+impl CredentialStore {
+    /// Liegt für dieses Konto etwas im Schlüsselbund?
+    ///
+    /// Nur die Existenz, nie der Wert: Der Aufrufer zeigt „gemerkt" an, und
+    /// mehr soll er nicht wissen.
+    pub fn exists(&self, username: &str) -> bool {
+        if username.trim().is_empty() {
+            return false;
+        }
+
+        keyring::Entry::new(DIENST, &format!("mail:{username}"))
+            .and_then(|eintrag| eintrag.get_password().map(|_| ()))
+            .is_ok()
+    }
+
+    /// Legt das Passwort in den Schlüsselbund.
+    ///
+    /// Der Fehler wird als Meldung zurückgegeben und nicht verschluckt: Wer
+    /// auf „merken" geklickt hat und später überrascht ist, dass die Anmeldung
+    /// nach dem Neustart fehlt, hat ein schlechteres Programm vor sich.
+    pub fn merken(&self, config: &MailConfig, passwort: &str) -> Result<(), String> {
+        keyring::Entry::new(DIENST, &eintrag(config))
+            .map_err(|fehler| {
+                format!("Der Schlüsselbund ist nicht erreichbar: {fehler}\nDas Passwort wird dann nicht gemerkt; die Anmeldung gilt nur für diese Sitzung.")
+            })
+            .and_then(|schluessel| {
+                schluessel
+                    .set_password(passwort)
+                    .map_err(|fehler| {
+                        format!("Der Schlüsselbund hat das Passwort nicht angenommen: {fehler}\nDas Passwort wird dann nicht gemerkt; die Anmeldung gilt nur für diese Sitzung.")
+                    })
+            })
+    }
+
+    /// Liest das Passwort zurück, wenn eines hinterlegt ist.
+    pub fn lesen(&self, config: &MailConfig) -> Option<String> {
+        keyring::Entry::new(DIENST, &eintrag(config))
+            .and_then(|eintrag| eintrag.get_password())
+            .ok()
+    }
+
+    /// Vergisst das Passwort.
+    pub fn vergessen(&self, config: &MailConfig) {
+        if let Ok(eintrag) = keyring::Entry::new(DIENST, &eintrag(config)) {
+            let _ = eintrag.delete_credential();
+        }
+    }
+}
