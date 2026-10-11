@@ -246,15 +246,28 @@ pub async fn sende(
     let nachricht = baue_nachricht(vorhaben, None)?;
     let (host, port) = zerlege_server(server)?;
 
-    let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
-        .map_err(|fehler| format!("Der Mailserver für den Versand ist nicht erreichbar: {fehler}"))?
-        .port(port)
-        .credentials(Credentials::new(
-            benutzername.to_string(),
-            passwort.to_string(),
-        ))
-        .timeout(Some(SEND_TIMEOUT))
-        .build();
+    // **Zwei verschiedene Verbindungen, und der Unterschied ist nicht
+    // Kosmetik.** Port 465 nimmt die TLS-Verbindung schon beim Verbindungsaufbau
+    // an („implizit"); Port 587 nimmt sie erst danach an, per STARTTLS.
+    //
+    // Die erste Fassung benutzte für beides STARTTLS. Bei 465 – dem Port, den
+    // Mimir selbst als Vorgabe einträgt – wartet der Server auf TLS, das nie
+    // kommt, und der Versand bleibt hängen, bis die Zeit abläuft. Ein Gmail-
+    // Konto hätte also über genau die Adresse, die das Programm vorschlägt,
+    // nicht gesendet.
+    let transport = if port == 465 {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+    }
+    .map_err(|fehler| format!("Der Mailserver für den Versand ist nicht erreichbar: {fehler}"))?
+    .port(port)
+    .credentials(Credentials::new(
+        benutzername.to_string(),
+        passwort.to_string(),
+    ))
+    .timeout(Some(SEND_TIMEOUT))
+    .build();
 
     // **Der Versand wird begrenzt.** Ein Server, der die Annahme bestätigt und
     // danach hängt, würde den Zug sonst endlos halten; der Benutzer sähe eine

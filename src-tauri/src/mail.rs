@@ -121,48 +121,17 @@ impl MailConfig {
     }
 }
 
-/// Die Mail-Zugangsdaten, wie sie auf der Platte liegen.
+/// **Das Passwort liegt nicht in einer Datei von Mimir.**
 ///
-/// **Der Unterschied zum Kalender ist Absicht.** `calendar-secret.json` steht im
-/// Klartext und wird nur durch Dateirechte geschützt – für ein CalDAV-Passwort
-/// ist das vertretbar, weil es im eigenen Netz bleibt. Ein Mail-App-Passwort
-/// nicht: Es öffnet das Postfach von außen, und ein Postfach ist genau der Ort,
-/// an dem alles liegt, was man je einer anderen Person geschrieben hat.
+/// Es gibt hier bewusst *keine* Entsprechung zu `calendar-secret.json`, und
+/// das ist eine Entscheidung, keine Lücke: Beim Kalender liegt ein CalDAV-
+/// Passwort im eigenen Netz und wird durch die Dateirechte geschützt. Ein
+/// App-Passwort öffnet das Postfach von außen – dort wäre eine Datei neben der
+/// Konfiguration der Ort, an dem es verloren geht: beim Kopieren des
+/// Verzeichnisses, in einem Backup, in einem Support-Bundle.
 ///
-/// Deshalb ist dieses Feld **kein Klartext**, sondern eine Chiffre, die nur mit
-/// einem Schlüssel aus dem Schlüsselbund des Betriebssystems wieder zu öffnen
-/// ist. Wer die Datei kopiert, hat ein Chiffrat; wer sie löscht, muss das
-/// App-Passwort neu eingeben. Das ist ein bewusster Verlust an Bequemlichkeit –
-/// der Schutz ist der Grund.
-#[derive(Serialize, Deserialize)]
-pub struct StoredCredential {
-    pub username: String,
-    /// Base64 der Chiffre. Kein Fallback auf Klartext: Ein Klartextfeld hier
-    /// wäre eine Einladung, es doch einmal unverschlüsselt zu schreiben.
-    pub app_password: String,
-}
-
-impl Drop for StoredCredential {
-    fn drop(&mut self) {
-        // Beim Freigeben überschreiben, damit das Passwort nicht im
-        // Standardspeicher des Prozesses liegen bleibt.
-        self.app_password.zeroize();
-    }
-}
-
-/// Liest das gespeicherte App-Passwort, falls eines da ist und es zum
-/// eingetragenen Benutzer gehört.
-#[allow(dead_code)]
-pub fn read_stored_credential(path: &Path, username: &str) -> Option<StoredCredential> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let stored: StoredCredential = serde_json::from_str(&contents).ok()?;
-
-    if stored.username != username || stored.app_password.is_empty() {
-        return None;
-    }
-
-    Some(stored)
-}
+/// Stattdessen liegt es im Schlüsselbund des Systems, siehe
+/// [`CredentialStore`]. Auf der Platte steht von ihm nichts.
 
 /// Normalisiert eine Serveradresse und prüft sie.
 ///
@@ -559,8 +528,10 @@ pub struct CredentialStore;
 /// Der Name, unter dem das Passwort im Schlüsselbund liegt.
 const DIENST: &str = "com.bilandal.mimir";
 /// Der Eintrag darin. Aus Konto **und** Server gebaut, damit zwei Konten auf
-/// derselben Maschine sich nicht ins Gehege kommen.
-fn eintrag(config: &MailConfig) -> String {
+/// derselben Maschine sich nicht ins Gehege kommen: Ohne den Server im Namen
+/// würde das Passwort von Kai an Kai gehen, sobald ein zweiter Mailserver
+/// eingetragen ist – und niemand bekäme es zu sehen.
+fn schluesselbund_eintrag(config: &MailConfig) -> String {
     format!(
         "mail:{}@{}",
         config.username.trim(),
@@ -589,7 +560,7 @@ impl CredentialStore {
     /// auf „merken" geklickt hat und später überrascht ist, dass die Anmeldung
     /// nach dem Neustart fehlt, hat ein schlechteres Programm vor sich.
     pub fn merken(&self, config: &MailConfig, passwort: &str) -> Result<(), String> {
-        keyring::Entry::new(DIENST, &eintrag(config))
+        keyring::Entry::new(DIENST, &schluesselbund_eintrag(config))
             .map_err(|fehler| {
                 format!("Der Schlüsselbund ist nicht erreichbar: {fehler}\nDas Passwort wird dann nicht gemerkt; die Anmeldung gilt nur für diese Sitzung.")
             })
@@ -604,14 +575,14 @@ impl CredentialStore {
 
     /// Liest das Passwort zurück, wenn eines hinterlegt ist.
     pub fn lesen(&self, config: &MailConfig) -> Option<String> {
-        keyring::Entry::new(DIENST, &eintrag(config))
+        keyring::Entry::new(DIENST, &schluesselbund_eintrag(config))
             .and_then(|eintrag| eintrag.get_password())
             .ok()
     }
 
     /// Vergisst das Passwort.
     pub fn vergessen(&self, config: &MailConfig) {
-        if let Ok(eintrag) = keyring::Entry::new(DIENST, &eintrag(config)) {
+        if let Ok(eintrag) = keyring::Entry::new(DIENST, &schluesselbund_eintrag(config)) {
             let _ = eintrag.delete_credential();
         }
     }

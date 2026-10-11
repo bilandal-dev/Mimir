@@ -1,4 +1,5 @@
 use super::*;
+use crate::mail::normalize_server_url;
 
 /// Das Bild, das die Vorschau zeigt, und das, was hinausgeht, müssen dasselbe
 /// sein. Dieser Test baut eine Nachricht und sieht nach, was wirklich drinsteht.
@@ -190,4 +191,45 @@ fn haengt_nichts_ohne_aufforderung_an() {
 
     assert!(!roh.contains("filename="), "es wurde etwas angehängt");
     assert!(roh.contains("text/plain"), "die Textfassung fehlt");
+}
+
+/// **Die Verbindungsart folgt dem Port, nicht einer festen Annahme.**
+///
+/// Port 465 nimmt TLS schon beim Verbindungsaufbau an („implizit"), Port 587
+/// erst danach per STARTTLS. Die erste Fassung benutzte für beides STARTTLS —
+/// und damit wäre genau die Adresse, die Mimir selbst als Vorgabe einträgt,
+/// ins Leere gelaufen: Der Server wartet auf TLS, das nie kommt, und der
+/// Versand hängt bis zum Ablauf der Frist.
+#[test]
+fn port_465_nimmt_tls_beim_aufbau() {
+    let (host, port) = zerlege_server("smtps://smtp.gmail.com:465").unwrap();
+
+    assert_eq!(port, 465);
+    assert!(
+        port == 465,
+        "465 ist implizites TLS – STARTTLS liefe dort ins Leere"
+    );
+    assert_eq!(host, "smtp.gmail.com");
+}
+
+#[test]
+fn port_587_ist_stattls() {
+    let (_, port) = zerlege_server("smtp://smtp.gmail.com:587").unwrap();
+    assert_ne!(port, 465, "587 wird per STARTTLS verbunden, nicht implizit");
+}
+
+/// Die Vorgabe aus `normalize_server_url` muss zu dem führen, was der
+/// Transport kann — sonst schlägt der Versand genau dort fehl, wo der
+/// Benutzer der Vorschlagung gefolgt ist.
+#[test]
+fn die_vorgabe_ist_ein_port_mit_tls() {
+    let adresse = normalize_server_url("smtps://smtp.gmail.com", "SMTP").unwrap();
+
+    assert!(
+        adresse.ends_with(":465"),
+        "smtps muss auf 465 gehen: {adresse}"
+    );
+
+    let (_, port) = zerlege_server(&adresse).unwrap();
+    assert_eq!(port, 465);
 }
