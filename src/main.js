@@ -142,7 +142,13 @@ const DELETE_EVENT_TOOL = 'delete_calendar_event';
 const CALENDAR_TOOL_NAMES = [EVENT_TOOL, UPDATE_EVENT_TOOL, DELETE_EVENT_TOOL];
 // Werkzeuge, die etwas beim Benutzer anlegen. Sie brauchen dieselbe
 // Bestaetigung wie eine Datei und gehoeren deshalb in eine einzige Liste.
-const WRITE_TOOL_NAMES = ['write_file', 'edit_file', ...CALENDAR_TOOL_NAMES];
+// **`send_email` steht hier und nicht bei den Kalenderwerkzeugen.** Es ist das
+// einzige Werkzeug, das etwas aus diesem Rechner herausgibt. Steht es nicht in
+// dieser Liste, erschiene es als lesendes Werkzeug, und der Benutzer bekäme
+// ein einfaches Bestätigungsfenster mit den Argumenten statt der Vorschau von
+// Empfänger, Betreff und Text – und könnte nicht sehen, was er wegschickt.
+const MAIL_TOOL_NAMES = ['list_emails', 'read_email', 'draft_email', 'send_email'];
+const WRITE_TOOL_NAMES = ['write_file', 'edit_file', 'send_email', ...CALENDAR_TOOL_NAMES];
 
 // Die beiden Umfänge, in denen das Modell Werkzeuge bekommt. `agent` ist der
 // bisherige Stand mit dem festen Arbeitsverzeichnis, `termine` nur der Kalender.
@@ -150,7 +156,7 @@ const WRITE_TOOL_NAMES = ['write_file', 'edit_file', ...CALENDAR_TOOL_NAMES];
 // er eine Absicht beschreibt und nicht eine Sitzung.
 // Das Backend entscheidet, was daraus folgt; diese Liste hier dient nur der
 // Anzeige und der Prüfung von Schreibvorgängen.
-const SCOPE_NAMES = ['agent', 'termine'];
+const SCOPE_NAMES = ['agent', 'termine', 'mail'];
 const PROVIDER_NAMES = ['remote', 'local'];
 
 // Die beiden Schemata der Oberfläche, genau so heißen sie in der Konfiguration.
@@ -195,11 +201,17 @@ const agent = { enabled: false, scope: 'agent', root: '', maxSteps: 8, toolset: 
 // Läuft die Werkzeugschleife? Im Terminumfang ja, weil der Umfang die
 // Kalenderwerkzeuge mitbringt und es dort nichts anderes gibt.
 function werkzeugschleifeAktiv() {
-    return agent.scope === 'termine' || agent.enabled;
+    // **Der Umfang `mail` läuft mit.** Er ist wie `termine` ein Umfang ohne
+    // Dateizugriff, in dem die Werkzeugschleife ohne zusätzlichen Schalter
+    // läuft – sonst bekäme der Benutzer im Postfach-Umfang gar keine
+    // Werkzeuge.
+    return agent.scope === 'termine' || agent.scope === 'mail' || agent.enabled;
 }
 
 function umfangsname(scope) {
-    return scope === 'termine' ? 'Terminumfang' : 'Agentenmodus';
+    if (scope === 'termine') return 'Terminumfang';
+    if (scope === 'mail') return 'Postfach';
+    return 'Agentenmodus';
 }
 
 // Der Text für `/scope`. Er nennt immer beide Umfänge mit dem Weg zurück, weil
@@ -4275,8 +4287,11 @@ async function readAttachments(files) {
 function setAgentMode(enabled) {
     agent.enabled = enabled;
     const termine = agent.scope === 'termine';
-    agentToggleBtn.setAttribute('aria-pressed', termine || enabled ? 'true' : 'false');
-    agentToggleBtn.textContent = termine ? 'Termine: an' : (enabled ? 'Agent: an' : 'Agent: aus');
+    const postfach = agent.scope === 'mail';
+    agentToggleBtn.setAttribute('aria-pressed', termine || postfach || enabled ? 'true' : 'false');
+    agentToggleBtn.textContent = postfach
+        ? 'Postfach: an'
+        : (termine ? 'Termine: an' : (enabled ? 'Agent: an' : 'Agent: aus'));
     agentToggleBtn.title = termine
         ? 'Terminumfang: nur Kalenderwerkzeuge, kein Dateizugriff'
         : (enabled
@@ -4551,6 +4566,7 @@ async function requestWriteApproval(call, working) {
 
     const counts = renderDiff(writeDiff, preview.current, preview.next);
     const ist_termin = CALENDAR_TOOL_NAMES.includes(name);
+    const ist_mail = MAIL_TOOL_NAMES.includes(name);
     const ist_loeschung = name === DELETE_EVENT_TOOL;
     writeTarget.textContent = `${name}: ${preview.relative_path}`;
 
@@ -4566,6 +4582,15 @@ async function requestWriteApproval(call, working) {
         writeSummary.textContent = preview.current === null
             ? `${preview.summary} – neuer Termin, ${counts.added} Zeilen`
             : `${preview.summary} – ${counts.added} Zeilen geändert, ${counts.removed} entfernt`;
+    } else if (ist_mail) {
+        // **Eine Mail hat kein Arbeitsverzeichnis, und sie ist keine Datei.**
+        // Beides zu behaupten wäre falsch und wäre es auf zweierlei Weise: Der
+        // Pfad täte so, als ginge es um Ordner; „neue Datei" täte so, als
+        // bliebe die Nachricht liegen.
+        writeScope.textContent =
+            'Wird übertragen und lässt sich nicht zurücknehmen – auch nicht durch Löschen '
+            + 'in Mimir. Prüfe Empfänger, Betreff und Text, bevor du bestätigst.';
+        writeSummary.textContent = `${preview.summary} – ${counts.added} Zeilen`;
     } else {
         writeScope.textContent = `Arbeitsverzeichnis: ${agent.root}`;
         writeSummary.textContent = preview.current === null

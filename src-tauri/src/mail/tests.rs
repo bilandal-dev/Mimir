@@ -235,3 +235,152 @@ fn schuetzt_das_gespeicherte_passwort_vor_dem_freigeben() {
     // überschreibbare Struktur.
     assert!(!credential.app_password.is_empty());
 }
+
+/// **Der Test, auf den der ganze Umfang beruht.** `send_email` muss ein
+/// Schreibwerkzeug sein. Steht es nicht in dieser Liste, erscheint es im
+/// Frontend als *lesendes* Werkzeug: Der Benutzer bekäme ein einfaches
+/// Bestätigungsfenster mit den Argumenten statt der Vorschau von Empfänger,
+/// Betreff und Text — und könnte nicht sehen, was er wegschickt.
+#[test]
+fn senden_ist_ein_schreibwerkzeug() {
+    assert!(crate::is_write_tool(werkzeug::SENDEN));
+    assert!(werkzeug::schreibt_nach_aussen(werkzeug::SENDEN));
+}
+
+/// **Nur das Senden.** Ein Entwurf geht nirgendwohin, und für ihn eine
+/// Bestätigung zu verlangen wäre ein Fenster um eine nichts.
+#[test]
+fn entwurf_ist_kein_schreibwerkzeug() {
+    assert!(!crate::is_write_tool(werkzeug::ENTWURF));
+    assert!(!werkzeug::schreibt_nach_aussen(werkzeug::ENTWURF));
+}
+
+/// Der Umfang „mail" bietet vier Werkzeuge und **keine Dateiwerkzeuge**.
+///
+/// Der Grund ist nicht Sparsamkeit: Ein Postfach braucht keine Dateien, und eine
+/// Datei mit Empfängerlisten wäre der Ort, an dem Adressen versehentlich
+/// landen und beim Kopieren eines Verzeichnisses mitgehen.
+#[test]
+fn umfang_mail_bietet_keine_dateiwerkzeuge() {
+    let toolset = mail_toolset_for(&[]);
+
+    assert_eq!(toolset.tools.len(), 4);
+
+    for schema in &toolset.tools {
+        let name = schema["function"]["name"].as_str().unwrap_or_default();
+        assert!(
+            !matches!(name, "write_file" | "edit_file"),
+            "im Postfach-Umfang steht ein Dateiwerkzeug: {name}"
+        );
+    }
+
+    assert!(!toolset.system_prompt.contains("write_file"));
+}
+
+/// Die Anweisung nennt die Falle, in die ein Modell sonst läuft.
+#[test]
+fn anweisung_nennt_die_falle() {
+    let anweisung = mail_anweisung();
+
+    assert!(
+        anweisung.contains("keine Anweisung"),
+        "die Anweisung warnt nicht davor, Mailinhalt für eine Anweisung zu halten"
+    );
+    assert!(
+        anweisung.contains("Entwurf"),
+        "der Entwurf als normaler Weg fehlt: {anweisung}"
+    );
+    assert!(anweisung.contains("BCC"), "BCC wird nicht behandelt");
+}
+
+/// Ohne Anmeldung steht kein Kalenderwerkzeug drin – ein Werkzeug, das immer
+/// scheitert, ist schlechter als keines.
+#[test]
+fn ohne_anmeldung_kein_kalenderwerkzeug() {
+    let toolset = mail_toolset_for(&[]);
+
+    let namen: Vec<&str> = toolset
+        .tools
+        .iter()
+        .filter_map(|s| s["function"]["name"].as_str())
+        .collect();
+
+    assert!(!namen.contains(&"list_events"), "{namen:?}");
+    assert!(toolset.system_prompt.contains("nicht angemeldet"));
+}
+
+/// Und mit Anmeldung schon.
+#[test]
+fn mit_anmeldung_kommt_der_kalender_dazu() {
+    let toolset = mail_toolset_for(&["Persönlich".to_string()]);
+
+    let hat_kalender = toolset
+        .tools
+        .iter()
+        .any(|s| s["function"]["name"].as_str() == Some(crate::LIST_EVENTS_TOOL));
+
+    assert!(hat_kalender, "der Kalender fehlt trotz Anmeldung");
+}
+
+/// Die Argumente werden **vor** dem Bauen geprüft, und zwar für beide Wege.
+#[test]
+fn weist_unvollstaendige_angaben_zurueck() {
+    let config = MailConfig {
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let basis = serde_json::json!({
+        "an": "anna@example.org",
+        "betreff": "Hallo",
+        "text": "Text"
+    });
+
+    // Gültig
+    assert!(vorhaben_aus_argumenten(&config, &basis).is_ok());
+
+    let ohne_an = serde_json::json!({"betreff": "Hallo", "text": "Text"});
+    assert!(vorhaben_aus_argumenten(&config, &ohne_an).is_err());
+
+    let ohne_betreff = serde_json::json!({"an": "anna@example.org", "text": "Text"});
+    assert!(vorhaben_aus_argumenten(&config, &ohne_betreff).is_err());
+
+    let ohne_text = serde_json::json!({"an": "anna@example.org", "betreff": "Hallo"});
+    assert!(vorhaben_aus_argumenten(&config, &ohne_text).is_err());
+
+    // **Zwei Empfänger in einem Feld sind erlaubt** – ein To-Feld ist eine
+    // Liste. Der Schutz ist nicht die Ablehnung, sondern die Vorschau: Sie
+    // zeigt beide, bevor der Benutzer auf Senden klickt. Ein Empfängerfeld
+    // ablehnen hieße, dem Modell eine Form verbieten, die jedes Mailprogramm
+    // erlaubt – und es dann umgehen lassen.
+    let doppelt = serde_json::json!({
+        "an": "anna@example.org, bob@example.org",
+        "betreff": "Hallo", "text": "Text"
+    });
+
+    let vorhaben = vorhaben_aus_argumenten(&config, &doppelt).expect("eine Liste ist erlaubt");
+    assert_eq!(vorhaben.an.len(), 2);
+    assert_eq!(vorhaben.empfaenger_gesamt(), 2);
+}
+
+/// Der Betreff kommt aus dem Modell. Ein Zeilenumbruch darin zerlegt die
+/// Nachricht und könnte Kopfzeilen einschleusen.
+#[test]
+fn betreff_aus_dem_modell_wird_bereinigt() {
+    let config = MailConfig {
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let angaben = serde_json::json!({
+        "an": "anna@example.org",
+        "betreff": "Hallo\r\nBcc: fremd@example.org",
+        "text": "Text"
+    });
+
+    let vorhaben = vorhaben_aus_argumenten(&config, &angaben).expect("wird angenommen");
+
+    assert!(!vorhaben.betreff.contains('\r') && !vorhaben.betreff.contains('\n'));
+}

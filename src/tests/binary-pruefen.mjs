@@ -79,6 +79,27 @@ const FREMDE_ADRESSEN = [
   },
 ];
 
+/**
+ * Endpunkte, die **erwartet** sind, weil sie in der Liste der Anbieter stehen,
+ * die Mimir dem Benutzer beim Einrichten des Postfachs vorschlägt.
+ *
+ * Gmail ist ein Fremdserver – das ist der ganze Punkt der Mailfunktion. Diese
+ * Adressen stehen deshalb als Ausnahme in der Liste, nicht damit sie nicht
+ * auffallen, sondern damit sie *auffallen*, sobald sie sich ändern. Ein Tippfehler
+ * in `imap.gmial.com` wäre sonst genauso still wie ein Absender, den niemand
+ * kennt.
+ */
+const ERWARTETE_ENDPUNKTE = new Set([
+  'imap.gmail.com',
+  'smtp.gmail.com',
+  'mail.gmx.de',
+  'smtp.gmx.de',
+  'imap.icloud.com',
+  'smtp.icloud.com',
+  'imap.outlook.office365.com',
+  'smtp.office365.com',
+]);
+
 const inhalt = readFileSync(binär);
 const text = inhalt.toString('latin1');
 
@@ -224,6 +245,30 @@ console.log('Bundle-Konfiguration in Ordnung.');
 console.log();
 
 const funde = [];
+
+/**
+ * Alle im Binary gefundenen Endpunkte, die nach Gmail aussehen.
+ *
+ * Geprüft wird nur, ob **keine** Adresse enthalten ist, die nach Gmail *klingt*,
+ * aber nicht stimmt. Ein fehlender Endpunkt fällt hier nicht auf – Gmail wird
+ * erst eingebaut, wenn der Benutzer eine Adresse einträgt, und das gehört in
+ * die Konfiguration, nicht in das Programm.
+ */
+const gmail_verdacht = [];
+for (const { muster } of FREMDE_ADRESSEN) {
+  for (const wert of new Set(text.match(muster) ?? [])) {
+    const kurz = wert.split(':')[0];
+    if (!ERWARTETE_ENDPUNKTE.has(wert) && !ERWARTETE_ENDPUNKTE.has(kurz)) continue;
+    gmail_verdacht.push(wert);
+  }
+}
+if (gmail_verdacht.length > 0) {
+  console.log('Mail-Endpunkte im Binary:');
+  for (const wert of new Set(gmail_verdacht)) {
+    console.log(`  ${wert}`);
+  }
+  console.log();
+}
 
 for (const { muster, begruendung, ausgenommen } of FREMDE_ADRESSEN) {
   const treffer = text.match(muster);

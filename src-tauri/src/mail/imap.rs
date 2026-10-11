@@ -516,7 +516,7 @@ pub async fn hole_nachrichten(
     }
 
     // Neueste zuerst – so, wie ein Postfach sie zeigt.
-    kopfzeilen.sort_by(|a, b| b.nummer.cmp(&a.nummer));
+    kopfzeilen.sort_by_key(|nachricht| std::cmp::Reverse(nachricht.nummer));
     kopfzeilen.truncate(grenze);
 
     Ok(kopfzeilen)
@@ -571,7 +571,6 @@ struct Aufgeteilt {
     an: String,
     cc: String,
     text: String,
-    anhaenge: Vec<String>,
     message_id: String,
 }
 
@@ -591,7 +590,7 @@ fn zerlege_mime(roh: &[u8]) -> (Aufgeteilt, Vec<String>) {
     let mut text = None;
     let mut tiefen = 0;
 
-    for teil in multipart(&rumpf, &koerper) {
+    for teil in multipart(rumpf, &koerper) {
         let (teil_kopf, teil_rumpf) = trenne_kopf(teil);
         let teil_typ = value(&teil_kopf, "content-type").unwrap_or_default();
         // **Nur der Feldname wird kleingeschrieben, nicht sein Wert.** Ein
@@ -681,7 +680,6 @@ fn zerlege_mime(roh: &[u8]) -> (Aufgeteilt, Vec<String>) {
             an: aufloese_namen(&an),
             cc: aufloese_namen(&cc),
             text: text.unwrap_or_default(),
-            anhaenge: Vec::new(),
             message_id,
         },
         anhaenge,

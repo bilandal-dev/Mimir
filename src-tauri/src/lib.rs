@@ -614,6 +614,14 @@ enum Scope {
     /// Nur die Kalenderwerkzeuge. Ohne Arbeitsverzeichnis und damit ohne jeden
     /// Dateizugriff.
     Termine,
+    /// **Postfach und Kalender.** Lesen ist hier so selbstverständlich wie
+    /// dort; das Senden ist es nicht, und genau deshalb steht es in einem
+    /// eigenen Umfang: Wer den Kalender im Terminumfang hat, hat damit noch
+    /// lange kein Postfach.
+    ///
+    /// Ohne Dateizugriff – ein Postfach braucht keine Dateien, und eine Datei
+    /// mit Empfängerlisten wäre der Ort, an dem Adressen versehentlich landen.
+    Mail,
 }
 
 impl Scope {
@@ -622,6 +630,7 @@ impl Scope {
         match self {
             Scope::Agent => "Agentenmodus",
             Scope::Termine => "Terminumfang",
+            Scope::Mail => "Postfach",
         }
     }
 }
@@ -2292,6 +2301,7 @@ fn is_write_tool(name: &str) -> bool {
             | crate::calendar::write::EVENT_TOOL
             | crate::calendar::edit::UPDATE_TOOL
             | crate::calendar::edit::DELETE_TOOL
+            | crate::mail::werkzeug::SENDEN
     )
 }
 
@@ -5319,6 +5329,7 @@ fn toolset_for(
 ) -> Result<AgentToolset, String> {
     match scope {
         Scope::Termine => termine_toolset_for(kalender),
+        Scope::Mail => Ok(crate::mail::mail_toolset_for(kalender)),
         Scope::Agent => {
             if agent.root.is_empty() {
                 return Err(
@@ -5407,6 +5418,54 @@ struct ToolPreview {
     lines_after: usize,
     /// Ob die Vorschau gekürzt wurde.
     truncated: bool,
+}
+
+/// Die Vorschau einer Mail.
+///
+/// **Empfänger, Betreff und Text im Klartext.** Für eine Datei genügt ein
+/// Unterschied, weil die Datei im eigenen Verzeichnis bleibt und wieder
+///hergestellt werden kann. Eine Mail geht raus und kommt nicht zurück; deshalb
+/// steht hier alles, was der Empfänger sehen wird, und zwar so, wie er es
+/// sehen wird.
+///
+/// **Die BCC-Liste steht mit dabei**, obwohl sie in der Nachricht selbst nicht
+/// steht. Eine unsichtbare Empfängeradresse ist das Einzige, was hier
+/// tatsächlich Schaden anrichten kann, ohne dass es jemand bemerkt – sie muss
+/// deshalb sichtbar sein, *bevor* der Benutzer auf Senden klickt.
+fn preview_mail(vorhaben: &crate::mail::smtp::Sendevorhaben) -> ToolPreview {
+    let (next, truncated) = bounded_preview(&vorhaben.text);
+
+    ToolPreview {
+        relative_path: format!("an {}", vorhaben.kuerze_empfaenger()),
+        current: None,
+        next: format!(
+            "Von: {}\nBetreff: {}\nAn: {}\n\n{}{}",
+            vorhaben.absender,
+            vorhaben.betreff,
+            vorhaben.an.join(", "),
+            if vorhaben.cc.is_empty() {
+                String::new()
+            } else {
+                format!("CC: {}\n", vorhaben.cc.join(", "))
+            },
+            if vorhaben.bcc.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "BCC: {}  (steht nicht in der Nachricht; der Empfänger sieht sie nicht)\n",
+                    vorhaben.bcc.join(", ")
+                )
+            }
+        ) + &next,
+        summary: format!(
+            "E-Mail an {} – {}",
+            vorhaben.empfaenger_gesamt(),
+            vorhaben.kuerze_empfaenger()
+        ),
+        lines_before: 0,
+        lines_after: vorhaben.text.lines().count(),
+        truncated,
+    }
 }
 
 fn preview_write(
@@ -6302,6 +6361,27 @@ async fn preview_tool_call(
         return Ok(preview_event(&plan));
     }
 
+    // ---- Mail ----
+    //
+    // **Nur für den Versand.** Der Entwurf erscheint als Text im Chat und geht
+    // nirgendwohin; eine Vorschau dafür wäre ein zweiter Ort, an dem dasselbe
+    // steht. Das Lesen braucht ebenfalls keine – es verändert nichts.
+    if name == crate::mail::werkzeug::SENDEN {
+        let config = settings.get_config().await.mail;
+
+        let vorhaben = crate::mail::vorhaben_aus_argumenten(&config, &arguments)?;
+
+        if config.smtp_server.trim().is_empty() {
+            return Err(
+                "Für das Senden wird ein SMTP-Server gebraucht. Trage ihn in der Mailleiste \
+                 unter „Konto“ ein."
+                    .to_string(),
+            );
+        }
+
+        return Ok(preview_mail(&vorhaben));
+    }
+
     if name == crate::calendar::edit::UPDATE_TOOL || name == crate::calendar::edit::DELETE_TOOL {
         pruefe_kalender_schreiben(&state, scope)?;
 
@@ -6337,6 +6417,7 @@ async fn execute_tool(
     settings: State<'_, OllamaSettings>,
     state: State<'_, AgentState>,
     session: State<'_, crate::calendar::CalendarSession>,
+    mail_session: State<'_, crate::mail::MailSession>,
 ) -> Result<ToolOutput, String> {
     if name.len() > MAX_TOOL_NAME_BYTES {
         return Err("Der Werkzeugname ist ungültig".to_string());
@@ -6362,6 +6443,18 @@ async fn execute_tool(
     if name == LIST_EVENTS_TOOL {
         let config = settings.get_config().await.calendar;
         return list_calendar_events(&config, &session, &arguments).await;
+    }
+
+    // ---- Mail ----
+    //
+    // Der Versand ist der einzige Weg, auf dem etwas aus diesem Rechner
+    // herausgeht. Er steht deshalb **vor** den Dateiwerkzeugen und wird nur
+    // erreicht, wenn die Vorschau bestätigt wurde – der Aufrufer hier ist
+    // ausschließlich der Agentenzug, und der fragt vorher.
+    if crate::mail::werkzeug::ALLE.contains(&name.as_str()) {
+        let config = settings.get_config().await;
+
+        return crate::mail::execute_tool(&name, &arguments, &config.mail, &mail_session).await;
     }
 
     let agent = settings.get_config().await.agent;

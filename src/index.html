@@ -326,9 +326,25 @@
             <p>Mimir spricht IMAP und SMTP. Bei Gmail unter Einstellungen, Konten, <em>Sicherheit</em> ein <strong>App-Passwort</strong> erzeugen – das Hauptpasswort gehört nicht hierher.</p>
 
             <label for="mail-imap-input">IMAP-Server</label>
-            <input type="text" id="mail-imap-input" placeholder="imaps://imap.example.org" autocomplete="off">
+            <input type="text" id="mail-imap-input" placeholder="imaps://imap.gmail.com" autocomplete="off" list="mail-server-vorgaben">
             <label for="mail-smtp-input">SMTP-Server</label>
-            <input type="text" id="mail-smtp-input" placeholder="smtps://smtp.example.org" autocomplete="off">
+            <input type="text" id="mail-smtp-input" placeholder="smtps://smtp.gmail.com" autocomplete="off" list="mail-server-vorgaben">
+            <!-- **Vorgaben als Vorschläge, nicht als eingetragener Wert.**
+                 Gmail ist eine öffentliche Adresse; sie zu nennen ist kein
+                 Geheimnis. Anders wäre es bei einer Adresse, die auf den
+                 Rechner des Entwicklers zeigt – die gehört in keine Liste in
+                 diesem Programm. Deshalb steht hier „imaps://imap.gmail.com"
+                 als Beispiel im Feld und nicht „nextcloud.local" als Vorgabe. -->
+            <datalist id="mail-server-vorgaben">
+                <option value="imaps://imap.gmail.com"></option>
+                <option value="smtps://smtp.gmail.com"></option>
+                <option value="imaps://mail.gmx.de"></option>
+                <option value="smtps://mail.gmx.de"></option>
+                <option value="imaps://imap.icloud.com"></option>
+                <option value="smtps://smtp.icloud.com"></option>
+                <option value="imaps://imap.outlook.office365.com"></option>
+                <option value="smtps://smtp.office365.com"></option>
+            </datalist>
             <label for="mail-user-input">Benutzername</label>
             <input type="text" id="mail-user-input" autocomplete="username">
             <label for="mail-address-input">Absenderadresse</label>
