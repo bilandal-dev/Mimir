@@ -1345,8 +1345,17 @@ const mailFoot = document.getElementById('mail-foot');
 const mailToggleBtn = document.getElementById('mail-toggle-btn');
 const mailRefresh = document.getElementById('mail-refresh');
 const mailSettingsBtn = document.getElementById('mail-settings-btn');
+const mailChooseBtn = document.getElementById('mail-choose-btn');
+const mailPicker = document.getElementById('mail-picker');
+const mailPickerList = document.getElementById('mail-picker-list');
+const mailPickerClose = document.getElementById('mail-picker-close');
 const mailDialog = document.getElementById('mail-dialog');
 const mailForm = document.getElementById('mail-form');
+const mailAccountList = document.getElementById('mail-account-list');
+const mailAccountNew = document.getElementById('mail-account-new');
+const mailAccountRemove = document.getElementById('mail-account-remove');
+const mailAccountWarnung = document.getElementById('mail-account-warnung');
+const mailNameInput = document.getElementById('mail-name-input');
 const mailImapInput = document.getElementById('mail-imap-input');
 const mailSmtpInput = document.getElementById('mail-smtp-input');
 const mailUserInput = document.getElementById('mail-user-input');
@@ -1362,16 +1371,50 @@ const mailMessageDate = document.getElementById('mail-message-date');
 const mailMessageText = document.getElementById('mail-message-text');
 const mailMessageAttachments = document.getElementById('mail-message-attachments');
 const mailMessageClose = document.getElementById('mail-message-close');
+const mailMessageRead = document.getElementById('mail-message-read');
 const mailMessageSummarize = document.getElementById('mail-message-summarize');
 
-/** Was die Leiste gerade zeigt. Nur zum Zeichnen, nie zum Senden. */
-const mailZustand = { nachrichten: [], offen: null, ordner: 'INBOX' };
+/**
+ * Was die Leiste gerade zeigt. Nur zum Zeichnen, nie zum Senden.
+ *
+ * **`konto` ist die Kennung des gezeigten Postfachs, nicht sein Name.** Die
+ * Nachrichtenträger von IMAP werden je Ordner neu nummeriert: Zwei Postfächer
+ * können beide eine „Nummer 3" haben, und es sind zwei verschiedene Nachrichten.
+ * Deshalb merkt sich die Leiste, aus welchem Postfach die Liste stammt, und
+ * übergibt die Kennung beim Öffnen mit – sonst läge die Nachricht Nr. 3 aus dem
+ * einen Postfach unter der Liste des anderen.
+ */
+const mailZustand = {
+    nachrichten: [],
+    offen: null,
+    /** Die Zeile der Liste, aus der das Fenster geöffnet wurde. Sie kennt den
+     *  Gelesen-Zustand – anders als der Nachrichtentext, der beim Öffnen schon
+     *  als gelesen beim Server gelandet sein kann. */
+    offenKopf: null,
+    ordner: 'INBOX',
+    konto: null,
+    statuse: [],
+    /** Welches Konto der Dialog bearbeitet. `null` heißt: ein neues. */
+    bearbeitet: null,
+    /** Der Remove-Knopf wartet auf den zweiten Klick. */
+    entfernenArmiert: false,
+    /** Läuft gerade ein Nachrichtenabruf? Verhindert das zweite Fenster beim
+     *  Doppelklick und den zweiten Abruf beim Klick auf dieselbe Mail. */
+    oeffnet: false,
+    /** Die Konten, wie sie beim Öffnen des Dialogs gelesen wurden. */
+    dialogKonten: [],
+    /** Die Zustände dazu – für das „nicht angemeldet" neben einer Zeile. */
+    dialogStatuse: [],
+};
 
 /** Der Timer der Leiste. `null` heißt: keiner läuft. */
 let mailTimer = null;
 
 /** Wie lange die Leiste höchstens zwischen zwei Abrufen wartet. */
 const MAIL_ABRUF_MINUTEN = 5;
+
+/** Wie viele Konten Mimir höchstens zulässt. Steht auch im Backend. */
+const MAX_MAIL_ACCOUNTS = 8;
 
 function toggleMailPanel() {
     const eingeklappt = mailPanel.classList.toggle('collapsed');
@@ -1392,30 +1435,239 @@ function toggleMailPanel() {
     }
 }
 
-/** Holt Zustand und Nachrichten und zeichnet beides. */
-async function aktualisiereMail() {
-    const status = await invoke('mail_status');
+/** Der Zustand des gerade gezeigten Kontos, falls es eines gibt. */
+function mailAktiverStatus() {
+    if (mailZustand.konto === null) return null;
+    return mailZustand.statuse.find((s) => s.id === mailZustand.konto) || null;
+}
 
-    if (!status.configured) {
+/**
+ * Holt Zustand und Nachrichten und zeichnet beides.
+ *
+ * **Der Fehler landet in der Leiste, nicht in der Konsole.** Ein Aufruf, der
+ * scheitert, wurde bisher stillschweigend vom Aufrufer abgefangen – und die
+ * Leiste behielt den Text, den sie beim Start aus dem HTML hatte. Das sieht aus,
+ * als wüste Mimir nichts: Die Zeile „Kein Mailkonto eingetragen" stand da, weil
+ * sie da stand, nicht weil es so war. Wer den Fehler nicht sieht, kann ihn
+ * nicht beheben.
+ */
+async function aktualisiereMail() {
+    try {
+        await ladeUndZeichneMail();
+    } catch (error) {
+        console.error('Mail:', error);
+        zeichneMailLeer(String(error));
+    }
+}
+
+/**
+ * Holt Zustand und Nachrichten und zeichnet beides.
+ *
+ * **Die Konfiguration sagt, welche Konten es gibt – `mail_statuses` nur, wie
+ * sie dastehen.** Vorher stand beides im Wettbewurf: Die Leiste prüfte ihre
+ * Länge und meldete „Kein Mailkonto eingetragen", während der Dialog daneben,
+ * aus derselben Datei gelesen, das Konto zeigte. Zwei Befehle auf denselben
+ * Bestand dürfen sich nicht widersprechen können, also entscheidet die
+ * Konfiguration über das Dasein und der Status nur über den Zustand.
+ */
+/** Wie lange ein Mailbefehl antworten muss, bevor die Leiste es sagt. */
+const MAIL_ANTWORT_SEKUNDEN = 10;
+
+/**
+ * Ruft einen Befehl mit Frist auf.
+ *
+ * **Ein Aufruf ohne Antwort ist ein Fehler, kein Warten.** `invoke` verspricht
+ * eine Antwort – wenn keine kommt, bleibt die Leiste auf „Postfach wird
+ * geladen …" stehen, ohne Fehler, ohne Konsole, und „Neu laden" tut dasselbe
+ * wie zuvor. Genau daran ist ein Suchen nach der Ursache gescheitert: Der
+ * Zustand sieht aus wie „wird geladen" und verhält sich wie „hängt".
+ *
+ * Der Fehlertext nennt den Befehl, weil das die Frage beantwortet, an der man
+ * sonst weiter sucht – und weil eine Frist ohne Namen nur die Last verschiebt.
+ */
+async function invokeMail(beehl, args = null, fristSekunden = MAIL_ANTWORT_SEKUNDEN) {
+    const aufruf = args === null ? invoke(beehl) : invoke(beehl, args);
+
+    let frist;
+    try {
+        return await Promise.race([
+            aufruf,
+            new Promise((_, ablehnen) => {
+                frist = setTimeout(() => {
+                    ablehnen(new Error(`${beehl} hat nach ${fristSekunden} Sekunden nicht geantwortet.`));
+                }, fristSekunden * 1000);
+            }),
+        ]);
+    } finally {
+        // **Die Frist wird auch im Erfolgsfall abgeräumt.** Sonst stünde nach
+        // jedem Laden ein Timer, der die Leiste Sekunden später doch noch
+        // einmal abbricht – bei einem schnellen Aufruf umso auffälliger.
+        clearTimeout(frist);
+    }
+}
+
+/** Zeigt, welcher Schritt gerade läuft, damit ein Hänger sich eingrenzen lässt. */
+function meldeMailSchritt(text) {
+    mailList.replaceChildren();
+    mailState.textContent = text;
+    mailState.hidden = false;
+    mailFoot.textContent = '';
+}
+
+/**
+ * Holt Zustand und Nachrichten und zeichnet beides.
+ *
+ * **Jeder Befehl meldet sich vorher an.** Die Leiste steht während des Ladevorgangs
+ * nicht stumm: Sie sagt, was gerade geholt wird. Das kostet drei kurze Zeilen
+ * und macht aus einem unbestimmten „geht nicht" die Frage „bei welchem Schritt".
+ */
+async function ladeUndZeichneMail() {
+    meldeMailSchritt('Konten werden gelesen …');
+    const konfiguration = await invokeMail('get_mail_config');
+
+    meldeMailSchritt('Zustand der Konten wird gelesen …');
+    const statuse = await invokeMail('mail_statuses');
+
+    const konten = mailKontenliste(konfiguration.konten, statuse);
+
+    mailZustand.statuse = konten;
+
+    // **Erst das Konto merken, dann zeichnen.** Die Auswahl vergleicht beim
+    // Zeichnen mit `mailZustand.konto`; stünde das noch auf dem vorherigen,
+    // würde die Markierung nach jedem Umschalten zurück-springen.
+    const aktiv = konfiguration.aktiv || (konten[0] ? konten[0].id : null);
+    mailZustand.konto = aktiv;
+
+    zeichneMailAuswahl();
+
+    const status = mailAktiverStatus();
+
+    if (konten.length === 0) {
         zeichneMailLeer('Kein Mailkonto eingetragen.');
         return;
     }
 
-    if (!status.logged_in) {
+    if (!status) {
+        zeichneMailLeer('Dieses Postfach ist nicht mehr eingetragen.');
+        return;
+    }
+
+    if (!status.eingerichtet) {
         zeichneMailLeer(
-            status.stored
-                ? 'Nicht angemeldet. Das Passwort liegt im Schlüsselbund – mit „Konto" anmelden.'
-                : 'Nicht angemeldet. Mit „Konto" das App-Passwort eintragen.',
+            `„${status.name}“ ist noch nicht vollständig eingetragen. Mit „Konto“ Server und Benutzername nachtragen.`,
         );
         return;
     }
 
+    if (!status.angemeldet) {
+        zeichneMailLeer(
+            status.gemerkt
+                ? `Für „${status.name}“ ist nicht angemeldet. Das Passwort liegt im Schlüsselbund – mit „Konto“ anmelden.`
+                : `Für „${status.name}“ ist nicht angemeldet. Mit „Konto“ das App-Passwort eintragen.`,
+        );
+        return;
+    }
+
+    meldeMailSchritt(`„${status.name}“ wird abgeholt …`);
+
     try {
-        mailZustand.nachrichten = await invoke('mail_messages');
+        // **Die Kennung wandert mit.** `mail_messages` nimmt sie entgegen und
+        // liest genau dieses Postfach – auch dann, wenn zwischen dem Zeichnen der
+        // Auswahl und diesem Aufruf jemand umgeschaltet hat.
+        mailZustand.nachrichten = await invokeMail('mail_messages', { id: status.id }, 60);
+        mailZustand.ordner = status.ordner;
         zeichneMailListe();
     } catch (error) {
         zeichneMailLeer(String(error));
     }
+}
+
+/**
+ * Die Kontenauswahl unter dem Kopf der Leiste.
+ *
+ * **Nur wenn es etwas zu wählen gibt.** Bei einem Konto ist der Knopf da und
+ * öffnet eine Liste mit einem Eintrag; das wäre Rauschen. Der Knopf wird dann
+ * ausgeblendet, damit man nicht auf etwas klickt, das nichts bewirkt.
+ */
+function zeichneMailAuswahl() {
+    const mehrere = mailZustand.statuse.length > 1;
+
+    mailChooseBtn.hidden = mailZustand.statuse.length === 0;
+
+    if (!mehrere) {
+        mailPicker.hidden = true;
+        mailPickerList.replaceChildren();
+        return;
+    }
+
+    mailPickerList.replaceChildren();
+
+    for (const status of mailZustand.statuse) {
+        const zeile = document.createElement('label');
+        zeile.className = 'mail-picker-entry';
+
+        const knopf = document.createElement('input');
+        knopf.type = 'radio';
+        knopf.name = 'mail-konto';
+        knopf.value = status.id;
+        knopf.checked = status.id === mailZustand.konto;
+
+        const name = document.createElement('span');
+        name.className = 'mail-picker-name';
+        name.textContent = status.name;
+
+        const zustand = document.createElement('span');
+        zustand.className = 'mail-picker-status';
+        zustand.textContent = mailStatusKurz(status);
+        if (!status.angemeldet) zustand.classList.add('offen');
+
+        zeile.append(knopf, name, zustand);
+        zeile.title = mailStatusLang(status);
+
+        knopf.addEventListener('change', () => {
+            wechsleMailKonto(status.id).catch((error) =>
+                console.error('Postfach wechseln:', error),
+            );
+        });
+
+        mailPickerList.append(zeile);
+    }
+}
+
+/** Die kurze Zustandszeile neben einem Konto: „angemeldet", „nicht angemeldet". */
+function mailStatusKurz(status) {
+    if (!status.eingerichtet) return 'unvollständig';
+    return status.angemeldet ? 'angemeldet' : 'nicht angemeldet';
+}
+
+/** Dasselbe für den Tooltip, mit dem Grund dabei. */
+function mailStatusLang(status) {
+    if (!status.eingerichtet) return 'IMAP-Server oder Benutzername fehlt';
+
+    if (status.angemeldet) {
+        const ordner = status.ordner || 'INBOX';
+        return `Angemeldet · ${ordner}`;
+    }
+
+    return status.gemerkt
+        ? 'Nicht angemeldet. Das Passwort liegt im Schlüsselbund.'
+        : 'Nicht angemeldet. Noch kein Passwort hinterlegt.';
+}
+
+/** Wechselt das Postfach der Leiste und lädt es. */
+async function wechsleMailKonto(id) {
+    if (id === mailZustand.konto) return;
+
+    await invoke('select_mail_account', { id });
+
+    // **Die Nachrichtenliste wird geleert.** Sonst stünde für einen Moment die
+    // Liste des vorherigen Postfachs unter der Auswahl des neuen – und eine
+    // Nachricht, die man dann anklickt, gehört zu einem anderen Konto.
+    mailZustand.nachrichten = [];
+    mailZustand.offen = null;
+    mailZustand.offenKopf = null;
+
+    await aktualisiereMail();
 }
 
 function zeichneMailLeer(text) {
@@ -1429,8 +1681,13 @@ function zeichneMailListe() {
     mailList.replaceChildren();
     mailState.hidden = true;
 
+    const status = mailAktiverStatus();
+    const kontoName = status ? status.name : '';
+
     if (mailZustand.nachrichten.length === 0) {
-        mailState.textContent = 'Keine Nachrichten.';
+        mailState.textContent = kontoName
+            ? `Keine Nachrichten in „${kontoName}“.`
+            : 'Keine Nachrichten.';
         mailState.hidden = false;
         mailFoot.textContent = '';
         return;
@@ -1441,35 +1698,95 @@ function zeichneMailListe() {
         eintrag.className = `mail-item${nachricht.gelesen ? '' : ' unread'}`;
         eintrag.tabIndex = 0;
         eintrag.setAttribute('role', 'button');
+        // **Der Zustand steht auch als Wort.** Wer den Unterschied nur an der
+        // Farbe sieht, sieht ihn nicht – und wer ihn gar nicht sieht, kann
+        // auch nichts markieren. Für Vorleseprogramme und für alle, die die
+        // Leiste nicht gut unterscheiden können, ist das hier die eigentliche
+        // Angabe; der Punkt darüber ist nur die Kurzfassung davon.
+        eintrag.setAttribute(
+            'aria-label',
+            `${nachricht.gelesen ? 'Gelesen' : 'Ungelesen'}: ${nachricht.absender || 'ohne Absender'} – ${
+                nachricht.betreff || 'ohne Betreff'
+            }`,
+        );
 
-        const von = document.createElement('span');
-        von.className = 'mail-item-from';
-        von.textContent = nachricht.absender || '(ohne Absender)';
+        // **Absender und Datum auf einer Zeile.** Das Datum stand vorher unter
+        // dem Betreff und kostete dort eine ganze Zeile. In der breiteren Leiste
+        // steht es rechts neben dem Absender – und wer die Liste überfliegt, sieht
+        // beides auf einem Blick.
+        const kopfZeile = document.createElement('div');
+        kopfZeile.className = 'mail-item-zeile';
 
-        const betreff = document.createElement('span');
-        betreff.className = 'mail-item-subject';
-        betreff.textContent = nachricht.betreff || '(ohne Betreff)';
+        // **Der Punkt ist der Unterschied zwischen gelesen und ungelesen.**
+        // Vorher stand da nur eine dünne Linie am äußersten Rand, die man
+        // übersieht, während man die Liste überfliegt – und wer nach dem Lesen
+        // einmal nachsah, konnte nicht sagen, ob sich etwas geändert hat. Der
+        // Punkt steht vor dem Absender, dort wo das Auge ohnehin zuerst ist.
+        //
+        // **Er bleibt auch bei gelesenen Nachrichten im Fluss** (nur unsichtbar),
+        // damit die Liste beim Markieren nicht springt.
+        const punkt = document.createElement('span');
+        punkt.className = 'mail-item-punkt';
+        // **Nur ein Pünktchen, kein Wort.** Für Vorleseprogramme ist die
+        // Unterscheidung über Farbe blind, deshalb trägt der ganze Eintrag unten
+        // einen Klartext – das hier ist nur das, was man sieht.
+        punkt.setAttribute('aria-hidden', 'true');
+
+        const absender = document.createElement('span');
+        absender.className = 'mail-item-absender';
+        absender.textContent = nachricht.absender || '(ohne Absender)';
 
         const datum = document.createElement('span');
         datum.className = 'mail-item-date';
         datum.textContent = formatMailDate(nachricht.datum);
 
-        eintrag.append(von, betreff, datum);
-        eintrag.addEventListener('click', () => {
-            oeffneMail(nachricht).catch((error) => console.error('Mail:', error));
-        });
-        eintrag.addEventListener('keydown', (ereignis) => {
-            if (ereignis.key === 'Enter' || ereignis.key === ' ') {
-                ereignis.preventDefault();
-                oeffneMail(nachricht).catch((error) => console.error('Mail:', error));
-            }
-        });
+        kopfZeile.append(punkt, absender, datum);
+
+        const betreff = document.createElement('span');
+        betreff.className = 'mail-item-subject';
+        betreff.textContent = nachricht.betreff || '(ohne Betreff)';
+
+        eintrag.append(kopfZeile, betreff);
+
+        // **Die Vorschau wird nur gesetzt, wenn der Server sie geschickt hat.**
+        // Ein leerer Absatz unter dem Betreff würde einen Abstand lassen, den
+        // niemand erklären kann – und der Server kann sie auslassen, wenn er
+        // einen begrenzten Abruf nicht kannte.
+        if (nachricht.vorschau) {
+            const vorschau = document.createElement('span');
+            vorschau.className = 'mail-item-vorschau';
+
+            // **Als Text, nicht als HTML.** Aus demselben Grund wie der Rumpf im
+            // Fenster: Der Anriss einer fremden Mail ist genauso Angriffseingabe
+            // wie ihr Text.
+            vorschau.textContent = nachricht.vorschau;
+            eintrag.append(vorschau);
+        }
+
+// **`oeffneMail` meldet selbst.** Es braucht hier keinen `catch` mehr, der
+    // den Fehler in die Konsole legt, wo ihn niemand liest – der Fehler steht
+    // jetzt über der Liste.
+    eintrag.addEventListener('click', () => {
+        void oeffneMail(nachricht);
+    });
+    eintrag.addEventListener('keydown', (ereignis) => {
+        if (ereignis.key === 'Enter' || ereignis.key === ' ') {
+            ereignis.preventDefault();
+            void oeffneMail(nachricht);
+        }
+    });
 
         mailList.append(eintrag);
     }
 
-    const postfach = mailZustand.nachrichten.length;
-    mailFoot.textContent = `${postfach} Nachricht${postfach === 1 ? '' : 'en'} im ${mailFootOrdner()}`;
+    const anzahl = mailZustand.nachrichten.length;
+
+    // **Welches Postfach, steht unten drunter.** Bei vier Postfächern ist die
+    // Zeile über der Liste die einzige Stelle, an der steht, ob man gerade
+    // privat oder in der Arbeit liest.
+    mailFoot.textContent =
+        `${anzahl} Nachricht${anzahl === 1 ? '' : 'en'}` +
+        (kontoName ? ` in ${mailFootOrdner()} · „${kontoName}“` : ` in ${mailFootOrdner()}`);
 }
 
 function mailFootOrdner() {
@@ -1489,29 +1806,293 @@ function formatMailDate(datum) {
     return `${treffer[2]}. ${treffer[1]}.${treffer[3]}, ${treffer[4]}:${treffer[5]}`;
 }
 
-/** Öffnet die Nachricht im Fenster. */
-async function oeffneMail(nachricht) {
-    const voll = await invoke('mail_message', { nummer: nachricht.nummer });
+/**
+ * Sagt, was beim Öffnen einer Nachricht gerade passiert – **über der Liste, nicht
+ * in ihr.**
+ *
+ * Eine Zeile zu leeren, um zu sagen „wird geholt", wäre die kürzeste Lösung und
+ * die schlechteste: Nach einem Fehler stünde die Liste leer, und bis zum
+ * nächsten „Neu laden" wären die Nachrichten weg – als hätte der Klick sie
+ * gelöscht. Der Text steht deshalb über der Liste und lässt sie stehen.
+ */
+function meldeMailHinweis(text) {
+    mailState.textContent = text;
+    mailState.hidden = false;
+}
 
-    mailZustand.offen = voll;
+/** Wie lang eine Zeile sein muss, damit ein Zeilenumbruch im Rumpf als
+ *  harten Umbruch gilt. Reine Mails sind auf etwa 72 Zeichen umgebrochen; eine
+ *  kürzere Zeile ist ein gewollter Umbruch und bleibt stehen. */
+const MAIL_UMBRUCH_MINDESTENS = 55;
 
-    // **Als Text, nicht als HTML.** Fremder Inhalt wird in Mimir nirgends
-    // gerendert.
-    mailMessageSubject.textContent = voll.kopf.betreff || '(ohne Betreff)';
-    mailMessageFrom.textContent = voll.kopf.absender || '(ohne Absender)';
-    mailMessageDate.textContent = formatMailDate(voll.kopf.datum);
-    mailMessageText.textContent = voll.text || '(kein Textteil – die Nachricht enthält nur Anhänge)';
+/** Gehört diese Zeile zur zitierten Antwort? */
+function mailZeilenArt(zeile) {
+    const kurz = zeile.trim();
 
-    if (voll.anhaenge.length > 0) {
-        mailMessageAttachments.hidden = false;
-        mailMessageAttachments.textContent =
-            `Anhänge: ${voll.anhaenge.join(', ')} – sie werden nicht geöffnet.`;
-    } else {
-        mailMessageAttachments.hidden = true;
-        mailMessageAttachments.textContent = '';
+    if (!kurz) return 'leer';
+    // **`>` ist die verbreitetste Zitatform**, und der Kopf darüber steht in
+    // derselben Form. Outlook und Gmail schreiben stattdessen einen Satz, und
+    // beide Formen kommen im selben Postfach vor.
+    if (/^[|>]/.test(kurz)) return 'zitat';
+    if (/^(Von|Antwort an|An|Betreff|Gesendet|Gesendet von|Empfaenger):/i.test(kurz)) return 'zitat';
+    if (/^Am .+ schrieb\b/i.test(kurz)) return 'zitat';
+    // **`-- ` trennt die Signatur** von der Nachricht, nach RFC 3676 mit genau
+    // zwei Bindestrichen und einem Leerzeichen.
+    if (/^--\s*$/.test(kurz)) return 'trenner';
+
+    return 'text';
+}
+
+/**
+ * Zerlegt einen Mailrumpf in Blöcke, die man verschieden darstellen kann.
+ *
+ * **Rein textlich, ohne DOM.** So lässt sich prüfen, was das Fenster aus einer
+ * fremden Mail macht, ohne eines zu öffnen – und die Probe unten zeigt, dass
+ * aus fremdem Text keine Markup wird.
+ */
+function mailBloecke(text) {
+    const zeilen = String(text ?? '')
+        .replace(/\r\n?/g, '\n')
+        .split('\n');
+
+    const bloecke = [];
+    let lauf = null;
+
+    const ablegen = () => {
+        if (lauf && lauf.zeilen.length > 0) bloecke.push(lauf);
+        lauf = null;
+    };
+
+    for (const zeile of zeilen) {
+        const art = mailZeilenArt(zeile);
+
+        if (art === 'leer') {
+            ablegen();
+            continue;
+        }
+
+        if (!lauf || lauf.art !== art) {
+            ablegen();
+            lauf = { art, zeilen: [] };
+        }
+
+        lauf.zeilen.push(zeile);
     }
 
-    mailMessageDialog.showModal();
+    ablegen();
+
+    return bloecke;
+}
+
+/**
+ * Fügt einen Absatz aus harten Zeilenumbrüchen zusammen.
+ *
+ * **Sonst steht eine Mail als Treppenhaus da.** Eine als Text versandte Mail
+ * trägt ihre Zeilenumbrüche im Rumpf mit; ohne dieses Zusammenfügen bricht der
+ * Text an den Stellen um, an denen der Absender umbrochen hat, und nicht dort,
+ * wo er es meinte. Verbunden wird nur, was nach einem harten Umbruch aussieht –
+ * eine lange Zeile, gefolgt von einer, die nicht mit einem Aufzählungspunkt
+ * beginnt. Aufzählungen, Zitate und kurze Zeilen bleiben, wie sie sind.
+ */
+function mailAbsatzText(zeilen) {
+    const raus = [];
+
+    for (let i = 0; i < zeilen.length; i += 1) {
+        const zeile = zeilen[i].replace(/\s+$/, '');
+        const naechste = zeilen[i + 1];
+        const beginntAufzaehlung = naechste !== undefined && /^\s*([-*•>]|\d+[.)])\s/.test(naechste);
+
+        raus.push(zeile);
+
+        if (naechste !== undefined && zeile.length >= MAIL_UMBRUCH_MINDESTENS && !beginntAufzaehlung) {
+            raus.push(' ');
+        } else if (naechste !== undefined) {
+            raus.push('\n');
+        }
+    }
+
+    return raus.join('');
+}
+
+/**
+ * Stellt den Rumpf als Absätze, Zitate und Signatur dar.
+ *
+ * **Zitate treten zurück, statt mitzuschreien.** In einer Antwortmail steht das
+ * Zitat unter dem neuen Text und ist meist länger als er. Unformatiert füllt es
+ * die Ansicht und der eigentliche Inhalt verschwindet zwischen den Zitaten.
+ * Es wird deshalb eingerückt, kleiner und blasser gesetzt – was der Mail-Text
+ * selbst nicht kann, weil er nur aus Zeichen besteht.
+ *
+ * **Jeder Text wird über `textContent` gesetzt.** Fremder Inhalt wird nirgends
+ * als Markup gelesen; die Formatierung entsteht allein aus der erkannten
+ * Struktur.
+ */
+function zeichneMailRumpf(text) {
+    mailMessageText.replaceChildren();
+
+    const bloecke = mailBloecke(text);
+
+    if (bloecke.length === 0) {
+        const leer = document.createElement('p');
+        leer.className = 'mail-leer';
+        leer.textContent = '(kein Textteil – die Nachricht enthält nur Anhänge)';
+        mailMessageText.append(leer);
+        return;
+    }
+
+    let zitat = null;
+    let nachTrenner = false;
+
+    for (const block of bloecke) {
+        if (block.art === 'zitat') {
+            if (zitat === null) {
+                zitat = document.createElement('blockquote');
+                zitat.className = 'mail-zitat';
+                mailMessageText.append(zitat);
+            }
+
+            const absatz = document.createElement('p');
+            // **Das `>` verschwindet.** Es ist eine Notierung der Herkunft, kein
+            // Inhalt; im Fenster steht sie als Linie links.
+            absatz.textContent = block.zeilen
+                .map((zeile) => zeile.replace(/^\s*[|>]\s?/, ''))
+                .join('\n');
+            zitat.append(absatz);
+            nachTrenner = false;
+            continue;
+        }
+
+        zitat = null;
+
+        if (block.art === 'trenner') {
+            const linie = document.createElement('hr');
+            linie.className = 'mail-trenner';
+            mailMessageText.append(linie);
+            nachTrenner = true;
+            continue;
+        }
+
+        const absatz = document.createElement('p');
+        if (nachTrenner) absatz.className = 'mail-signatur';
+        absatz.textContent = mailAbsatzText(block.zeilen);
+        mailMessageText.append(absatz);
+        nachTrenner = false;
+    }
+}
+
+/**
+ * Sagt dem Knopf, **was ein Klick tun würde** – nicht, was gerade gilt.
+ *
+ * „Als gelesen markieren" auf einer bereits gelesenen Mail wäre eine Lüge, und
+ * „Gelesen" als bloßer Zustand ohne Handlung müsste der Benutzer erst raten.
+ */
+function zeichneMailGelesen() {
+    const gelesen = Boolean(mailZustand.offenKopf && mailZustand.offenKopf.gelesen);
+
+    mailMessageRead.textContent = gelesen ? 'Als ungelesen markieren' : 'Als gelesen markieren';
+    mailMessageRead.title = gelesen
+        ? 'Die Nachricht wieder als ungelesen markieren'
+        : 'Die Nachricht als gelesen markieren';
+    mailMessageRead.disabled = false;
+}
+
+/**
+ * Markiert die geöffnete Nachricht als gelesen oder als ungelesen.
+ *
+ * **Erst fragen, dann zeichnen.** Die Markierung geht an den Server; ein Knopf,
+ * der den Zustand sofort änderte und bei einem Fehler zurücknähme, flackerte
+ * zweimal und ließe den Benutzer raten, was gilt. Hier bleibt der Knopf während
+ * des Laufs gesperrt und meldet einen Fehler über der Liste.
+ *
+ * **Alle drei Orte werden nachgezogen**: der Knopf, die Zeile in der Liste und
+ * der Zustand im Fenster. Lässt man einen davon stehen, widersprechen sie sich
+ * beim nächsten Auf – genau die Art Widerspruch, die diese Leiste schon einmal
+ * teuer gekostet hat.
+ */
+async function schalteMailGelesen() {
+    const kopf = mailZustand.offenKopf;
+    if (!kopf) return;
+
+    const neu = !kopf.gelesen;
+    const nummer = kopf.nummer;
+
+    mailMessageRead.disabled = true;
+
+    try {
+        await invokeMail(
+            'mail_gelesen_setzen',
+            { id: mailZustand.konto, nummer, gelesen: neu },
+            60,
+        );
+
+        kopf.gelesen = neu;
+        if (mailZustand.offen) mailZustand.offen.kopf.gelesen = neu;
+
+        const eintrag = mailZustand.nachrichten.find((nachricht) => nachricht.nummer === nummer);
+        if (eintrag) eintrag.gelesen = neu;
+
+        zeichneMailGelesen();
+        zeichneMailListe();
+    } catch (error) {
+        meldeMailHinweis(`Die Markierung ließ sich nicht setzen: ${error}`);
+    } finally {
+        mailMessageRead.disabled = false;
+    }
+}
+
+/** Öffnet die Nachricht im Fenster. */
+async function oeffneMail(nachricht) {
+    // **Ein Doppelklick ist kein zweiter Wunsch, sondern derselbe.** Ohne diese
+    // Sperre liefe der Abruf zweimal – zwei Verbindungen zum Mailserver – und
+    // der zweite `showModal` liefe auf ein bereits offenes Fenster und liefe auf
+    // einen Fehler. Was der Benutzer sieht, wäre dann: nichts.
+    if (mailZustand.oeffnet) return;
+    mailZustand.oeffnet = true;
+
+    try {
+        meldeMailHinweis('Nachricht wird geholt …');
+
+        // **Die Kennung aus der Leiste, nicht die aus dem Fenster.** Zwischen dem
+        // Klick auf die Liste und diesem Aufruf kann der Benutzer über „Konten"
+        // umgeschaltet haben – dann gehört die Nachricht, die gerade geklickt
+        // wurde, zu dem Postfach, aus dem sie tatsächlich stammt.
+        const voll = await invokeMail(
+            'mail_message',
+            { id: mailZustand.konto, nummer: nachricht.nummer },
+            60,
+        );
+
+        mailZustand.offen = voll;
+        mailZustand.offenKopf = nachricht;
+        zeichneMailGelesen();
+
+        // **Als Text, nicht als HTML.** Fremder Inhalt wird in Mimir nirgends
+        // gerendert.
+        mailMessageSubject.textContent = voll.kopf.betreff || '(ohne Betreff)';
+        mailMessageFrom.textContent = voll.kopf.absender || '(ohne Absender)';
+        mailMessageDate.textContent = formatMailDate(voll.kopf.datum);
+        zeichneMailRumpf(voll.text);
+
+        if (voll.anhaenge.length > 0) {
+            mailMessageAttachments.hidden = false;
+            mailMessageAttachments.textContent =
+                `Anhänge: ${voll.anhaenge.join(', ')} – sie werden nicht geöffnet.`;
+        } else {
+            mailMessageAttachments.hidden = true;
+            mailMessageAttachments.textContent = '';
+        }
+
+        mailState.hidden = true;
+        mailMessageDialog.showModal();
+    } catch (error) {
+        // **Der Fehler gehört in die Leiste, nicht in die Konsole.** Das Fenster
+        // geht nicht auf, und ohne diese Zeile wüsste der Benutzer nicht, ob er
+        // falsch geklickt hat, ob die Mail defekt ist oder ob der Server nicht
+        // antwortet.
+        meldeMailHinweis(`Die Nachricht ließ sich nicht öffnen: ${error}`);
+    } finally {
+        mailZustand.oeffnet = false;
+    }
 }
 
 /**
@@ -1553,6 +2134,16 @@ function frageNachZusammenfassung() {
 }
 
 mailMessageClose.addEventListener('click', () => mailMessageDialog.close());
+// **Am `close`, nicht am Knopf.** Escape schließt ein Fenster genauso wie der
+// Knopf; hing das Aufräumen am Knopf, behielte der Gelesen-Knopf seinen Stand
+// über das Fenster hinaus – und die Liste wäre die einzige Stelle, die ihn
+// kennt.
+mailMessageDialog.addEventListener('close', () => {
+    mailZustand.offenKopf = null;
+});
+mailMessageRead.addEventListener('click', () => {
+    void schalteMailGelesen();
+});
 mailMessageSummarize.addEventListener('click', frageNachZusammenfassung);
 
 // Auf schmalen Fenstern eingeklappt starten – wie der Kalender.
@@ -1603,21 +2194,187 @@ mailSettingsBtn.addEventListener('click', () => {
     oeffneMailDialog().catch((error) => console.error('Mailkonto:', error));
 });
 
-/** Öffnet den Anmeldedialog mit dem, was eingetragen ist. */
-async function oeffneMailDialog() {
-    const config = await invoke('get_mail_config');
-    const status = await invoke('mail_status');
+// **Die Kontenauswahl klappt auf und zu.** Sie bleibt offen, solange sie
+// eingeblendet ist – sonst müsste man sie bei jedem Klick auf einen anderen
+// Eintrag wieder aufklappen, und das wäre bei vier Konton ein Klickhammergefühl
+// für einen Weg, den man alle paar Minuten geht.
+mailChooseBtn.addEventListener('click', () => {
+    mailPicker.hidden = !mailPicker.hidden;
+});
+mailPickerClose.addEventListener('click', () => {
+    mailPicker.hidden = true;
+});
 
-    mailImapInput.value = config.imap_server || '';
-    mailSmtpInput.value = config.smtp_server || '';
-    mailUserInput.value = config.username || '';
-    mailAddressInput.value = config.address || '';
-    mailFolderInput.value = config.folder || '';
-    mailPasswordInput.value = '';
-    mailRememberInput.checked = status.stored;
+/**
+ * Öffnet den Kontendialog mit dem, was eingetragen ist.
+ *
+ * Ohne `kontoId` das Konto, das die Leiste gerade zeigt – man will fast immer
+ * das bearbeiten, das man ansieht. Mit `kontoId` ein bestimmtes.
+ */
+async function oeffneMailDialog(kontoId = null) {
+    const konfiguration = await invoke('get_mail_config');
+    const statuse = await invoke('mail_statuses');
+
+    mailZustand.dialogKonten = konfiguration.konten;
+    mailZustand.dialogStatuse = mailKontenliste(konfiguration.konten, statuse);
+
+    // **Der Knopf „Konto" zeigt das Konto, das die Leiste zeigt** – man will
+    // fast immer das bearbeiten, das man ansieht. Nur mit ausdrücklicher
+    // Kennung (nach „Entfernen") wird ein anderes geöffnet. Die Auswahl ohne
+    // Kennung kommt aus der Konfiguration, damit der Dialog nicht ein Feld
+    // offenlässt, nur weil der Statusabruf einmal leer blieb.
+    mailZustand.bearbeitet =
+        kontoId !== null
+            ? kontoId
+            : konfiguration.aktiv ||
+              (mailZustand.dialogKonten[0] ? mailZustand.dialogKonten[0].id : null);
+
+    zeichneMailKonten(mailZustand.dialogStatuse);
+
+    const konto = mailZustand.dialogKonten.find((k) => k.id === mailZustand.bearbeitet) || null;
+
+    fuelleMailForm(konto, mailZustand.dialogStatuse.find((s) => s.id === mailZustand.bearbeitet));
+
     mailDialogError.hidden = true;
+    armiereEntfernenZurueck();
     mailDialog.showModal();
-    mailImapInput.focus();
+
+    // **Die Leiste bekommt denselben Stand, den der Dialog gerade geholt hat.**
+    // Sie liest über einen anderen Befehl, und ohne diesen Abgleich konnte der
+    // Dialog ein Konto zeigen, während die Leiste daneben „Kein Mailkonto
+    // eingetragen" behauptete – zwei Bildschirme, die sich widersprechen, und bei
+    // beiden sieht es aus, als wäre etwas kaputt.
+    aktualisiereMail().catch((error) => console.error('Mail:', error));
+}
+
+/**
+ * Die Kontenliste im Dialog.
+ *
+ * **Ein Knopf „Entfernen" für das markierte Konto**, nicht einer je Zeile. In
+ * einer Liste, die man mit der Maus bedient, wären kleine Knöpfe am Zeilenende
+ * Ziele, die man versehentlich trifft – und das Entfernen löscht einen
+ * Schlüsselbund-Eintrag.
+ */
+function zeichneMailKonten(statuse) {
+    mailAccountList.replaceChildren();
+
+    const konten = mailZustand.dialogKonten || [];
+
+    if (konten.length === 0) {
+        const hinweis = document.createElement('p');
+        hinweis.className = 'mail-hint';
+        hinweis.textContent = 'Noch kein Konto eingetragen.';
+        mailAccountList.append(hinweis);
+        return;
+    }
+
+    for (const konto of konten) {
+        const zeile = document.createElement('label');
+        zeile.className = 'mail-account-entry';
+
+        const knopf = document.createElement('input');
+        knopf.type = 'radio';
+        knopf.name = 'mail-dialog-konto';
+        knopf.value = konto.id;
+        knopf.checked = konto.id === mailZustand.bearbeitet;
+
+        const beschriftung = document.createElement('span');
+        beschriftung.className = 'mail-account-label';
+
+        const name = document.createElement('span');
+        name.className = 'mail-account-name';
+        // **Der Name, wie ihn die Leiste zeigt.** Für einen, der kein eigenes
+        // eingetragen hat, ist das die Absenderadresse – dieselbe Anzeige wie in
+        // der Leiste, damit man im Dialog nicht eine Liste sieht, in der etwas
+        // anders heißt als unten links.
+        name.textContent = mailAnzeigename(konto);
+
+        const adresse = document.createElement('span');
+        adresse.className = 'mail-account-adresse';
+        const server = konto.imap_server || 'kein Server eingetragen';
+        adresse.textContent = `${konto.username || 'kein Benutzername'} · ${server}`;
+
+        beschriftung.append(name, adresse);
+        zeile.append(knopf, beschriftung);
+
+        const status = statuse.find((s) => s.id === konto.id);
+        if (status && !status.angemeldet && status.eingerichtet) {
+            const hinweis = document.createElement('span');
+            hinweis.className = 'mail-account-status';
+            hinweis.textContent = 'nicht angemeldet';
+            zeile.append(hinweis);
+        }
+
+        knopf.addEventListener('change', () => {
+            mailZustand.bearbeitet = konto.id;
+            fuelleMailForm(konto, mailZustand.dialogStatuse?.find((s) => s.id === konto.id));
+            armiereEntfernenZurueck();
+        });
+
+        mailAccountList.append(zeile);
+    }
+}
+
+/**
+ * Führt die Konten der Konfiguration mit den Zuständen zusammen.
+ *
+ * **Die Länge kommt aus der Konfiguration.** Ein Konto ohne eigenen Eintrag in
+ * `mail_statuses` ist kein Grund, es zu verschweigen – es ist dann eben nicht
+ * angemeldet, und das ist eine Aussage, keine Auslassung. Fiele der Statusabruf
+ * einmal ganz aus, zeigt die Leiste danach weiter das Konto mit „nicht
+ * angemeldet" statt mit „Kein Mailkonto eingetragen".
+ */
+function mailKontenliste(konten, statuse) {
+    return (konten || []).map((konto) => {
+        const status = (statuse || []).find((s) => s.id === konto.id);
+        if (status) return status;
+
+        const adresse = (konto.address || '').trim() || (konto.username || '').trim();
+
+        return {
+            id: konto.id,
+            name: mailAnzeigename(konto),
+            adresse,
+            ordner: (konto.folder || '').trim() || 'INBOX',
+            eingerichtet: Boolean((konto.imap_server || '').trim() && (konto.username || '').trim()),
+            angemeldet: false,
+            gemerkt: false,
+            letzter_erfolg: null,
+        };
+    });
+}
+
+/** Derselbe Anzeigename wie im Backend – dieselbe Reihenfolge, dieselben Werte. */
+function mailAnzeigename(konto) {
+    const eigen = (konto.name || '').trim();
+    if (eigen) return eigen;
+
+    const adresse = (konto.address || '').trim();
+    if (adresse) return adresse;
+
+    const benutzer = (konto.username || '').trim();
+    if (benutzer) return benutzer;
+
+    return konto.id;
+}
+
+/** Trägt ein Konto in die Felder. `null` heißt: ein neues Konto. */
+function fuelleMailForm(konto, status) {
+    mailNameInput.value = konto ? konto.name || '' : '';
+    mailImapInput.value = konto ? konto.imap_server || '' : '';
+    mailSmtpInput.value = konto ? konto.smtp_server || '' : '';
+    mailUserInput.value = konto ? konto.username || '' : '';
+    mailAddressInput.value = konto ? konto.address || '' : '';
+    mailFolderInput.value = konto ? konto.folder || '' : '';
+    mailPasswordInput.value = '';
+    mailRememberInput.checked = Boolean(status && status.gemerkt);
+
+    // **Ein neues Konto kann nicht entfernt werden**, und bei voller Liste gibt
+    // es kein weiteres. Beides wird abgeschaltet, statt beim Klick zu scheitern:
+    // Ein Knopf, der nichts bewirkt, ist schwerer zu verstehen als einer, der
+    // gar nicht da ist.
+    mailAccountRemove.disabled = !konto;
+    mailAccountNew.disabled = (mailZustand.dialogKonten || []).length >= MAX_MAIL_ACCOUNTS;
 }
 
 mailForm.addEventListener('submit', async (ereignis) => {
@@ -1628,7 +2385,14 @@ mailForm.addEventListener('submit', async (ereignis) => {
     loginBtn.disabled = true;
 
     try {
-        await invoke('set_mail_config', {
+        // **Kein Kennungsfeld im Formular.** Entweder das Konto, das im Dialog
+        // markiert ist, oder ein neues (`id: null`). Die Kennung wird von
+        // Mimir vergeben, und ein Feld dafür in der Oberfläche hieße, dass man
+        // sie eingeben *kann* – also dass zwei Konten mit derselben Kennung
+        // etwas wären, was man prüfen müsste.
+        const gespeichert = await invoke('set_mail_account', {
+            id: mailZustand.bearbeitet,
+            name: mailNameInput.value,
             imapServer: mailImapInput.value,
             smtpServer: mailSmtpInput.value,
             username: mailUserInput.value,
@@ -1637,29 +2401,172 @@ mailForm.addEventListener('submit', async (ereignis) => {
             maxEntries: null,
         });
 
-        await invoke('mail_login', { password: mailPasswordInput.value });
+        // **Zurück auf das, was gespeichert wurde.** Beim Anlegen hat Mimir eine
+        // Kennung vergeben, die im Formular nirgends steht.
+        mailZustand.bearbeitet = gespeichert.aktiv || null;
+        mailZustand.dialogKonten = gespeichert.konten;
 
-        if (mailRememberInput.checked) {
-            // Das Merken darf fehlschlagen, ohne die Anmeldung zu zerstören:
-            // ohne Schlüsselbund ist die Sitzung trotzdem da.
-            await invoke('mail_store_password', { password: mailPasswordInput.value })
-                .catch((error) => console.warn('Passwort nicht gemerkt:', error));
+        // **Ohne Passwort wird nicht angemeldet.** Wer ein Konto nur umbenennt,
+        // hat keins zur Hand; eine Fehlermeldung darüber wäre falsch, und ein
+        // leeres Passwort als Sitzungspasswort zu nehmen hieße, das Konto gleich
+        // wieder als abgemeldet zu behandeln.
+        const passwort = mailPasswordInput.value.trim();
+
+        if (passwort.length > 0) {
+            await invoke('mail_login', {
+                id: mailZustand.bearbeitet,
+                password: passwort,
+            });
+
+            if (mailRememberInput.checked) {
+                // Das Merken darf fehlschlagen, ohne die Anmeldung zu zerstören:
+                // ohne Schlüsselbund ist die Sitzung trotzdem da.
+                await invoke('mail_store_password', {
+                    id: mailZustand.bearbeitet,
+                    password: passwort,
+                }).catch((error) => console.warn('Passwort nicht gemerkt:', error));
+            }
         }
 
         mailDialog.close();
+
+        // **Die Leiste wird auch dann neu gezeichnet, wenn oben etwas
+        // schiefging.** Das Konto *ist* gespeichert – es steht in der Datei, und
+        // der Benutzer sieht es beim nächsten Start. Bleibt die Leiste auf ihrem
+        // alten Text stehen, meldet sie „Kein Mailkonto eingetragen", während es
+        // gerade eingetragen wurde: Die Anzeige widerspricht der Wirklichkeit, und
+        // niemand findet heraus, warum.
         await aktualisiereMail();
     } catch (error) {
         mailDialogError.textContent = String(error);
         mailDialogError.hidden = false;
+
+        // **Und trotzdem nachsehen.** Das Konto kann gespeichert sein, obwohl die
+        // Anmeldung daran scheiterte – dann steht es in der Liste, und die Meldung
+        // erklärt, was fehlt.
+        await aktualisiereMail();
     } finally {
         loginBtn.disabled = false;
         mailPasswordInput.value = '';
     }
 });
 
+/**
+ * **Das Entfernen, zweimal geklickt.**
+ *
+ * Der erste Klick schärft nur den Knopf und schreibt die Warnung hin. Der
+ * zweite löscht. Damit braucht es keine Rückfrage, die in einer Webview nicht
+ * überall erscheint – und niemand löscht versehentlich ein Postfach, weil er
+ * beim Navigieren über den Knopf gefahren ist.
+ */
+function armiereEntfernenZurueck() {
+    mailZustand.entfernenArmiert = false;
+    mailAccountRemove.textContent = 'Konto entfernen';
+    mailAccountRemove.classList.remove('danger-bereit');
+    mailAccountWarnung.hidden = true;
+    mailAccountWarnung.textContent = '';
+}
+
+mailAccountRemove.addEventListener('click', async () => {
+    const konto = (mailZustand.dialogKonten || []).find(
+        (k) => k.id === mailZustand.bearbeitet,
+    );
+
+    if (!konto) return;
+
+    const name = mailAnzeigename(konto);
+
+    if (!mailZustand.entfernenArmiert) {
+        mailZustand.entfernenArmiert = true;
+        mailAccountRemove.textContent = `„${name}“ wirklich entfernen`;
+        mailAccountRemove.classList.add('danger-bereit');
+        mailAccountWarnung.textContent =
+            `„${name}“ wird aus Mimir entfernt. Das gemerkte Passwort im Schlüsselbund ` +
+            `wird mitgelöscht – beim Anbieter bleibt es unverändert.`;
+        mailAccountWarnung.hidden = false;
+        return;
+    }
+
+    mailAccountRemove.disabled = true;
+
+    try {
+        const gespeichert = await invoke('remove_mail_account', { id: konto.id });
+
+        mailZustand.dialogKonten = gespeichert.konten;
+        // **Auf ein Nachbarkonto springen.** `entfernen` im Backend hat die
+        // Auswahl schon nachgezogen; ohne das hier zeigte das Formular weiter
+        // das gerade gelöschte.
+        mailZustand.bearbeitet = gespeichert.aktiv || null;
+
+        const status = await invoke('mail_statuses');
+        mailZustand.dialogStatuse = mailKontenliste(mailZustand.dialogKonten, status);
+
+        zeichneMailKonten(mailZustand.dialogStatuse);
+        fuelleMailForm(
+            (mailZustand.dialogKonten || []).find((k) => k.id === mailZustand.bearbeitet) || null,
+            mailZustand.dialogStatuse.find((s) => s.id === mailZustand.bearbeitet),
+        );
+        armiereEntfernenZurueck();
+
+        await aktualisiereMail();
+    } catch (error) {
+        mailDialogError.textContent = String(error);
+        mailDialogError.hidden = false;
+        armiereEntfernenZurueck();
+    } finally {
+        mailAccountRemove.disabled = false;
+    }
+});
+
+/**
+ * Ein neues Konto im Dialog beginnen, ohne es gleich anzulegen.
+ *
+ * **Es wird nichts gespeichert, solange nichts gespeichert wurde.** Wer auf
+ * „Neues Konto" klickt und dann auf „Abbrechen", hatte vorher kein Konto und
+ * hat danach keins. Der Weg wäre derselbe wie beim Anlegen, nur ohne Liste
+ * darüber – und dieselben Felder, nur leer.
+ */
+mailAccountNew.addEventListener('click', () => {
+    mailZustand.bearbeitet = null;
+    fuelleMailForm(null, null);
+    armiereEntfernenZurueck();
+
+    // **Der Dialog bliebe auf dem alten Konto stehen**, sonst dächte der
+    // Benutzer, das alte wäre wieder da. Die Liste wird neu gezeichnet, damit
+    // kein Konto markiert ist.
+    zeichneMailKonten(mailZustand.dialogStatuse || []);
+
+    mailDialogError.hidden = true;
+    mailImapInput.focus();
+});
+
 document.getElementById('mail-cancel').addEventListener('click', () => {
     mailDialog.close();
     mailPasswordInput.value = '';
+    armiereEntfernenZurueck();
+});
+
+/**
+ * **Leiste und Dialog dürfen sich nie widersprechen.**
+ *
+ * Der Dialog holt seine Liste mit `get_mail_config`, die Leiste ihre mit
+ * `mail_statuses` – zwei Abrufe, und die Leiste wurde bisher nur bei genau drei
+ * Gelegenheiten neu gezeichnet: beim Start, beim Aufklappen und nach dem
+ * *Speichern*. Schließt man den Dialog mit Escape oder mit „Abbrechen", oder
+ * ändert sich etwas zwischen zwei Aktualisierungen, hängt die Leiste auf ihrem
+ * alten Stand.
+ *
+ * Das sieht dann aus, als wäre kein Konto eingetragen, **während der Dialog
+ * gerade eines zeigt** – zwei Bildschirme, die sich widersprechen, und keiner
+ * von beiden hat recht sichtbar Unrecht. Deshalb wird die Leiste bei **jedem**
+ * Schließen des Dialogs nachgezogen: Wer an den Konten war, will danach sehen,
+ * was daraus geworden ist.
+ *
+ * `close` statt `cancel`, weil `close` auch das Schließen per Escape und das
+ * `close()` aus dem Speicherpfad erfasst.
+ */
+mailDialog.addEventListener('close', () => {
+    aktualisiereMail().catch((error) => console.error('Mail:', error));
 });
 
 // Kalenderleiste: erst den Zustand holen, damit die Anzeige ohne Netzabruf

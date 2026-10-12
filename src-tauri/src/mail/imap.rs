@@ -15,7 +15,7 @@
 //! muss, weil die Instanz ein selbstsigniertes Zertifikat hat – gibt es hier
 //! keinen Grund dafür.
 
-use super::kuerze_betreff;
+use super::{kuerze, kuerze_betreff, MAX_MAIL_PREVIEW_BYTES, VORSCHAU_BYTES};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,8 +26,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wie lange ein einzelner Befehl warten darf. Das Holen des Textes einer Mail
 /// darf bei einer großen Nachricht und langsamer Leitung etwas dauern.
-#[allow(dead_code)]
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wie lange auf die nächste Antwort gewartet wird, bevor die Leitung gilt.
+///
+/// **Ohne diese Frist ist „es passiert nichts" der einzige Zustand, den ein
+/// Mailserver herstellen kann**, der die Verbindung annimmt und dann schweigt –
+/// ein stiller Filter, ein ausgehängter Server, ein Port, den jemand blockiert.
+/// Jeder Lesevorgang und jeder Schreibvorgang läuft durch sie; `CONNECT_TIMEOUT`
+/// allein genügt nicht, weil sie nur den Verbindungsaufbau deckt.
+const ANTWORT_FRIST: Duration = Duration::from_secs(45);
 /// Wie lange die Leitung nach der Antwort mindestens offen gehalten wird.
 #[allow(dead_code)]
 const KEEPALIVE: Duration = Duration::from_secs(60);
@@ -48,6 +55,11 @@ pub struct NachrichtKopf {
     pub datum: String,
     pub gelesen: bool,
     pub bytes: u32,
+    /// Die ersten Zeilen des Textes, damit die Leiste mehr zeigt als einen
+    /// Betreff. Leer heißt: der Server hat nichts geliefert – etwa weil er
+    /// einen begrenzten Abruf nicht kannte. Die Liste steht dann genau so da,
+    /// wie sie vor dieser Erweiterung dastand.
+    pub vorschau: String,
 }
 
 /// Eine Nachricht mit Text. Der Text ist bereits gekürzt und enthält keine
@@ -98,6 +110,15 @@ impl std::fmt::Display for VerbindungsFehler {
 pub struct Verbindung<T> {
     inner: T,
     puffer: Vec<u8>,
+    /// Bytes, die beim Lesen über die Zeilengrenze hinaus mitgekommen sind und
+    /// zur nächsten Zeile gehören.
+    ///
+    /// **Das ist die Kehrseite des Pufferns.** Ein Aufruf holt 8 KiB auf einmal,
+    /// und darin liegen am Ende die ersten Bytes der *nächsten* Antwort. Läge
+    /// der Rest nur in einer örtlichen Variable, ginge er beim nächsten
+    /// `lies_roh_zeile` verloren – die zweite Zeile einer Antwort fehlte, und
+    /// der Aufrufer suchte den Fehler im Protokoll statt im Puffer.
+    unbenutzt: Vec<u8>,
     /// Zuletzt verwendete Nummer. IMAP zählt sie je Ordner neu; die UID wäre
     /// dauerhaft, steht aber nicht bei jedem Server zuverlässig zur Verfügung.
     pub beendet: bool,
@@ -111,34 +132,53 @@ where
         Self {
             inner,
             puffer: Vec::new(),
+            unbenutzt: Vec::new(),
             beendet: false,
         }
     }
 
-    /// Liest eine Zeile, ohne die 8-Bit-Grenze von IMAP zu verletzen.
+    /// Liest eine Zeile **mit** ihrem Zeilenende.
     ///
     /// `read_line` bricht an `\n` und würde ein Byte mit dem oberen Bit
     /// gesetzt als Zeilenende lesen – in einem RFC 2047-Betreff ist das keine
-    /// Ausnahme, sondern die Regel.
-    async fn lies_zeile(&mut self) -> Result<Vec<u8>, VerbindungsFehler> {
+    /// Ausnahme, sondern die Regel. Deshalb byteweise.
+    ///
+    /// **Das Zeilenende bleibt stehen**, und das ist der ganze Unterschied zu
+    /// [`Verbindung::lies_zeile`]: `imap-proto` parst eine Antwort nur, wenn sie
+    /// mit CRLF endet. Eine Zeile ohne das CRLF zu übergeben scheitert an *jeder*
+    /// Antwort – auch an `* OK`.
+    async fn lies_roh_zeile(&mut self) -> Result<Vec<u8>, VerbindungsFehler> {
+        self.lies_roh_zeile_bis(ANTWORT_FRIST).await
+    }
+
+    /// Wie [`Verbindung::lies_roh_zeile`], nur mit eigener Frist.
+    ///
+    /// **Die Frist ist ein Parameter, damit sie prüfbar ist.** Als Konstante
+    /// wäre sie nur im Quelltext nachlesbar; ein Test müsste die echte, lange
+    /// Wartezeit abwarten oder die Konstante verändern. Mit dem Parameter prüft
+    /// die Attrappe in Millisekunden, was in der Wirklichkeit Minuten dauert.
+    async fn lies_roh_zeile_bis(&mut self, frist: Duration) -> Result<Vec<u8>, VerbindungsFehler> {
+        // **Was der vorige Aufruf zu viel gelesen hat, kommt vornan.**
         self.puffer.clear();
+        self.puffer.append(&mut self.unbenutzt);
 
-        // `read_until` liest nur bis zum Trennzeichen und lässt die Steuerbytes
-        // stehen, die in RFC 2047-Betreffzeilen die Regel sind.
-        let mut gelesen = 0usize;
+        // **Gepuffert, nicht Byte für Byte.** Vorher wurde ein einzelnes Byte
+        // gelesen und auf `\n` geprüft: ein Systemaufruf pro Byte, bei einer
+        // Betreffzeile von achtzig Zeichen achtzig Aufrufe, bei einer
+        // Fließtextzeile Tausende. Auf einer Leitung mit Taunus-Wartezeit
+        // summiert sich das zu Minuten, in denen die Leiste nichts anzeigt und
+        // nicht zu sagen weiß, warum. Ein Puffer holt dieselben Bytes mit
+        // einem Aufruf.
+        let mut brot = [0u8; 8192];
+
         loop {
-            let mut ein_byte = [0u8; 1];
-            let anzahl = self.inner.read(&mut ein_byte).await?;
-
-            if anzahl == 0 {
-                break;
-            }
-
-            gelesen += anzahl;
-            self.puffer.push(ein_byte[0]);
-
-            if ein_byte[0] == b'\n' {
-                break;
+            if let Some(stelle) = self.puffer.iter().position(|z| *z == b'\n') {
+                // **Der Rest gehört der nächsten Zeile**, nicht der Antwort:
+                // Weglassen wäre stiller Datenverlust, und der fällt erst auf,
+                // wenn eine Antwort fehlt, die der Server längst geschickt hat.
+                self.unbenutzt.extend_from_slice(&self.puffer[stelle + 1..]);
+                self.puffer.truncate(stelle + 1);
+                return Ok(self.puffer.clone());
             }
 
             if self.puffer.len() > MAX_LINE_BYTES {
@@ -149,29 +189,186 @@ where
                         .to_string(),
                 ));
             }
+
+            // **Und mit einer Frist.** Ohne sie wartet ein Server, der die
+            // Verbindung annimmt und dann schweigt, für immer – der Auftrag
+            // kehrt nie zurück, die Leiste bleibt auf „wird geladen" stehen und
+            // kein Klick im Programm hilft. Eine Leitung ohne Antwort ist ein
+            // Fehler mit einem Satz, kein Warten.
+            let anzahl = match tokio::time::timeout(frist, self.inner.read(&mut brot)).await {
+                Ok(Ok(anzahl)) => anzahl,
+                Ok(Err(fehler)) => return Err(fehler.into()),
+                Err(_) => {
+                    self.beendet = true;
+                    return Err(VerbindungsFehler::Geschlossen(format!(
+                        "Der Mailserver hat nicht innerhalb von {} Sekunden geantwortet",
+                        frist.as_secs_f64().ceil() as u64
+                    )));
+                }
+            };
+
+            if anzahl == 0 {
+                // **Die Leitung ist zu.** Eine halbe Zeile ist keine Zeile:
+                // Gmail beendet die Verbindung nach `LOGOUT` so, und das ist
+                // ein Zustand, kein Fehler beim Lesen.
+                if self.puffer.is_empty() {
+                    self.beendet = true;
+                    return Err(VerbindungsFehler::Geschlossen(
+                        "Der Mailserver hat die Verbindung beendet".to_string(),
+                    ));
+                }
+
+                self.unbenutzt.clear();
+                return Ok(self.puffer.clone());
+            }
+
+            self.puffer.extend_from_slice(&brot[..anzahl]);
+        }
+    }
+
+    /// Liest **genau** so viele Bytes, wie verlangt sind.
+    ///
+    /// **Zuerst der Rest aus dem Puffer, dann die Leitung.** Wird ein Literal
+    /// geholt, liegen die ersten seiner Bytes womöglich noch im Rest des letzten
+    /// Lesevorgangs – sie gehören zum Inhalt, nicht zur Antwortzeile. Ohne diese
+    /// Reihenfolge würde `read_exact` auf der Leitung warten, obwohl die Bytes
+    /// längst da sind, und der Abruf stünde wieder still.
+    async fn lies_genau(&mut self, ziel: &mut [u8]) -> Result<(), VerbindungsFehler> {
+        let mut geschrieben = 0usize;
+
+        if !self.unbenutzt.is_empty() {
+            let n = self.unbenutzt.len().min(ziel.len());
+            ziel[..n].copy_from_slice(&self.unbenutzt[..n]);
+            self.unbenutzt.drain(..n);
+            geschrieben = n;
         }
 
-        if gelesen == 0 {
-            self.beendet = true;
-            return Err(VerbindungsFehler::Geschlossen(
-                "Der Mailserver hat die Verbindung beendet".to_string(),
-            ));
+        if geschrieben == ziel.len() {
+            return Ok(());
         }
 
-        // Das Zeilenende gehört nicht zur Antwort.
-        while self
-            .puffer
+        let rest = &mut ziel[geschrieben..];
+
+        match tokio::time::timeout(ANTWORT_FRIST, self.inner.read_exact(rest)).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(VerbindungsFehler::Geschlossen(
+                "Der Mailserver hat die Verbindung mitten im Inhalt beendet".to_string(),
+            )),
+            Err(_) => {
+                self.beendet = true;
+                Err(VerbindungsFehler::Geschlossen(format!(
+                    "Der Mailserver hat den angekündigten Inhalt nicht innerhalb von {} Sekunden geliefert",
+                    ANTWORT_FRIST.as_secs()
+                )))
+            }
+        }
+    }
+
+    /// Liest eine Zeile ohne ihr Zeilenende – für Begrüßung und `+`-Zeilen, die
+    /// nur auf ein Stichwort angeschaut werden.
+    async fn lies_zeile(&mut self) -> Result<Vec<u8>, VerbindungsFehler> {
+        let mut zeile = self.lies_roh_zeile().await?;
+
+        // Das Zeilenende gehört hier nicht zur Antwort.
+        while zeile
             .last()
             .is_some_and(|zeichen| *zeichen == b'\n' || *zeichen == b'\r')
         {
-            self.puffer.pop();
+            zeile.pop();
         }
 
-        Ok(self.puffer.clone())
+        Ok(zeile)
+    }
+
+    /// **Liest eine Antwortzeile und holt die darin angekündigten Literale nach.**
+    ///
+    /// **IMAP schickt den Inhalt eines Abrufs nicht in der Zeile, sondern
+    /// danach.** So sieht ein Abruf aus:
+    ///
+    /// ```text
+    /// * 1 FETCH (BODY[] {11}\r\n
+    /// Hallo Kai!\r\n
+    /// )\r\n
+    /// ```
+    ///
+    /// Die Längenangabe steht am Ende der ersten Zeile, die elf Byte folgen erst
+    /// in den folgenden – und dürfen selbst Zeilenumbrüche enthalten. Wer nur bis
+    /// zum ersten `\n` liest, reicht dem Parser eine Zeile, die mitten im Literal
+    /// abbricht, und versteht die Antwort nicht.
+    ///
+    /// Betrifft **jeden** Abruf von Inhalt: die Vorschau in der Leiste
+    /// (`BODY[]`) ebenso wie das Öffnen einer Nachricht (`RFC822`).
+    ///
+    /// **Nicht synchronisierende Literale (`{n+}`) zählen nicht.** Sie kündigen
+    /// an, dass der Server sie *irgendwann* schickt, nicht jetzt; danach ginge der
+    /// Inhalt in die Auswertung der nächsten Antwort ein.
+    async fn lies_antwort(&mut self) -> Result<Vec<u8>, VerbindungsFehler> {
+        let mut roh = self.lies_roh_zeile().await?;
+
+        // **Suche ab hier**, nicht von vorn: Das Literal, das gerade abgeholt
+        // wurde, steht mit seiner Längenangabe weiter im Puffer – wer wieder von
+        // vorn sucht, findet es ein zweites Mal, liest dieselben Bytes noch mal
+        // und läuft in eine Schleife, an deren Ende die Leitung schief ist.
+        let mut ab = 0;
+
+        // **Mehrfach, nicht einmal.** Eine Antwort kann mehrere Literale tragen –
+        // etwa ein Abruf, der Text und Kopfzeile zugleich holt.
+        while let Some((versatz, laenge)) = literal_anteil(&roh[ab..]) {
+            if laenge > MAX_LINE_BYTES {
+                self.beendet = true;
+                return Err(VerbindungsFehler::Geschlossen(
+                    "Der Mailserver hat einen Inhalt angekündigt, der größer ist, \
+                     als Mimir lesen kann"
+                        .to_string(),
+                ));
+            }
+
+            let ende = ab + versatz;
+
+            let mut daten = vec![0u8; laenge];
+
+            if self.lies_genau(&mut daten).await.is_err() {
+                self.beendet = true;
+                return Err(VerbindungsFehler::Geschlossen(
+                    "Der Mailserver hat die Verbindung mitten im Inhalt beendet".to_string(),
+                ));
+            }
+
+            // Der Rest der Zeile – meist nur die schließende Klammer – folgt als
+            // eigene Zeile.
+            let rest = self.lies_roh_zeile().await?;
+
+            // **Das CRLF *vor* dem Inhalt bleibt, das danach kommt nicht dazu.**
+            // `imap-proto` liest ein Literal als `"{" Zahl "}" CRLF *CHAR8`: Die
+            // Leerzeile gehört vor die Daten, und auf die Daten folgt der Rest
+            // der Antwort unmittelbar. Ein eingeschobenes CRLF dazwischen
+            // liefe in den nächsten Anteil, und die Antwort wäre unlesbar.
+            let behalten = if roh.get(ende..ende + 2) == Some(b"\r\n") {
+                ende + 2
+            } else {
+                ende
+            };
+
+            roh.truncate(behalten);
+            roh.extend_from_slice(&daten);
+            roh.extend_from_slice(&rest);
+
+            // Alles bis hier ist erledigt: Marke, Inhalt und der Rest der Zeile.
+            ab = behalten + laenge;
+        }
+
+        Ok(roh)
     }
 
     /// Schreibt einen Befehl und sammelt alle Antworten bis zum fertigen Zustand.
     async fn befehl(&mut self, befehl: &str) -> Result<Vec<imap_proto::Response<'static>>, String> {
+        // **Jede Meldung nennt den Befehl, an dem sie hängen blieb.**
+        //
+        // Ohne das bekommt man nur den Text, den der Server schickte – und
+        // Gmail schickt bei einem unbekannten Befehl *502 5.5.1 Unrecognized
+        // command*, ohne zu sagen, welcher es war. Genau daran ist dieser Fehler
+        // zweimal gescheitert: Man wusste nicht, ob es die Anmeldung, das Öffnen
+        // des Ordners oder der Abruf war, und musste raten.
         let zeile = format!("{befehl}\r\n");
         self.inner
             .write_all(zeile.as_bytes())
@@ -184,21 +381,23 @@ where
 
         while !fertig && !self.beendet {
             let roh = self
-                .lies_zeile()
+                .lies_antwort()
                 .await
                 .map_err(|fehler| fehler.to_string())?;
 
             let (rest, antwort) = imap_proto::Response::parse(&roh).map_err(|_| {
                 format!(
-                    "Der Mailserver hat unverständlich geantwortet: {}",
-                    String::from_utf8_lossy(&roh)
+                    "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich \
+                     geantwortet: {}",
+                    ohne_zeilenende(&roh)
                 )
             })?;
 
             if !rest.is_empty() {
                 return Err(format!(
-                    "Der Mailserver hat unverständlich geantwortet: {}",
-                    String::from_utf8_lossy(rest)
+                    "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich \
+                     geantwortet: {}",
+                    ohne_zeilenende(rest)
                 ));
             }
 
@@ -209,7 +408,7 @@ where
                     // (meist falsches Passwort), `BAD` heißt „Kommando kaputt".
                     // Beides heißt für Mimir: Der Zugang ist nicht da.
                     _ => {
-                        return Err(status_text(status));
+                        return Err(format!("{} – bei `{befehl}`", status_text(status)));
                     }
                 }
                 fertig = true;
@@ -225,6 +424,66 @@ where
 
         Ok(antworten)
     }
+}
+
+/// Wo in einer Zeile ein Literal angekündigt wird, und wie viele Byte folgen.
+///
+/// Liefert `(Stelle hinter der schließenden Klammer, Länge)`.
+///
+/// **`{n+}` zählt nicht.** Ein nicht synchronisierendes Literal sagt dem Client,
+/// dass der Server es *irgendwann* schickt, auch wenn kein Befeld danach fragt –
+/// die Daten stehen also nicht im nächsten Befehl, sondern irgendwann später.
+/// Würde man es hier als Literal lesen, käme der eigentliche Inhalt in die
+/// Auswertung der folgenden Antwort hinein.
+fn literal_anteil(zeile: &[u8]) -> Option<(usize, usize)> {
+    let mut position = 0;
+
+    while position < zeile.len() {
+        if zeile[position] != b'{' {
+            position += 1;
+            continue;
+        }
+
+        let ziffern_start = position + 1;
+        let mut ziffern_ende = ziffern_start;
+
+        while ziffern_ende < zeile.len() && zeile[ziffern_ende].is_ascii_digit() {
+            ziffern_ende += 1;
+        }
+
+        if ziffern_ende == ziffern_start
+            || ziffern_ende >= zeile.len()
+            || zeile[ziffern_ende] != b'}'
+        {
+            position += 1;
+            continue;
+        }
+
+        // `{n+}` – nicht synchronisierend, kein Inhalt für diese Antwort.
+        if zeile.get(ziffern_ende + 1) == Some(&b'+') {
+            position = ziffern_ende + 1;
+            continue;
+        }
+
+        let laenge = std::str::from_utf8(&zeile[ziffern_start..ziffern_ende])
+            .ok()
+            .and_then(|zahl| zahl.parse::<usize>().ok());
+
+        return laenge.map(|laenge| (ziffern_ende + 1, laenge));
+    }
+
+    None
+}
+
+/// Die Zeile ohne ihr Zeilenende – für Meldungen an den Benutzer.
+///
+/// Nur für Fehlertexte: Der Parser braucht das CRLF, ein Mensch nicht, und eine
+/// Meldung, die mit einem unsichtbaren Wagenrücklauf endet, liest sich wie ein
+/// Absturz.
+fn ohne_zeilenende(zeile: &[u8]) -> String {
+    String::from_utf8_lossy(zeile)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
 }
 
 /// Die Meldung des Servers als Text. Sie landet im Chat und muss lesbar sein –
@@ -281,7 +540,7 @@ pub async fn verbinde(
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(if grund.is_empty() {
-                "In diesem System ist kein Zertifikatsspeicher gefunden – die Mailverbindung                  kann nicht aufgebaut werden"
+                "In diesem System ist kein Zertifikatsspeicher gefunden – die Mailverbindung kann nicht aufgebaut werden"
                     .to_string()
             } else {
                 format!("Die Zertifikate des Systems konnten nicht gelesen werden: {grund}")
@@ -353,6 +612,20 @@ fn zerlege_server(server: &str) -> Result<(String, u16), String> {
         return Err("Die IMAP-Adresse nennt keinen Server".to_string());
     }
 
+    // **465 ist der Port für Postausgang, nicht für Posteingang.** Es ist der
+    // häufigste Fehler bei Gmail, weil dort beide Adressen nebeneinander
+    // eingetragen werden und sich nur in der Zahl unterscheiden. Mimir erkennt
+    // das an der Zahl und sagt, welche hingehört: Auf 465 antwortet kein
+    // IMAP-Server, und statt einer Meldung käme nur eine Verbindung, die
+    // wartet – der schlimmste Fehler, den ein Mailprogramm machen kann, weil er
+    // nicht als Fehler auftritt, sondern als Warten.
+    if port == 465 {
+        return Err(format!(
+            "Port 465 gehört zu SMTP, nicht zu IMAP. Für „{host}“ gehört 993 in die \
+             Adresse – etwa imaps://{host}:993."
+        ));
+    }
+
     Ok((host.to_string(), port))
 }
 
@@ -360,8 +633,20 @@ fn zerlege_server(server: &str) -> Result<(String, u16), String> {
 ///
 /// **AUTHENTICATE PLAIN statt LOGIN.** Bei `LOGIN` stehen Benutzername und
 /// Passwort im Klartext in derselben Zeile; bei `AUTHENTICATE` kommt nur der
-/// Name des Verfahrens, das Passwort folgt in einer eigenen Antwort. Beides
-/// läuft bei IMAPS über TLS, aber der Unterschied ist kostenlos.
+/// **In drei Schritten, nicht in einem Befehl.** `AUTHENTICATE` ist eine
+/// Unterhaltung: Der Server antwortet mit `+`, *wartet* auf die Zugangsdaten und
+/// meldet das Ergebnis erst danach. `befehl` liest dagegen bis zum fertigen
+/// Zustand – es hätte also sowohl das `+` als auch das Ergebnis gelesen, bevor
+/// überhaupt etwas geschickt worden wäre. Deshalb hier Zeile für Zeile.
+///
+/// **Und es wird bis zur *getaggten* Antwort gelesen, nicht nur bis zur ersten.**
+/// Vor dem Ergebnis dürfen beliebig viele ungetaggte Zeilen kommen – `* OK
+/// [CAPABILITY …]`, Fehlermeldungen, Zustandsänderungen. Wer nach dem
+/// Zugangsdatensatz genau **eine** Zeile liest und sie auswertet, bekommt die
+/// erste davon und meldet sie als Fehlschlag – während die eigentliche Antwort,
+/// `A1 NO [AUTHENTICATIONFAILED]`, ungegelesen im Strom bleibt. Genau das ist
+/// geschehen: Die Leiste zeigte eine unlesbare Serverzeile statt der Antwort,
+/// die den Benutzer wirklich weitergebracht hätte.
 async fn anmelden<T>(
     verbindung: &mut Verbindung<T>,
     benutzername: &str,
@@ -371,32 +656,187 @@ where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     // `PLAIN` wird angeboten, weil es das Verfahren ist, das ein App-Passwort
-    // trägt. `LOGIN` bleibt als Rückfall, weil manche Server es nur anbieten.
-    let antworten = verbindung
-        .befehl("A1 AUTHENTICATE PLAIN")
-        .await
-        .unwrap_or_default();
+    // trägt. **`LOGIN` ist kein Rückfall** – es steht zwar in manchen
+    // Mailprogrammen als Ausweichverfahren, hier gibt es es nicht: Bei `LOGIN`
+    // stehen Benutzername und Passwort in derselben Zeile im Klartext, und
+    // beides gehört in eine Antwort für sich. Meldet sich ein Server damit, dass
+    // er `AUTHENTICATE` nicht kennt, sagt Mimir das – statt sich mit einem
+    // zweiten, unsichereren Verfahren durchzuschlagen.
+    //
+    // **Ein Fehler hier wird nicht verschluckt.** Einst stand hier ein
+    // `unwrap_or_default()`: Kam vom Server keine parsebare Antwort, galt die
+    // Anmeldung als geglückt, der ganze weitere Zustand wurde mit leeren
+    // Antworten gefüttert, und der Benutzer sah erst an der *Nachrichtenliste*
+    // eine Meldung, die nichts mit dem eigentlichen Problem zu tun hatte.
+    let befehl = format!("{ANMELDE_TAG} AUTHENTICATE PLAIN");
+    schreibe(verbindung, &befehl).await?;
 
-    if !antworten.is_empty() {
-        let base64 = base64_encode(format!("\0{benutzername}\0{passwort}").as_bytes());
-        let zeile = format!("{base64}\r\n");
-        verbindung
-            .inner
-            .write_all(zeile.as_bytes())
-            .await
-            .map_err(io_text)?;
-        verbindung.inner.flush().await.map_err(io_text)?;
+    // Bis der Server entweder um die Zugangsdaten bittet oder schon ein Ergebnis
+    // schickt – etwa weil er das Verfahren nicht kennt.
+    let mut zugangsdaten_gesendet = false;
 
-        // Hier steht das Ergebnis der Anmeldung, ohne `befehl`, weil zwischen
-        // Frage und Antwort eine `+`-Zeile stand.
-        let roh = verbindung.lies_zeile().await.map_err(|f| f.to_string())?;
+    while !zugangsdaten_gesendet {
+        let zeile = lies_bis_getaggt(verbindung, ANMELDE_TAG, &befehl, true).await?;
 
-        if roh.starts_with(b"+") {
-            return Err("Der Mailserver hat die Anmeldedaten nicht angenommen".to_string());
+        if zeile.starts_with(b"+") {
+            let base64 = base64_encode(format!("\0{benutzername}\0{passwort}").as_bytes());
+            schreibe(verbindung, &base64).await?;
+            zugangsdaten_gesendet = true;
+            continue;
+        }
+
+        return bewerte_ergebnis(&zeile, &befehl);
+    }
+
+    bewerte_ergebnis(
+        &lies_bis_getaggt(verbindung, ANMELDE_TAG, &befehl, false).await?,
+        &befehl,
+    )
+}
+
+/// Der Tag, unter dem Mimir sich anmeldet.
+const ANMELDE_TAG: &str = "A1";
+
+/// So viele ungetaggte Zeilen werden übersprungen, bevor es als Fehler gilt.
+///
+/// Eine Zahl und keine Zeit: Es gibt keine Wartezeit, nur Zeilen. Und die Zahl
+/// ist klein, weil ein Server, der zehn Zeilen ohne Antwort auf einen Befehl
+/// schickt, entweder kaputt ist oder Mimir die Antwort schon gelesen und
+/// verworfen hat – in beiden Fällen hilft weiteres Warten nicht.
+const MAX_UNTAGGTE_ZEILEN: usize = 32;
+
+/// **Liest Zeilen, bis eine Antwort mit dem eigenen Tag kommt** – oder, wenn
+/// `plus` gesetzt ist, bis eine `+`-Zeile kommt.
+///
+/// **Ungetaggte Zeilen davor werden übersprungen.** Sie sind Statusmeldungen,
+/// keine Antworten: `* CAPABILITY …`, `* 231 EXISTS`, Fehlerzeilen eines Servers.
+/// Vor dem Ergebnis der Anmeldung steht dort erfahrungsgemäß eine, die der
+/// Protokoll-Parser nicht lesen kann – Gmail schickt auf einen unbekannten
+/// Befehl `* 502 5.5.1 Unrecognized command` und **danach** erst die getaggte
+/// Antwort, die sagt, was wirklich los war.
+///
+/// **Und `+` ist keine Antwort, sondern eine Frage.** Der Server bittet damit um
+/// die Zugangsdaten und wartet darauf – wer sie überlesen will, wartet seinerseits
+/// auf eine Antwort, die erst nach den Zugangsdaten kommen kann. Beide warten
+/// ewig. Deshalb fragt diese Funktion die `+`-Zeile ab, wenn man sie braucht.
+async fn lies_bis_getaggt<T>(
+    verbindung: &mut Verbindung<T>,
+    tag: &str,
+    befehl: &str,
+    plus: bool,
+) -> Result<Vec<u8>, String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut unlesbar: Option<Vec<u8>> = None;
+
+    for _ in 0..MAX_UNTAGGTE_ZEILEN {
+        let roh = match verbindung.lies_antwort().await {
+            Ok(roh) => roh,
+            // **Die Verbindung ist weg, während noch keine Antwort da war.** Die
+            // zuletzt gesehene unlesbare Zeile erklärt mehr als der Abbruch – und
+            // der Befehl wird ohnehin genannt.
+            Err(abbruch) => {
+                return Err(match unlesbar {
+                    Some(roh) => format!(
+                        "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich \
+                         geantwortet: {}\n(Die Verbindung wurde danach beendet: {abbruch})",
+                        ohne_zeilenende(&roh)
+                    ),
+                    None => abbruch.to_string(),
+                });
+            }
+        };
+
+        if plus && roh.starts_with(b"+") {
+            return Ok(roh);
+        }
+
+        match imap_proto::Response::parse(&roh) {
+            Ok((
+                rest,
+                imap_proto::Response::Done {
+                    tag: empfaenger, ..
+                },
+            )) if !rest.is_empty() || empfaenger.0 == tag => {
+                if !rest.is_empty() {
+                    return Err(format!(
+                        "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich \
+                         geantwortet: {}",
+                        ohne_zeilenende(rest)
+                    ));
+                }
+
+                return Ok(roh);
+            }
+            // Ungetaggt, aber lesbar: Status, keine Antwort. Weiterlesen.
+            Ok(_) => continue,
+            // Unlesbar: merken und weiterlesen. Es kann eine ungetaggte Zeile
+            // sein, vor der noch die eigentliche Antwort kommt.
+            Err(_) => unlesbar = Some(roh),
         }
     }
 
-    Ok(())
+    Err(match unlesbar {
+        Some(roh) => format!(
+            "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich geantwortet: {}",
+            ohne_zeilenende(&roh)
+        ),
+        None => format!("Der Mailserver hat auf den Befehl \"{befehl}\" nicht geantwortet."),
+    })
+}
+
+/// Prüft das `A1 OK` / `A1 NO` nach der Anmeldung – und nennt den Befehl, wenn
+/// es keines von beidem ist.
+fn bewerte_ergebnis(roh: &[u8], befehl: &str) -> Result<(), String> {
+    let (rest, antwort) = imap_proto::Response::parse(roh).map_err(|_| {
+        format!(
+            "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich geantwortet: {}",
+            ohne_zeilenende(roh)
+        )
+    })?;
+
+    if !rest.is_empty() {
+        return Err(format!(
+            "Der Mailserver hat auf den Befehl \"{befehl}\" unverständlich geantwortet: {}",
+            ohne_zeilenende(rest)
+        ));
+    }
+
+    match antwort {
+        imap_proto::Response::Done {
+            status: imap_proto::Status::Ok,
+            ..
+        } => Ok(()),
+        imap_proto::Response::Done { status, .. } => {
+            Err(format!("{} – bei `{befehl}`", status_text(&status)))
+        }
+        _ => Err(format!(
+            "Der Mailserver hat auf den Befehl \"{befehl}\" nicht wie erwartet geantwortet."
+        )),
+    }
+}
+
+/// Schreibt einen Befehl oder eine Antwortzeile.
+async fn schreibe<T>(verbindung: &mut Verbindung<T>, zeile: &str) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // **Auch das Schreiben hat eine Frist.** Eine Verbindung, die im Lesen
+    // hängen kann, kann es im Schreiben auch: Der Puffer ist voll, der Gegner
+    // liest nicht, und ohne Frist wartet der Auftrag still vor sich hin.
+    tokio::time::timeout(COMMAND_TIMEOUT, async {
+        verbindung
+            .inner
+            .write_all(format!("{zeile}\r\n").as_bytes())
+            .await
+            .map_err(io_text)?;
+        verbindung.inner.flush().await.map_err(io_text)
+    })
+    .await
+    .map_err(|_| {
+        "Der Mailserver nimmt keine Befehle mehr an – die Verbindung ist zu lange offen."
+    })?
 }
 
 /// Kodiert Base64 ohne Crate: Die Eingabe sind genau zwei Felder, und für ein
@@ -443,12 +883,22 @@ fn base64_encode(daten: &[u8]) -> String {
     ergebnis
 }
 
-/// Wählt einen Ordner aus und holt dessen Nachrichten.
-pub async fn hole_nachrichten(
-    verbindung: &mut Verbindung<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+/// Wählt einen Ordner aus.
+///
+/// **Eigener Schritt, weil beides ihn braucht.** Die Leiste holt Nachrichten
+/// und das Fenster den Text einer einzelnen Nachricht – und beide brauchen
+/// vorher denselben Zustand: einen *ausgewählten* Ordner. Ohne `SELECT` steht
+/// die Verbindung im Zustand „angemeldet, aber nichts geöffnet", und ein `FETCH`
+/// wird vom Server mit `BAD` beantwortet: „Please select a mailbox first".
+/// Genau das kam zurück, und die Meldung sprach von einem kaputten Befehl, obwohl
+/// der Befehl richtig war – was fehlte, war der Zustand davor.
+async fn waehle_ordner<T>(
+    verbindung: &mut Verbindung<T>,
     ordner: &str,
-    grenze: usize,
-) -> Result<Vec<NachrichtKopf>, String> {
+) -> Result<Vec<imap_proto::Response<'static>>, String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // Der Ordnername kommt aus der Konfiguration und wird deshalb
     // ausgeschieden, bevor er in einen Befehl wandert.
     let ordner = ordner.trim();
@@ -464,15 +914,45 @@ pub async fn hole_nachrichten(
         return Err("Der Ordnername enthält Zeichen, die IMAP nicht sicher annimmt".to_string());
     }
 
-    verbindung
-        .befehl(&format!("B1 SELECT \"{ordner}\""))
-        .await?;
+    verbindung.befehl(&format!("B1 SELECT \"{ordner}\"")).await
+}
 
-    // Nur die letzten `grenze` Nachrichten, und die mit den höchsten Nummern
-    // sind die neuesten.
+/// Wählt einen Ordner aus und holt dessen Nachrichten.
+pub async fn hole_nachrichten<T>(
+    verbindung: &mut Verbindung<T>,
+    ordner: &str,
+    grenze: usize,
+) -> Result<Vec<NachrichtKopf>, String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let gewaehlt = waehle_ordner(verbindung, ordner).await?;
+
+    // **Wie viele Nachrichten der Ordner hat.** Die Zahl steht in der Antwort auf
+    // `SELECT`, und ohne sie lässt sich die gewünschte Menge nicht bilden.
+    let vorhanden = gewaehlt.iter().find_map(|antwort| match antwort {
+        imap_proto::Response::MailboxData(imap_proto::MailboxDatum::Exists(anzahl)) => {
+            Some(*anzahl as usize)
+        }
+        _ => None,
+    });
+
+    // **Ein Ordner ohne Nachrichten ist ein gültiger Zustand**, kein Fehler: Die
+    // Leiste sagt „Keine Nachrichten", und ein `FETCH` ins Leere wäre nur eine
+    // weitere Gelegenheit für eine Fehlermeldung, die nichts erklärt.
+    if vorhanden == Some(0) {
+        return Ok(Vec::new());
+    }
+
+    let menge = nachrichten_menge(vorhanden, grenze);
+
+    if menge.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let antworten = verbindung
         .befehl(&format!(
-            "B2 FETCH 1:{grenze}:{grenze} (UID FLAGS ENVELOPE RFC822.SIZE)"
+            "B2 FETCH {menge} (UID FLAGS ENVELOPE RFC822.SIZE)"
         ))
         .await?;
 
@@ -512,6 +992,7 @@ pub async fn hole_nachrichten(
                 .collect(),
             gelesen,
             bytes,
+            vorschau: String::new(),
         });
     }
 
@@ -519,14 +1000,178 @@ pub async fn hole_nachrichten(
     kopfzeilen.sort_by_key(|nachricht| std::cmp::Reverse(nachricht.nummer));
     kopfzeilen.truncate(grenze);
 
+    hole_vorschauen(verbindung, &mut kopfzeilen, &menge).await;
+
     Ok(kopfzeilen)
 }
 
+/// **Die Nachrichtenmenge, die ein `FETCH` bekommen soll.**
+///
+/// **Die Formulierung entscheidet, ob der Server den Befehl überhaupt
+/// versteht.** Nach RFC 3501 ist ein Element einer Menge entweder eine einzelne
+/// Nummer (`5`) oder ein Bereich (`5:9`) – nicht `1:5:5`. Die Form
+/// `1:{grenze}:{grenze}` sah aus wie „die ersten `grenze`", ergibt aber eine
+/// ungültige Menge, und Gmail antwortet darauf mit *„Unrecognized command"*.
+///
+/// **Und die Formulierung sagt auch, *welche* Nachrichten kommen sollen.** Ein
+/// Ordner nummeriert von 1, und die höchsten Nummern sind die neuesten – die
+/// gewünschten `grenze` stehen also ganz hinten. `1:{grenze}` hätte die
+/// *ältesten* geholt und wäre, selbst wenn der Server es verstünde, genau
+/// umgekehrt herum.
+#[allow(dead_code)]
+fn nachrichten_menge(vorhanden: Option<usize>, grenze: usize) -> String {
+    let Some(vorhanden) = vorhanden else {
+        // **Ohne `EXISTS`-Antwort** lässt sich „die letzten N" nicht bilden. Dann
+        // alles holen und hinten abschneiden – mehr Arbeit für den Server, aber
+        // nie ein ungültiger Befehl.
+        return "1:*".to_string();
+    };
+
+    if vorhanden == 0 || grenze == 0 {
+        return String::new();
+    }
+
+    let von = vorhanden.saturating_sub(grenze.saturating_sub(1)).max(1);
+
+    format!("{von}:{vorhanden}")
+}
+
+/// **Holt zu jedem Kopf die ersten Zeilen des Textes — in einer Runde.**
+///
+/// **Ein Abruf für die ganze Liste**, nicht einer je Nachricht: Bei fünfzig
+/// Nachrichten wären das fünfzig Anfragen und fünfzig Wartezeiten, und die
+/// Leiste wäre bei jedem Aufruf spürbar langsam. IMAP darf dieselbe Sektion für
+/// eine Menge von Nummern anfordern, und der Server antwortet mit einer Zeile
+/// je Nachricht – die Nummern stehen in der Antwort, sie müssen also nicht
+/// erraten werden.
+///
+/// **Warum begrenzt, und warum `PEEK`.** `<0.2048` holt die ersten 2048 Bytes
+/// der Nachricht, nicht ihre Rumpfes: Die Kopfzeilen stehen mit drin und werden
+/// unten abgetrennt, der Rest ist Anzeige. Ohne die Grenze käme bei fünfzig
+/// Nachrichten der ganze Postfachinhalt über die Leitung – und die Leiste
+/// braucht zwei Zeilen, nicht fünfzig Nachrichten.
+///
+/// `PEEK` statt `BODY` ist der Unterschied zwischen einer Liste und einem
+/// Postfach, in dem beim Scrollen alles als gelesen gilt: `PEEK` setzt das
+/// Gelesen-Flag nicht. Genau dieses Verhalten ist der Grund, warum Mailprogramme
+/// es verwenden, und Mimir gäbe es sonst auf.
+///
+/// **Ein Server, der das nicht kann, verliert nur die Vorschau.** Der Abruf
+/// schlägt fehl, die Liste steht trotzdem da – eine kürzere Liste wäre ein
+/// schlechterer Tausch als ein fehlender Anriss.
+async fn hole_vorschauen<T>(
+    verbindung: &mut Verbindung<T>,
+    kopfzeilen: &mut [NachrichtKopf],
+    menge: &str,
+) where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if kopfzeilen.is_empty() || menge.is_empty() {
+        return;
+    }
+
+    let antworten = match verbindung
+        .befehl(&format!(
+            "B3 FETCH {menge} (BODY.PEEK[]<0.{VORSCHAU_BYTES}>)"
+        ))
+        .await
+    {
+        Ok(antworten) => antworten,
+        Err(fehler) => {
+            println!(
+                "Der Mailserver konnte die Vorschauen nicht liefern ({fehler}). Die Liste \
+                 zeigt Absender und Betreff wie bisher."
+            );
+            return;
+        }
+    };
+
+    // **Nach Nummer, nicht nach Reihenfolge.** Die Antwort kommt zwar in der
+    // Reihenfolge der Anfrage, aber der Server darf sie auch in einer anderen
+    // liefern, und eine Vorschau am falschen Kopf sähe aus wie eine aus dem
+    // falschen Postfach.
+    //
+    // Gespeichert wird **schon der fertige Text**, nicht der Rohabchnitt: Die
+    // Antwort hängt an einem Puffer, der mit der Schleife endet, und 50 Nachrichten
+    // mit je 2 KiB Rohbytes im Speicher zu halten, um sie hinterher abzuschneiden,
+    // wäre genau die Menge, die diese Funktion vermeiden soll.
+    let mut vorschauen: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+
+    for antwort in antworten {
+        let imap_proto::Response::Fetch(nummer, werte) = antwort else {
+            continue;
+        };
+
+        for wert in werte {
+            let imap_proto::AttributeValue::BodySection { data, .. } = wert else {
+                continue;
+            };
+
+            if let Some(roh) = data {
+                vorschauen.insert(nummer, vorschau_aus_chunk(roh.as_ref()));
+            }
+        }
+    }
+
+    for kopf in kopfzeilen.iter_mut() {
+        if let Some(vorschau) = vorschauen.get(&kopf.nummer) {
+            kopf.vorschau = vorschau.clone();
+        }
+    }
+}
+
+/// Macht aus einem begrenzten Nachrichten-Anfang zwei lesbare Zeilen.
+///
+/// **Bricht in Absätze, nicht mitten im Satz.** Eine Vorschau, die mitten im Wort
+/// endet, sieht aus wie ein vollständiger Gedanke – und liest sich als einer,
+/// auch wenn sie keiner ist. Wer mehr sehen will, öffnet die Nachricht.
+///
+/// **Leer, statt falsch.** Ohne Kopf-Rumpf-Trenner ist der ganze Anhang ein
+/// Kopf; ihn als Vorschau zu zeigen hieße, dem Benutzer `Content-Type:
+/// multipart/mixed` als ersten Satz einer Mail vorzumachen. Dann lieber nichts.
+/// Dasselbe gilt für eine Nachricht ohne Textteil: Eine reine HTML-Mail hat
+/// keinen Text, den man zeigen dürfte.
+fn vorschau_aus_chunk(chunk: &[u8]) -> String {
+    let (aufgeteilt, _anhaenge) = zerlege_mime(chunk);
+
+    let text = aufgeteilt.text;
+    let mut absaetze = Vec::new();
+
+    for absatz in text.split("\n\n") {
+        // Zeilenumbrüche innerhalb eines Absatzes sind Umbruch, nicht Absatz:
+        // Eine Signatur mit fünf Leerzeilen ist kein fünfteiliger Text.
+        let zeile = absatz
+            .lines()
+            .map(|zeile| zeile.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if !zeile.is_empty() {
+            absaetze.push(zeile);
+        }
+    }
+
+    kuerze(&absaetze.join("\n\n"), MAX_MAIL_PREVIEW_BYTES)
+}
+
 /// Liest den Text einer Nachricht.
-pub async fn hole_text(
-    verbindung: &mut Verbindung<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+///
+/// **Erst der Ordner, dann die Nachricht.** `FETCH` gilt nur in einem
+/// ausgewählten Ordner; wer ihn vorher schickt, bekommt `BAD` zurück und sucht
+/// den Fehler im Befehl statt im fehlenden Zustand davor.
+pub async fn hole_text<T>(
+    verbindung: &mut Verbindung<T>,
+    ordner: &str,
     nummer: u32,
-) -> Result<NachrichtVoll, String> {
+) -> Result<NachrichtVoll, String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    waehle_ordner(verbindung, ordner).await?;
+
     let antworten = verbindung
         .befehl(&format!("B3 FETCH {nummer} (UID FLAGS ENVELOPE RFC822)"))
         .await?;
@@ -565,6 +1210,36 @@ pub async fn hole_text(
     Err("Diese Nachricht konnte nicht gelesen werden".to_string())
 }
 
+/// Markiert eine Nachricht als gelesen – oder als ungelesen.
+///
+/// **Auch hier gilt: erst der Ordner, dann der Befehl.** `STORE` wirkt nur im
+/// ausgewählten Ordner; ohne `SELECT` lehnt der Server ihn ab.
+///
+/// **`+FLAGS` statt `.FLAGS`.** RFC 3501 hat die alte Form abgelöst; Gmail
+/// nimmt beide, aber ein Server, der nur eine kennt, wäre mit der alten Form
+/// nicht bedienbar. `\\Seen` ist das einzige Flag, das hier vergeben wird: Mimir
+/// zeigt einen Ordner, keinen Posteingang mit drei Spalten, und ein zweites
+/// Flag wäre eine Anzeige ohne Wirkung.
+pub async fn setze_gelesen<T>(
+    verbindung: &mut Verbindung<T>,
+    ordner: &str,
+    nummer: u32,
+    gelesen: bool,
+) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    waehle_ordner(verbindung, ordner).await?;
+
+    let art = if gelesen { "+FLAGS" } else { "-FLAGS" };
+
+    verbindung
+        .befehl(&format!("B4 STORE {nummer} {art} (\\Seen)"))
+        .await?;
+
+    Ok(())
+}
+
 /// Die Felder, die aus einer rohen Nachricht gezogen werden.
 struct Aufgeteilt {
     kopf: NachrichtKopf,
@@ -585,77 +1260,100 @@ struct Aufgeteilt {
 fn zerlege_mime(roh: &[u8]) -> (Aufgeteilt, Vec<String>) {
     let (kopfzeilen, rumpf) = trenne_kopf(roh);
     let koerper = value(&kopfzeilen, "content-type").unwrap_or_default();
+    let koerper_klein = koerper.trim_start().to_ascii_lowercase();
 
     let mut anhaenge = Vec::new();
     let mut text = None;
-    let mut tiefen = 0;
 
-    for teil in multipart(rumpf, &koerper) {
-        let (teil_kopf, teil_rumpf) = trenne_kopf(teil);
-        let teil_typ = value(&teil_kopf, "content-type").unwrap_or_default();
-        // **Nur der Feldname wird kleingeschrieben, nicht sein Wert.** Ein
-        // `filename=Rechnung.pdf` stand sonst als `rechnung.pdf` in der Leiste –
-        // und `Vertrag.PDF` hieße fortan `vertrag.pdf`. Der Name gehört dem
-        // Absender, und der einzige Grund für das Kleinschreiben ist, ihn zu
-        // finden; gefunden wird er über den Schlüssel, nicht über den Wert.
-        let disposition = value(&teil_kopf, "content-disposition").unwrap_or_default();
-
-        let datei = disposition
-            .split(';')
-            .skip(1)
-            .filter_map(|teil| {
-                let (schluessel, wert) = teil.trim().split_once('=')?;
-                schluessel
-                    .trim()
-                    .eq_ignore_ascii_case("filename")
-                    .then(|| wert.trim().trim_matches(['"', '\'']).to_string())
-            })
-            .next();
-
-        if let Some(datei) = datei {
-            anhaenge.push(datei);
-            continue;
-        }
-
-        if teil_typ.starts_with("multipart/") {
-            // Verschachtelte Mehrteile: eine Ebene tiefer, aber begrenzt. Eine
-            // Mail mit zehn Ebenen Verschachtelung ist ein Angriff auf die
-            // Verarbeitung, kein Aufruf von Mimir.
-            tiefen += 1;
-            if tiefen > 4 {
-                continue;
-            }
-            for t in multipart(teil_rumpf, &teil_typ) {
-                let (k, r) = trenne_kopf(t);
-                let datei_k = value(&k, "content-disposition")
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if datei_k.contains("filename=") {
-                    continue;
-                }
-                if text.is_none()
-                    && value(&k, "content-type")
-                        .unwrap_or_default()
-                        .starts_with("text/plain")
-                {
-                    text = Some(dekodiere_inhalt(
-                        r,
-                        &value(&k, "content-transfer-encoding")
-                            .unwrap_or_default()
-                            .to_ascii_lowercase(),
-                    ));
-                }
-            }
-            continue;
-        }
-
-        if teil_typ.starts_with("text/plain") && text.is_none() {
+    // **Kein Mehrteil heißt: der Rumpf *ist* die Nachricht.**
+    //
+    // Ohne `boundary` gibt es keinen Teil, dessen eigener Kopf einen
+    // `content-type` tragen könnte – der einzige Kopf mit diesem Feld ist der
+    // Kopf der Nachricht. Ginge man trotzdem in die Teilschleife, zerlegte sie den
+    // *Text* als wäre er ein Kopf, fände keinen Typ und gäbe eine leere Nachricht
+    // zurück: So verlor Mimir den Text **jeder einfachen Textmail** – also der
+    // allermeisten. Es war nur nicht aufgefallen, weil die Vorschau in der Leiste
+    // erst mit derselben Funktion gebaut wurde und man an einer gleich leeren
+    // Liste nichts sieht, was fehlt.
+    if !koerper_klein.starts_with("multipart/") {
+        if koerper_klein.starts_with("text/plain") {
             text = Some(dekodiere_inhalt(
-                teil_rumpf,
-                &value(&teil_kopf, "content-transfer-encoding")
+                rumpf,
+                &value(&kopfzeilen, "content-transfer-encoding")
                     .unwrap_or_default()
                     .to_ascii_lowercase(),
             ));
+        }
+    } else {
+        let mut tiefen = 0;
+
+        for teil in multipart(rumpf, &koerper) {
+            let (teil_kopf, teil_rumpf) = trenne_kopf(teil);
+            let teil_typ = value(&teil_kopf, "content-type").unwrap_or_default();
+            // **Nur der Feldname wird kleingeschrieben, nicht sein Wert.** Ein
+            // `filename=Rechnung.pdf` stand sonst als `rechnung.pdf` in der Leiste –
+            // und `Vertrag.PDF` hieße fortan `vertrag.pdf`. Der Name gehört dem
+            // Absender, und der einzige Grund für das Kleinschreiben ist, ihn zu
+            // finden; gefunden wird er über den Schlüssel, nicht über den Wert.
+            let disposition = value(&teil_kopf, "content-disposition").unwrap_or_default();
+
+            let datei = disposition
+                .split(';')
+                .skip(1)
+                .filter_map(|teil| {
+                    let (schluessel, wert) = teil.trim().split_once('=')?;
+                    schluessel
+                        .trim()
+                        .eq_ignore_ascii_case("filename")
+                        .then(|| wert.trim().trim_matches(['"', '\'']).to_string())
+                })
+                .next();
+
+            if let Some(datei) = datei {
+                anhaenge.push(datei);
+                continue;
+            }
+
+            if teil_typ.starts_with("multipart/") {
+                // Verschachtelte Mehrteile: eine Ebene tiefer, aber begrenzt. Eine
+                // Mail mit zehn Ebenen Verschachtelung ist ein Angriff auf die
+                // Verarbeitung, kein Aufruf von Mimir.
+                tiefen += 1;
+                if tiefen > 4 {
+                    continue;
+                }
+                for t in multipart(teil_rumpf, &teil_typ) {
+                    let (k, r) = trenne_kopf(t);
+                    let datei_k = value(&k, "content-disposition")
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if datei_k.contains("filename=") {
+                        continue;
+                    }
+                    if text.is_none()
+                        && value(&k, "content-type")
+                            .unwrap_or_default()
+                            .starts_with("text/plain")
+                    {
+                        text = Some(dekodiere_inhalt(
+                            r,
+                            &value(&k, "content-transfer-encoding")
+                                .unwrap_or_default()
+                                .to_ascii_lowercase(),
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            if teil_typ.starts_with("text/plain") && text.is_none() {
+                text = Some(dekodiere_inhalt(
+                    teil_rumpf,
+                    &value(&teil_kopf, "content-transfer-encoding")
+                        .unwrap_or_default()
+                        .to_ascii_lowercase(),
+                ));
+            }
         }
     }
 
@@ -676,6 +1374,12 @@ fn zerlege_mime(roh: &[u8]) -> (Aufgeteilt, Vec<String>) {
                 datum: value(&kopfzeilen, "date").unwrap_or_default(),
                 gelesen: true,
                 bytes: roh.len() as u32,
+                // **Hier steht keine Vorschau.** Diese Zerlegung läuft beim Öffnen
+                // einer einzelnen Nachricht; die Vorschau gehört in die Liste und
+                // wird dort aus einem begrenzten Abruf gebildet. Sie hier zu
+                // füllen hieße, den ganzen Text an einer Stelle zu lesen, die ihn
+                // nicht braucht.
+                vorschau: String::new(),
             },
             an: aufloese_namen(&an),
             cc: aufloese_namen(&cc),
@@ -750,6 +1454,26 @@ fn multipart<'a>(rumpf: &'a [u8], koerper_typ: &str) -> Vec<&'a [u8]> {
         });
 
         position = von.unwrap_or(danach);
+    }
+
+    // **Was nach dem letzten Trenner noch da ist, gehört zum letzten Anteil.**
+    //
+    // Eine vollständige Nachricht endet auf `--Grenze--`, und dort bricht die
+    // Schleiche vorher ab – dieser Rest ist also immer nur bei einer
+    // *abgeschnittenen* Nachricht vorhanden. Genau die holt der begrenzte Abruf
+    // für die Vorschau: Die ersten 2048 Bytes einer Mail mit großem Anhang gehen
+    // mitten in einem Mehrteil aus, und ohne diesen Rest zeigte die Leiste für
+    // solche Nachrichten gar nichts.
+    if let Some(start) = von {
+        let mut bis = rumpf.len();
+
+        if rumpf[..bis].ends_with(b"\r\n") {
+            bis -= 2;
+        } else if rumpf[..bis].ends_with(b"\n") {
+            bis -= 1;
+        }
+
+        teile.push(&rumpf[start..bis.max(start)]);
     }
 
     teile

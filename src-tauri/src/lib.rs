@@ -489,8 +489,11 @@ struct OllamaConfig {
     calendar: crate::calendar::CalendarConfig,
     /// Mailleiste. Leer, solange kein Konto eingetragen ist – und ohne
     /// eingebauten Vorgabewert, damit keine fremde Adresse im Binary steht.
+    ///
+    /// **Bis 0.2 stand hier ein einzelnes Konto.** Der eigene `Deserialize` von
+    /// `MailKonten` nimmt beide Formen an; siehe dort.
     #[serde(default)]
-    mail: crate::mail::MailConfig,
+    mail: crate::mail::MailKonten,
     /// Helligkeit der Oberfläche.
     #[serde(default)]
     theme: Theme,
@@ -747,7 +750,7 @@ fn test_settings() -> OllamaSettings {
             agent: AgentConfig::default(),
             chat: ChatConfig::default(),
             calendar: crate::calendar::CalendarConfig::default(),
-            mail: crate::mail::MailConfig::default(),
+            mail: crate::mail::MailKonten::default(),
             theme: Theme::default(),
         }),
         config_path: std::env::temp_dir().join("mimir-test-ollama.json"),
@@ -778,7 +781,7 @@ impl OllamaSettings {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
-                mail: crate::mail::MailConfig::default(),
+                mail: crate::mail::MailKonten::default(),
                 theme: Theme::default(),
             },
             Err(error) => return Err(format!("Ollama-Konfiguration nicht lesbar: {}", error)),
@@ -823,34 +826,45 @@ impl OllamaSettings {
         self.last_contact.lock().ok().and_then(|slot| *slot)
     }
 
-    /// Nimmt ein gespeichertes App-Passwort in den Sitzungszustand, wenn es zum
-    /// eingetragenen Benutzer gehört. Wird beim Start aufgerufen, damit die
-    /// Anmeldung nach einem Neustart nicht neu gemacht werden muss.
-    /// Holt das gemerkte App-Passwort in den Sitzungszustand zurück.
+    /// Holt die gemerkten App-Passwörter in den Sitzungszustand zurück.
     ///
     /// **Ganz wie beim Kalender ohne `await`**, weil `setup` keine async
     /// Funktion ist. Deshalb `try_read`: Eine nicht verfügbare Sperre ist kein
     /// Fehler, sondern bedeutet „jetzt nicht" – und die Anmeldung wird beim
     /// nächsten Senden ohnehin neu aufgebaut.
+    ///
+    /// **Für jedes Konto, nicht für eines.** Wer vier Postfächer eingetragen hat,
+    /// erwartet nach einem Neustart vier Postfächer – auch wenn er nur eines
+    /// gerade ansieht. Ein einzelnes wäre bequemer und hieße, dass die anderen
+    /// jedes Mal neu angemeldet werden müssen.
+    ///
+    /// Gibt zurück, wie viele Konten sich ohne Zutun des Benutzers anmelden
+    /// konnten: Das ist die Zahl, die nach einem Neustart in der Leiste steht.
     fn restore_mail_session(
         &self,
         session: &crate::mail::MailSession,
         store: &crate::mail::CredentialStore,
-    ) -> bool {
+    ) -> usize {
         let config = match self.config.try_read() {
             Ok(config) => config,
-            Err(_) => return false,
+            Err(_) => return 0,
         };
 
-        if !config.mail.ist_eingerichtet() {
-            return false;
-        }
+        config
+            .mail
+            .konten
+            .iter()
+            .filter(|konto| {
+                if !konto.ist_eingerichtet() {
+                    return false;
+                }
 
-        let Some(passwort) = store.lesen(&config.mail) else {
-            return false;
-        };
-
-        session.set_password(&passwort).is_ok()
+                match store.lesen(konto) {
+                    Some(passwort) => session.set_password(&konto.id, &passwort).is_ok(),
+                    None => false,
+                }
+            })
+            .count()
     }
 
     fn restore_calendar_session(&self, session: &crate::calendar::CalendarSession) -> bool {
@@ -1108,11 +1122,11 @@ impl OllamaSettings {
         Ok(())
     }
 
-    /// Merkt sich die Mailleiste.
-    async fn set_mail_config(
+    /// Merkt sich die eingetragenen Postfächer.
+    async fn set_mail_konten(
         &self,
-        mail: crate::mail::MailConfig,
-    ) -> Result<crate::mail::MailConfig, String> {
+        mail: crate::mail::MailKonten,
+    ) -> Result<crate::mail::MailKonten, String> {
         let mut config = self.config.write().await;
         let mut candidate = config.clone();
         candidate.mail = mail.clone();
@@ -5326,10 +5340,11 @@ fn toolset_for(
     scope: Scope,
     write_enabled: bool,
     kalender: &[String],
+    mailkonten: &[String],
 ) -> Result<AgentToolset, String> {
     match scope {
         Scope::Termine => termine_toolset_for(kalender),
-        Scope::Mail => Ok(crate::mail::mail_toolset_for(kalender)),
+        Scope::Mail => Ok(crate::mail::mail_toolset_for(kalender, mailkonten)),
         Scope::Agent => {
             if agent.root.is_empty() {
                 return Err(
@@ -5376,6 +5391,20 @@ fn gewaehlte_kalender(
         .collect()
 }
 
+/// Die Namen der eingetragenen Postfächer.
+///
+/// Sie stehen in der Anweisung an das Modell, und **genau deshalb werden hier
+/// die Anzeigenamen und nicht die Kennungen genommen**: `konto-3` ist etwas, das
+/// nur Mimir weiß. Das Modell muss „Strato" sagen können, um das richtige
+/// Postfach zu meinen, und darf keinen Namen erfinden, den es nicht kennt.
+fn gewaehlte_mailkonten(config: &crate::mail::MailKonten) -> Vec<String> {
+    config
+        .konten
+        .iter()
+        .map(crate::mail::MailConfig::anzeige_name)
+        .collect()
+}
+
 #[tauri::command]
 async fn list_tools(
     settings: State<'_, OllamaSettings>,
@@ -5388,6 +5417,7 @@ async fn list_tools(
         wirksamer_umfang(&config),
         state.write_enabled(),
         &gewaehlte_kalender(&config.calendar, &session),
+        &gewaehlte_mailkonten(&config.mail),
     )
 }
 
@@ -6369,14 +6399,20 @@ async fn preview_tool_call(
     if name == crate::mail::werkzeug::SENDEN {
         let config = settings.get_config().await.mail;
 
-        let vorhaben = crate::mail::vorhaben_aus_argumenten(&config, &arguments)?;
+        // **Dasselbe Konto wie beim Versand.** Die Vorschau baut aus der
+        // Kennung, die das Argument nennt – sonst zeigte sie dem Benutzer eine
+        // Nachricht von einem Postfach, die er bestätigt, und Mimir verschickte
+        // sie von einem anderen.
+        let konto = crate::mail::konto_aus_argumenten(&config, &arguments)?;
 
-        if config.smtp_server.trim().is_empty() {
-            return Err(
-                "Für das Senden wird ein SMTP-Server gebraucht. Trage ihn in der Mailleiste \
-                 unter „Konto“ ein."
-                    .to_string(),
-            );
+        let vorhaben = crate::mail::vorhaben_aus_argumenten(konto, &arguments)?;
+
+        if konto.smtp_server.trim().is_empty() {
+            return Err(format!(
+                "Für das Senden aus „{}“ wird ein SMTP-Server gebraucht. Trage ihn \
+                 unter „Konto“ in der Mailleiste ein.",
+                konto.anzeige_name()
+            ));
         }
 
         return Ok(preview_mail(&vorhaben));
@@ -6873,25 +6909,71 @@ async fn calendar_events(
 // Sitzungszustand. Ohne beide gibt es keine Verbindung – und im Fehlerfall
 // wird **nicht** versucht, es irgendwo anders zu beschaffen.
 
-/// Die Mailleiste: Ordner, Nachrichten, Text.
+/// Alle eingetragenen Postfächer und das gewählte.
 ///
-/// Ohne eingetragenes Konto kommt hier nichts zurück. Das ist kein Fehler,
-/// sondern der Normalzustand nach der Installation – deshalb `Ok(vec![])`
-/// statt einer Meldung, die im Chat als Fehler stünde.
+/// Ohne eingetragenes Konto kommt eine leere Liste zurück. Das ist kein Fehler,
+/// sondern der Normalzustand nach der Installation – deshalb `Ok(...)` statt
+/// einer Meldung, die in der Oberfläche als Fehler stünde.
 #[tauri::command]
 async fn get_mail_config(
     settings: State<'_, OllamaSettings>,
-) -> Result<crate::mail::MailConfig, String> {
+) -> Result<crate::mail::MailKonten, String> {
     Ok(settings.get_config().await.mail)
 }
 
-/// Merkt sich Server, Absender und Ordner.
+/// Der Zustand **aller** Konten, den die Auswahl in der Leiste braucht.
+///
+/// **Ein Aufruf für die ganze Liste.** Vorher gab es `mail_status` für ein
+/// Konto; in einer Liste aus vier Konten hätte das vier Aufrufe bedeutet und
+/// trotzdem nur die Leiste über den Zustand des gerade aktiven informiert.
+///
+/// **Der Schlüsselbund wird gefragt, aber nicht erwartet.** Dieser Befehl
+/// beantwortet die Frage „welche Konten gibt es" – und die Leiste zeigte darauf
+/// hin nichts, wenn die Frage nach dem gemerkten Passwort hängen blieb. Die
+/// Abfrage läuft deshalb auf einem eigenen Thread und mit Frist; antwortet der
+/// Schlüsselbund nicht, gilt das Konto als „nicht gemerkt", und die Leiste steht
+/// trotzdem da. **Ein Postfach, das nicht antwortet, ist kein Grund, die ganze
+/// Oberfläche anzustarren.**
+#[tauri::command]
+async fn mail_statuses(
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<Vec<crate::mail::MailKontoStatus>, String> {
+    let mail = settings.get_config().await.mail;
+    let mut statuse = Vec::with_capacity(mail.konten.len());
+
+    for konto in &mail.konten {
+        statuse.push(crate::mail::MailKontoStatus {
+            id: konto.id.clone(),
+            name: konto.anzeige_name(),
+            adresse: konto.absender().to_string(),
+            ordner: konto.ordner().to_string(),
+            eingerichtet: konto.ist_eingerichtet(),
+            angemeldet: session.angemeldet(&konto.id),
+            gemerkt: stored.exists_async(konto).await,
+            letzter_erfolg: session.last_success(&konto.id),
+        });
+    }
+
+    Ok(statuse)
+}
+
+/// Legt ein Konto an oder ändert eines.
+///
+/// **Eine Funktion für beides**, unterschieden durch `id`: `None` ist ein neues
+/// Konto, `Some(...)` das bearbeitete. Zwei Befehle unterschieden sich nur darin,
+/// ob sie eine Zeile suchen, die es schon gibt – und die Suchlogik wäre an zwei
+/// Stellen, von denen eine beim Anlegen nicht gebraucht wird.
 ///
 /// Leere Felder werden zu leeren Feldern gespeichert, nicht zu Vorgabewerten:
 /// Ein eingebauter Server nähme einen jeden, der Mimir installiert, mit auf
 /// fremdes Postfach.
 #[tauri::command]
-async fn set_mail_config(
+#[allow(clippy::too_many_arguments)]
+async fn set_mail_account(
+    id: Option<String>,
+    name: Option<String>,
     imap_server: Option<String>,
     smtp_server: Option<String>,
     username: Option<String>,
@@ -6899,32 +6981,77 @@ async fn set_mail_config(
     folder: Option<String>,
     max_entries: Option<usize>,
     settings: State<'_, OllamaSettings>,
-) -> Result<crate::mail::MailConfig, String> {
-    let aktuell = settings.get_config().await.mail;
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<crate::mail::MailKonten, String> {
+    let mut konten = settings.get_config().await.mail;
 
-    let config = crate::mail::MailConfig {
+    // Das bestehende Konto, falls es eines ist. Beim Anlegen ist `grundlage` das
+    // leere Konto – und damit auch der Fall, in dem die Felder `None` bekommen,
+    // weil die Oberfläche sie schlicht nicht mitschickt.
+    let position = match id.as_deref().map(str::trim) {
+        None => {
+            if konten.konten.len() >= crate::mail::MAX_MAIL_ACCOUNTS {
+                return Err(format!(
+                    "Es sind höchstens {} Mailkonten möglich. Ein Konto weniger \
+                     reicht meistens – jedes ist ein eigener Zugang.",
+                    crate::mail::MAX_MAIL_ACCOUNTS
+                ));
+            }
+
+            konten.konten.push(crate::mail::MailConfig {
+                id: konten.naechste_id(),
+                ..crate::mail::MailConfig::default()
+            });
+
+            konten.konten.len() - 1
+        }
+        Some("") => return Err("Die Konto-Kennung fehlt".to_string()),
+        Some(gesucht) => konten
+            .konten
+            .iter()
+            .position(|konto| konto.id == gesucht)
+            .ok_or_else(|| {
+                format!(
+                    "Es gibt kein Mailkonto mit dieser Kennung. Vorhanden: {}",
+                    konten.bezeichnungen()
+                )
+            })?,
+    };
+
+    let vorher = konten.konten[position].clone();
+
+    // **Prüfen, dann schreiben.** Die Prüfung ändert nichts, der Fehler kommt
+    // also heraus, bevor ein halb eingetragenes Konto in der Liste steht – das
+    // wäre eines, das nicht anmeldbar ist und dennoch einen Platz in der Auswahl
+    // belegt.
+    let geprueft = crate::mail::MailConfig {
+        id: vorher.id.clone(),
+        name: match name.as_deref() {
+            None => vorher.name.clone(),
+            Some(wert) => crate::mail::MailKonten::pruefe_name(wert)?,
+        },
         imap_server: match imap_server.as_deref() {
-            None => aktuell.imap_server.clone(),
+            None => vorher.imap_server.clone(),
             Some(wert) if wert.trim().is_empty() => String::new(),
             Some(wert) => crate::mail::normalize_server_url(wert, "IMAP")?,
         },
         smtp_server: match smtp_server.as_deref() {
-            None => aktuell.smtp_server.clone(),
+            None => vorher.smtp_server.clone(),
             Some(wert) if wert.trim().is_empty() => String::new(),
             Some(wert) => crate::mail::normalize_server_url(wert, "SMTP")?,
         },
         username: match username.as_deref() {
-            None => aktuell.username.clone(),
+            None => vorher.username.clone(),
             Some(wert) if wert.trim().is_empty() => String::new(),
             Some(wert) => crate::mail::normalize_username(wert)?,
         },
         address: match address.as_deref() {
-            None => aktuell.address.clone(),
+            None => vorher.address.clone(),
             Some(wert) if wert.trim().is_empty() => String::new(),
             Some(wert) => crate::mail::normalize_address(wert, "Absender")?,
         },
         folder: match folder.as_deref() {
-            None => aktuell.folder.clone(),
+            None => vorher.folder.clone(),
             Some(wert) if wert.trim().is_empty() => String::new(),
             Some(wert) => {
                 let ordner = wert.trim();
@@ -6934,36 +7061,140 @@ async fn set_mail_config(
                 ordner.to_string()
             }
         },
-        max_entries: max_entries.unwrap_or(aktuell.max_entries),
+        max_entries: max_entries.unwrap_or(vorher.max_entries),
     };
 
-    let mut alle = settings.get_config().await;
-    alle.mail = config.clone();
-    settings.set_mail_config(alle.mail.clone()).await?;
+    // **Ein Konto, dessen Anschrift sich ändert, verliert sein Passwort im
+    // Sitzungszustand.** Sonst versuchte Mimir, sich mit dem Passwort des einen
+    // Kontos bei einem anderen anzumelden, und die Fehlermeldung spräche vom
+    // falschen Benutzer. Im Schlüsselbund darf es bleiben: Dort entscheidet
+    // der Eintrag aus Benutzername und Server, und ein alter Eintrag wird
+    // schlicht nie wieder gelesen.
+    let anschrift_geaendert =
+        geprueft.username != vorher.username || geprueft.imap_server != vorher.imap_server;
 
-    // Beim Wechsel des Kontos gehört das alte Passwort nicht mehr zum neuen:
-    // Sonst versuchte Mimir, sich mit dem Passwort des einen Kontos beim anderen
-    // anzumelden, und die Meldung spräche vom falschen Benutzer.
-    if config.username != aktuell.username {
-        // Der Sitzungszustand wird vom Aufrufer geleert; hier nur die Konfig.
+    if anschrift_geaendert {
+        session.abmelden(&geprueft.id);
     }
 
-    Ok(config)
+    konten.konten[position] = geprueft;
+
+    // **Ein neues Konto ist sofort das gezeigte.** Wer es gerade anlegt, will
+    // sehen, ob die Anmeldung klappt – nicht erst ein anderes Postfach laden
+    // und dann zu seinem wechseln müssen.
+    if position == 0 {
+        konten.aktiv = konten.konten[position].id.clone();
+    }
+
+    let gespeichert = settings.set_mail_konten(konten.clone()).await?;
+
+    Ok(gespeichert)
 }
 
-/// Nimmt das App-Passwort in den Sitzungszustand.
+/// Nimmt ein Konto ganz aus Mimir heraus.
+///
+/// **Dreierlei wird dabei getan**, und alle drei gehören dazu:
+///
+/// 1. Der Eintrag aus der Konfiguration.
+/// 2. Der Sitzungsplatz, sonst behält Mimir das Passwort im Speicher.
+/// 3. **Der Eintrag im Schlüsselbund.** Das ist der einzige Ort, an dem
+///    Zugangsdaten liegen, die Mimir geschrieben hat – sie wegzulassen hieße:
+///    Ein Konto wird entfernt, sein Passwort bleibt beim Anbieter im
+///    Schlüsselbund liegen, und wer es beim nächsten Anlegen desselben
+///    Kontos wiederfindet, weiß nicht mehr, wem es gehört.
+///
+/// **Das Passwort selbst wird nicht angefasst.** Es gehört dem Anbieter, und ein
+/// Kontensatzug ist kein Kontowechsel.
+#[tauri::command]
+async fn remove_mail_account(
+    id: String,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
+) -> Result<crate::mail::MailKonten, String> {
+    let mut konten = settings.get_config().await.mail;
+
+    let Some(entfernt) = konten.entfernen(&id) else {
+        return Err(format!(
+            "Es gibt kein Mailkonto mit dieser Kennung. Vorhanden: {}",
+            konten.bezeichnungen()
+        ));
+    };
+
+    session.entfernen(&id);
+
+    if entfernt.ist_eingerichtet() {
+        stored.vergessen_async(&entfernt).await;
+    }
+
+    println!(
+        "Das Konto „{}“ ist aus Mimir entfernt. Sein Passwort im Schlüsselbund wurde \
+         mitgelöscht; beim Anbieter ist es unverändert.",
+        entfernt.anzeige_name()
+    );
+
+    settings.set_mail_konten(konten.clone()).await
+}
+
+/// Wählt das Konto, das die Leiste zeigt.
+#[tauri::command]
+async fn select_mail_account(
+    id: String,
+    settings: State<'_, OllamaSettings>,
+) -> Result<crate::mail::MailKonten, String> {
+    let mut konten = settings.get_config().await.mail;
+
+    if konten.nach_id(&id).is_none() {
+        return Err(format!(
+            "Es gibt kein Mailkonto mit dieser Kennung. Vorhanden: {}",
+            konten.bezeichnungen()
+        ));
+    }
+
+    if konten.aktiv == id {
+        return Ok(konten);
+    }
+
+    konten.aktiv = id;
+
+    settings.set_mail_konten(konten).await
+}
+
+/// Nimmt das App-Passwort eines Kontos in den Sitzungszustand.
 #[tauri::command]
 async fn mail_login(
+    id: String,
     password: String,
+    settings: State<'_, OllamaSettings>,
     session: State<'_, crate::mail::MailSession>,
 ) -> Result<(), String> {
-    session.set_password(&password)
+    let konten = settings.get_config().await.mail;
+    let konto = konten.nach_id_gefordert(&id)?;
+
+    if !konto.ist_eingerichtet() {
+        return Err(format!(
+            "Das Konto „{}“ ist noch nicht vollständig eingetragen – es fehlen \
+             IMAP-Server oder Benutzername.",
+            konto.anzeige_name()
+        ));
+    }
+
+    session.set_password(konto.id.as_str(), &password)
 }
 
-/// Meldet ab, ohne das gespeicherte Passwort zu löschen.
+/// Meldet ein Konto ab, ohne das gespeicherte Passwort zu löschen.
 #[tauri::command]
-async fn mail_logout(session: State<'_, crate::mail::MailSession>) -> Result<(), String> {
-    session.clear();
+async fn mail_logout(
+    id: String,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<(), String> {
+    // Die Kennung wird geprüft, damit ein Tippfehler nicht still schweigend
+    // nichts bewirkt und der Benutzer sich wundert, warum es weiterhin
+    // angemeldet ist.
+    settings.get_config().await.mail.nach_id_gefordert(&id)?;
+
+    session.abmelden(&id);
     Ok(())
 }
 
@@ -6976,17 +7207,19 @@ async fn mail_logout(session: State<'_, crate::mail::MailSession>) -> Result<(),
 /// scheitert, die er einmal für dauerhaft gehalten hat.
 #[tauri::command]
 async fn mail_store_password(
+    id: String,
     password: String,
     settings: State<'_, OllamaSettings>,
     stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
 ) -> Result<(), String> {
-    let config = settings.get_config().await.mail;
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
 
-    if !config.ist_eingerichtet() {
-        return Err("Es ist kein Mailkonto eingetragen".to_string());
+    if !konto.ist_eingerichtet() {
+        return Err("Das Konto ist noch nicht vollständig eingetragen".to_string());
     }
 
-    stored.merken(&config, &password)?;
+    stored.merken_async(konto, password).await?;
 
     println!(
         "Das Mail-App-Passwort liegt jetzt im Schlüsselbund des Systems, nicht in einer Datei von Mimir."
@@ -6995,14 +7228,17 @@ async fn mail_store_password(
     Ok(())
 }
 
-/// Vergisst das gemerkte Passwort.
+/// Vergisst das gemerkte Passwort eines Kontos.
 #[tauri::command]
 async fn mail_forget_password(
+    id: String,
     settings: State<'_, OllamaSettings>,
     stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
 ) -> Result<(), String> {
-    let config = settings.get_config().await.mail;
-    stored.vergessen(&config);
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
+
+    stored.vergessen_async(konto).await;
     Ok(())
 }
 
@@ -7013,99 +7249,125 @@ async fn mail_forget_password(
 /// Anzeigen. Der Befehl meldet nur, ob es geklappt hat.
 #[tauri::command]
 async fn mail_restore_password(
+    id: String,
     settings: State<'_, OllamaSettings>,
     session: State<'_, crate::mail::MailSession>,
     stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
 ) -> Result<bool, String> {
-    let config = settings.get_config().await.mail;
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
 
-    if !config.ist_eingerichtet() {
+    if !konto.ist_eingerichtet() {
         return Ok(false);
     }
 
-    let Some(passwort) = stored.lesen(&config) else {
+    let Some(passwort) = stored.lesen(konto) else {
         return Ok(false);
     };
 
-    session.set_password(&passwort)?;
+    session.set_password(konto.id.as_str(), &passwort)?;
     Ok(true)
 }
 
-#[tauri::command]
-async fn mail_status(
-    settings: State<'_, OllamaSettings>,
-    session: State<'_, crate::mail::MailSession>,
-    stored: State<'_, std::sync::Arc<crate::mail::CredentialStore>>,
-) -> Result<crate::mail::MailStatus, String> {
-    let config = settings.get_config().await.mail;
-
-    Ok(crate::mail::MailStatus {
-        configured: config.ist_eingerichtet(),
-        logged_in: session.logged_in(),
-        imap_server: config.imap_server.clone(),
-        username: config.username.clone(),
-        folder: config.ordner().to_string(),
-        last_success: session.last_success(),
-        stored: stored.exists(&config.username),
-    })
-}
-
 /// Holt die Nachrichtenliste des eingestellten Ordners.
+///
+/// **Die Kennung ist Pflicht**, nicht „das aktive Konto": Zwischen dem Zeichnen
+/// der Liste und dem Klick auf „Neu laden" kann der Benutzer umgeschaltet haben.
+/// Ohne Kennung käme dann eine Nachrichtenliste unter der Leiste eines anderen
+/// Postfachs zum Vorschein, und nichts auf dem Bildschirm widerspräche ihr.
 #[tauri::command]
 async fn mail_messages(
+    id: String,
     settings: State<'_, OllamaSettings>,
     session: State<'_, crate::mail::MailSession>,
 ) -> Result<Vec<crate::mail::imap::NachrichtKopf>, String> {
-    let config = settings.get_config().await.mail;
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
 
-    if !config.ist_eingerichtet() {
+    if !konto.ist_eingerichtet() {
         return Ok(Vec::new());
     }
 
-    let Some(password) = session.password() else {
-        return Err("Nicht angemeldet. Mit /mail anmelden.".to_string());
+    let Some(password) = session.password(konto.id.as_str()) else {
+        return Err(format!(
+            "Für „{}“ ist nicht angemeldet. Mit „Konto“ in der Mailleiste anmelden.",
+            konto.anzeige_name()
+        ));
     };
 
-    let grenze = config.anzeige_grenze();
+    let grenze = konto.anzeige_grenze();
     let mut verbindung =
-        crate::mail::imap::verbinde(&config.imap_server, &config.username, &password).await?;
+        crate::mail::imap::verbinde(&konto.imap_server, &konto.username, &password).await?;
 
     let nachrichten =
-        crate::mail::imap::hole_nachrichten(&mut verbindung, config.ordner(), grenze).await?;
-    session.mark_success();
+        crate::mail::imap::hole_nachrichten(&mut verbindung, konto.ordner(), grenze).await?;
+    session.mark_success(konto.id.as_str());
 
     Ok(nachrichten)
 }
 
 /// Holt eine einzelne Nachricht mit Text.
+///
+/// **Die Kennung ist hier aus einem zweiten Grund Pflicht:** IMAP zählt die
+/// Nachrichten je Ordner neu. Nummer 3 aus dem einen Postfach und Nummer 3 aus
+/// dem anderen sind zwei verschiedene Nachrichten.
 #[tauri::command]
 async fn mail_message(
+    id: String,
     nummer: u32,
     settings: State<'_, OllamaSettings>,
     session: State<'_, crate::mail::MailSession>,
 ) -> Result<crate::mail::imap::NachrichtVoll, String> {
-    let config = settings.get_config().await.mail;
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
 
-    if !config.ist_eingerichtet() {
-        return Err("Es ist kein Mailkonto eingetragen".to_string());
+    if !konto.ist_eingerichtet() {
+        return Err(format!(
+            "Das Konto „{}“ ist nicht vollständig eingetragen",
+            konto.anzeige_name()
+        ));
     }
 
-    let Some(password) = session.password() else {
-        return Err("Nicht angemeldet. Mit /mail anmelden.".to_string());
+    let Some(password) = session.password(konto.id.as_str()) else {
+        return Err(format!(
+            "Für „{}“ ist nicht angemeldet. Mit „Konto“ in der Mailleiste anmelden.",
+            konto.anzeige_name()
+        ));
     };
 
     let mut verbindung =
-        crate::mail::imap::verbinde(&config.imap_server, &config.username, &password).await?;
+        crate::mail::imap::verbinde(&konto.imap_server, &konto.username, &password).await?;
 
-    let mut nachricht = crate::mail::imap::hole_text(&mut verbindung, nummer).await?;
+    let mut nachricht =
+        crate::mail::imap::hole_text(&mut verbindung, konto.ordner(), nummer).await?;
 
     // Auch im Fenster wird gekürzt: Der Text kommt von einem Fremden, und ein
     // ungekürzter Rumpf würde die Oberfläche und den Kontext sprengen.
     nachricht.text = crate::mail::kuerze(&nachricht.text, crate::mail::MAX_MAIL_TEXT_BYTES);
     nachricht.kopf.betreff = crate::mail::kuerze_betreff(&nachricht.kopf.betreff);
-    session.mark_success();
+    session.mark_success(konto.id.as_str());
 
     Ok(nachricht)
+}
+
+/// Markiert eine Nachricht als gelesen oder als ungelesen.
+///
+/// **Ein eigener Befehl, kein Zusatz zu `mail_message`.** Das Setzen eines Flags
+/// ist etwas anderes als Lesen: Man markiert eine Nachricht aus der Liste, ohne
+/// sie zu öffnen, und ein Befehl, der beides zugleich täte, würde beim bloßen
+/// Ansehen der Liste Nachrichten verschieben.
+#[tauri::command]
+async fn mail_gelesen_setzen(
+    id: String,
+    nummer: u32,
+    gelesen: bool,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<(), String> {
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
+
+    crate::mail::imap_gelesen_setzen(konto, &session, nummer, gelesen).await
 }
 
 /// Prüft das Zertifikat der Instanz, ohne Zugangsdaten zu senden, und nennt den
@@ -7269,12 +7531,28 @@ pub fn run() {
             // Leiste nach einem Neustart etwas zeigt. **Das Passwort selbst
             // bleibt im Backend**: Es wird über die Tauri-Schnittstelle nicht
             // ausgegeben, und im Frontend steht danach nur „angemeldet".
-            if settings.restore_mail_session(&mail_session, &mail_store) {
-                app.emit(
-                    "mail-angemeldet",
-                    "Das gemerkte App-Passwort wurde wiederhergestellt",
-                )
-                .ok();
+            //
+            // **Für jedes Konto.** Wer vier Postfächer gemerkt hat, meldet sich
+            // nach dem Neustart in allen vier an – nicht nur in dem, das zuletzt
+            // gesehen wurde.
+            match settings.restore_mail_session(&mail_session, &mail_store) {
+                0 => {}
+                1 => {
+                    app.emit(
+                        "mail-angemeldet",
+                        "Das gemerkte App-Passwort wurde wiederhergestellt",
+                    )
+                    .ok();
+                }
+                anzahl => {
+                    app.emit(
+                        "mail-angemeldet",
+                        format!(
+                            "Die gemerkten App-Passwörter von {anzahl} Konten wurden wiederhergestellt"
+                        ),
+                    )
+                    .ok();
+                }
             }
 
             app.manage(mail_session);
@@ -7326,15 +7604,18 @@ pub fn run() {
             set_chat_config,
             get_calendar_config,
             get_mail_config,
-            set_mail_config,
+            set_mail_account,
+            remove_mail_account,
+            select_mail_account,
             mail_login,
             mail_logout,
             mail_store_password,
             mail_forget_password,
             mail_restore_password,
-            mail_status,
+            mail_statuses,
             mail_messages,
             mail_message,
+            mail_gelesen_setzen,
             set_calendar_config,
             calendar_status,
             calendar_login,
@@ -8017,6 +8298,113 @@ mod tests {
         assert!(validate_chat_message(&message).is_ok());
     }
 
+    /// **Eine Konfigurationsdatei von 0.2 lädt, ohne das Postfach zu verlieren.**
+    ///
+    /// Bis hierher stand unter `"mail"` das Konto selbst; jetzt steht dort eine
+    /// Liste. Wer Mimir im Postfach-Umfang benutzt hat und auf die neue Fassung
+    /// wechselt, darf sein Konto nicht wieder von Null eintragen müssen –
+    /// besonders nicht sein im Schlüsselbund gemerktes Passwort, denn der
+    /// Eintrag darin wird aus Benutzername und Server gebaut und bleibt
+    /// derselbe.
+    #[tokio::test]
+    async fn uebernimmt_die_postfaecher_einer_alten_konfiguration() {
+        let config_path = test_config_path("mail-alt");
+        std::fs::write(
+            &config_path,
+            br#"{
+                "server_url": "http://localhost:11434",
+                "mail": {
+                    "imap_server": "imaps://imap.strato.de:465",
+                    "smtp_server": "smtps://smtp.strato.de:465",
+                    "username": "kai@example.org",
+                    "folder": "Posteingang"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+        let mail = settings.get_config().await.mail;
+
+        assert_eq!(
+            mail.konten.len(),
+            1,
+            "das Konto aus der alten Datei fehlt: {mail:?}"
+        );
+
+        let konto = mail.aktiv().expect("die Leiste zeigt ein Konto");
+
+        assert_eq!(konto.username, "kai@example.org");
+        assert_eq!(konto.folder, "Posteingang");
+        assert_eq!(mail.aktiv, konto.id);
+
+        // **Und es übersteht einen weiteren Rundlauf.** Das ist der Teil, der
+        // auffällt, wenn er fehlt: Die Datei wird in der neuen Form gespeichert
+        // und beim nächsten Start wieder gelesen – ab da darf die Kennung nicht
+        // mehr verlorengehen, sonst fände das Konto seinen Sitzungsplatz nicht.
+        settings.set_mail_konten(mail.clone()).await.unwrap();
+        let erneut = OllamaSettings::load(config_path.clone()).unwrap();
+        let mail = erneut.get_config().await.mail;
+
+        assert_eq!(mail.konten.len(), 1);
+        assert_eq!(mail.konten[0].id, konto.id, "die Kennung ging verloren");
+        assert_eq!(mail.aktiv, konto.id);
+        assert_eq!(
+            mail.aktiv().map(|k| k.username.as_str()),
+            Some("kai@example.org")
+        );
+
+        std::fs::remove_file(config_path).unwrap();
+    }
+
+    /// **Mehrere Konten überstehen das Laden und das Speichern**, und die Auswahl
+    /// zeigt weiterhin auf das, was der Benutzer gewählt hat.
+    #[tokio::test]
+    async fn haelt_mehrere_postfaecher_ueber_das_speichern_hinweg() {
+        let config_path = test_config_path("mail-viele");
+        let settings = OllamaSettings::load(config_path.clone()).unwrap();
+
+        let konten = crate::mail::MailKonten {
+            konten: vec![
+                crate::mail::MailConfig {
+                    id: "konto-1".to_string(),
+                    name: "Privat".to_string(),
+                    imap_server: "imaps://imap.strato.de:465".to_string(),
+                    username: "kai@example.org".to_string(),
+                    ..crate::mail::MailConfig::default()
+                },
+                crate::mail::MailConfig {
+                    id: "konto-2".to_string(),
+                    name: "Arbeit".to_string(),
+                    imap_server: "imaps://imap.gmail.com:465".to_string(),
+                    username: "kai@gmail.invalid".to_string(),
+                    ..crate::mail::MailConfig::default()
+                },
+            ],
+            aktiv: "konto-2".to_string(),
+        };
+
+        settings.set_mail_konten(konten).await.unwrap();
+
+        let neu = OllamaSettings::load(config_path.clone()).unwrap();
+        let mail = neu.get_config().await.mail;
+
+        assert_eq!(mail.konten.len(), 2);
+        assert_eq!(mail.aktiv, "konto-2", "die Auswahl ist nicht erhalten");
+        assert_eq!(
+            mail.aktiv().map(|k| k.anzeige_name()),
+            Some("Arbeit".to_string())
+        );
+
+        // **Kein Passwort in der Datei.** Die Liste ist länger geworden; das ist
+        // kein Grund, die Grenze zu verschieben, die hier immer galt.
+        let datei = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!datei.contains("passwort"), "{datei}");
+        assert!(!datei.contains("password"), "{datei}");
+
+        std::fs::remove_file(config_path).unwrap();
+    }
+
     #[tokio::test]
     async fn persists_server_and_ssh_config_atomically() {
         let config_path = test_config_path("persist");
@@ -8075,7 +8463,7 @@ mod tests {
                 agent: AgentConfig::default(),
                 chat: ChatConfig::default(),
                 calendar: crate::calendar::CalendarConfig::default(),
-                mail: crate::mail::MailConfig::default(),
+                mail: crate::mail::MailKonten::default(),
                 theme: Theme::default(),
             }),
             config_path: parent_path.join("ollama.json"),
@@ -10488,7 +10876,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         };
         // Und über den Umfang dasselbe – auch ohne Arbeitsverzeichnis, das hier
         // gar nicht gebraucht wird.
-        let Err(ueber_umfang) = toolset_for(&agent, Scope::Termine, false, &[]) else {
+        let Err(ueber_umfang) = toolset_for(&agent, Scope::Termine, false, &[], &[]) else {
             panic!("ohne Anmeldung gibt es nichts");
         };
         assert!(ueber_umfang.contains("/calendar"), "{ueber_umfang}");
@@ -10504,7 +10892,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
                 scope: Scope::Agent,
             }
         };
-        let Err(fehler) = toolset_for(&ohne_root, Scope::Agent, false, &[]) else {
+        let Err(fehler) = toolset_for(&ohne_root, Scope::Agent, false, &[], &[]) else {
             panic!("ohne Verzeichnis gibt es kein Werkzeugangebot");
         };
         assert!(fehler.contains("/agent-dir"), "{fehler}");
@@ -10515,7 +10903,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             root: root.to_string_lossy().to_string(),
             ..Default::default()
         };
-        let toolset = toolset_for(&agent, Scope::Agent, false, &[]).expect("mit Verzeichnis");
+        let toolset = toolset_for(&agent, Scope::Agent, false, &[], &[]).expect("mit Verzeichnis");
         assert_eq!(toolset.tools.len(), 3);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -10560,7 +10948,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             scope: Scope::Termine,
             ..Default::default()
         };
-        let toolset = toolset_for(&termine, Scope::Termine, false, &zwei_kalender())
+        let toolset = toolset_for(&termine, Scope::Termine, false, &zwei_kalender(), &[])
             .expect("der Pfad wird nicht gebraucht");
         assert!(
             !toolset.system_prompt.contains("xyz"),
@@ -10574,7 +10962,7 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             scope: Scope::Agent,
             ..Default::default()
         };
-        let Err(fehler) = toolset_for(&agent, Scope::Agent, false, &zwei_kalender()) else {
+        let Err(fehler) = toolset_for(&agent, Scope::Agent, false, &zwei_kalender(), &[]) else {
             panic!("der Pfad wird im Agentenmodus geprüft");
         };
         assert!(fehler.contains("Arbeitsverzeichnis"), "{fehler}");
@@ -10706,8 +11094,14 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
             scope: Scope::Agent,
             ..Default::default()
         };
-        let toolset = toolset_for(&kaputt, wirksamer_umfang(&config), false, &zwei_kalender())
-            .expect("lokal wird der Pfad nicht gebraucht");
+        let toolset = toolset_for(
+            &kaputt,
+            wirksamer_umfang(&config),
+            false,
+            &zwei_kalender(),
+            &[],
+        )
+        .expect("lokal wird der Pfad nicht gebraucht");
         let namen: Vec<&str> = toolset
             .tools
             .iter()

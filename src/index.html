@@ -84,10 +84,29 @@
                 <h3>Mail</h3>
                 <div class="mail-head-actions">
                     <button type="button" id="mail-refresh" class="mail-icon-button" title="Postfach neu laden">Neu laden</button>
+                    <button type="button" id="mail-choose-btn" class="mail-icon-button" title="Postfach auswählen">Konten</button>
                     <button type="button" id="mail-settings-btn" class="mail-icon-button" title="Mailkonto einstellen">Konto</button>
                 </div>
             </div>
-            <p id="mail-state" class="mail-state">Kein Mailkonto eingetragen.</p>
+            <!-- **Die Kontenauswahl.** Wie der Kalender seinen Auswahlblock, und
+                 aus demselben Grund: Sie erscheint nur, wenn jemand danach fragt.
+                 Ein dauerhaft sichtbarer Klapptext über einer Liste aus
+                 Nachrichten wäre eine zweite Sache, um die man sich kümmern muss,
+                 obwohl man sie nicht braucht. Bei einem Konto ist der Knopf da
+                 und tut nichts – außer eben das. -->
+            <div id="mail-picker" class="mail-picker" hidden>
+                <p class="mail-picker-hint">Welches Postfach die Leiste zeigen soll.</p>
+                <div id="mail-picker-list" role="radiogroup" aria-label="Postfach wählen"></div>
+                <button type="button" id="mail-picker-close">Fertig</button>
+            </div>
+            <!-- **Keine Behauptung, bevor etwas geholt wurde.** Dieser Text stand
+                 hier fest als „Kein Mailkonto eingetragen" – und war damit die
+                 Antwort auf eine Frage, die Mimir noch gar nicht gestellt hatte.
+                 Solange das Backend nicht geantwortet hat, weiß Mimir nichts; ein
+                 Text, der so aussieht, als wüsste er es, lässt sich von der
+                 Wahrheit nicht unterscheiden. Sobald `aktualisiereMail` antwortet,
+                 ersetzt `zeichneMailLeer` diesen Satz durch den echten Zustand. -->
+            <p id="mail-state" class="mail-state">Postfach wird geladen …</p>
             <ul id="mail-list" class="mail-list"></ul>
             <p id="mail-foot" class="mail-foot"></p>
         </aside>
@@ -306,11 +325,20 @@
             </p>
             <!-- **Als Text, nie als HTML.** Der Inhalt einer Mail ist Angriffseingabe
                  von Fremden; im Fenster gerendert wäre ein Link, der aussieht wie
-                 ein Link, und ein Bild, das aussieht wie nichts. -->
-            <pre id="mail-message-text" class="mail-message-text"></pre>
+                 ein Link, und ein Bild, das aussieht wie nichts. Deshalb kein
+                 `<pre>` mehr: Die Absätze, Zitate und die Signatur werden als
+                 eigene Elemente aufgebaut – und jeder einzelne Text wird über
+                 `textContent` gesetzt, nie über `innerHTML`. Die Formatierung
+                 entsteht aus der Struktur, nicht aus Markup aus der Fremde. -->
+            <div id="mail-message-text" class="mail-message-text"></div>
             <p id="mail-message-attachments" class="mail-message-attachments" hidden></p>
             <div class="dialog-actions mail-message-actions">
                 <button type="button" id="mail-message-close">Schließen</button>
+                <!-- **Der Zustand steht im Knopf, nicht daneben.** Wer eine Mail
+                     als ungelesen markiert, will das sehen können, ohne den
+                     Ordner zu durchsuchen: Der Knopf sagt, was beim Klick
+                     passiert – nicht, was gerade gilt. -->
+                <button type="button" id="mail-message-read" class="mail-read-button">Als gelesen markieren</button>
                 <!-- **Der Knopf, um den es hier geht.** Er legt den Text in den
                      Chat und stellt die Frage. Die Antwort landet als Nachricht
                      im Verlauf, nicht an der Mail – ein Ergebnis, das beim
@@ -322,8 +350,30 @@
 
     <dialog id="mail-dialog">
         <form id="mail-form">
-            <h3>Mailkonto</h3>
+            <h3>Mailkonten</h3>
             <p>Mimir spricht IMAP und SMTP. Bei Gmail unter Einstellungen, Konten, <em>Sicherheit</em> ein <strong>App-Passwort</strong> erzeugen – das Hauptpasswort gehört nicht hierher.</p>
+
+            <!-- **Die Kontenliste über dem Formular.** Oben, weil die erste
+                 Frage nicht „welche Serveradresse" lautet, sondern „welches
+                 Konto" – und ein einzelnes Formular ohne Liste darüber kann
+                 diese Frage nicht beantworten. -->
+            <div id="mail-account-list" class="mail-account-list" role="radiogroup" aria-label="Mailkonto wählen"></div>
+            <div class="mail-account-buttons">
+                <button type="button" id="mail-account-new">Neues Konto</button>
+                <!-- **Zweimal klicken statt Rückfrage.** `window.confirm` ist in
+                     einer Webview nicht überall zuverlässig – und ein Dialog, der
+                     stillschweigend ausbleibt, lässt den Knopf so, als sei nichts
+                     passiert. Der erste Klick verändert nur diesen Knopf, der
+                     zweite löscht. -->
+                <button type="button" id="mail-account-remove" class="danger">Konto entfernen</button>
+            </div>
+            <p id="mail-account-warnung" class="mail-hint mail-account-warnung" hidden></p>
+
+            <hr class="mail-trenner">
+
+            <label for="mail-name-input">Name</label>
+            <input type="text" id="mail-name-input" placeholder="Privat, Arbeit …" autocomplete="off">
+            <p class="mail-hint">Freier Name für die Leiste. Leer gelassen zeigt Mimir die Absenderadresse.</p>
 
             <label for="mail-imap-input">IMAP-Server</label>
             <input type="text" id="mail-imap-input" placeholder="imaps://imap.gmail.com" autocomplete="off" list="mail-server-vorgaben">
@@ -355,6 +405,12 @@
             <input type="text" id="mail-folder-input" placeholder="INBOX" autocomplete="off">
             <label for="mail-password-input">App-Passwort</label>
             <input type="password" id="mail-password-input" autocomplete="off">
+            <!-- **Leer heißt: nur speichern.** Wer ein Konto nur umbenennt oder
+                 einen Ordner ändert, hat kein Passwort zur Hand und soll dafür
+                 auch keines eingeben müssen. Der Knopf heißt deshalb
+                 „Speichern" und nicht „Anmelden": Er meldet an, wenn ein
+                 Passwort dasteht, und speichert trotzdem, wenn keins dasteht. -->
+            <p class="mail-hint">Leer lassen, um nur zu speichern. Mit Passwort wird das Konto zusätzlich angemeldet.</p>
             <label class="mail-remember">
                 <input type="checkbox" id="mail-remember-input">
                 <span>Passwort merken</span>
@@ -377,7 +433,7 @@
             <p id="mail-dialog-error" class="mail-dialog-error" hidden></p>
             <div class="dialog-actions">
                 <button type="button" id="mail-cancel">Abbrechen</button>
-                <button type="submit" id="mail-login-btn">Anmelden</button>
+                <button type="submit" id="mail-login-btn">Speichern</button>
             </div>
         </form>
     </dialog>

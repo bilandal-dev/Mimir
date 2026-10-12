@@ -268,6 +268,41 @@ Der Kalender macht es von Anfang an richtig: `CalendarConfig::server_url` ist **
 
 Der Versuch, sie auf `de.mimir.app` umzustellen, hat beim ersten Start ein **leeres** Konfigurationsverzeichnis angelegt: ohne Serveradresse, ohne Kalender, ohne Agentenverzeichnis. Dadurch war der Server nicht erreichbar – und es gab keinen Weg, die Adresse zu ändern, weil die Eingabe im Chat lag. Bei einem ausgefallenen Server kommt man aber gerade nicht in den Chat. Der Benutzername des Entwicklers im Bundle-Metadaten ist das nicht wert. Wer die Kennung trotzdem umstellen will, muss die Konfiguration mitnehmen; `src/tests/binary-pruefen.mjs` zeigt, wo die installierte Version ihre Dateien erwartet.
 
+## Auf Passwörter im Quelltext prüfen
+
+Das Binary zu prüfen reicht für **Adressen**, weil die als Zeichenkette darin
+landen. Ein Passwort tut das nicht – es steht vorher im Repository, und dort
+verschwindet es mit einem `git commit --amend` nicht mehr:
+
+```bash
+node src/tests/keine-geheimnisse.mjs
+```
+
+Geprüft werden zwei Dinge: **ein fest verdrahteter Wert an einer Stelle, die nach
+einem Geheimnis benannt ist**, und **eine versionierte Zugangsdatei**
+(`ollama.json`, `chat-history.json`, `calendar-secret.json`).
+
+**Was der Wächter nicht kann.** Ein Google-App-Passwort ist sechzehn
+Kleinbuchstaben – und „synchronisierbar" oder „selbstsigniertes" haben genau
+diese Form. Ohne ein Wörterbuch unterscheidet er die beiden nicht. Er meldet
+deshalb nur sechzehn Kleinbuchstaben **als Zeichenkette in einer Zeile, in der
+selbst ein Wort für ein Geheimnis steht**. Das ist der Preis dafür, dass die
+Prüfung nicht an jedem zweiten deutschen Satz anschlägt; eine Prüfung, die
+siebenunddreißigmal an einem Fensterlosen Kompositum anschlägt, wird abgeschaltet
+und prüft dann nichts mehr. **Wer ein Passwort einträgt, bekommt es vorher also
+nicht gesagt, wenn es ohne jedes passwortartige Wort dasteht** – der Fall ist
+real, nur selten.
+
+Was der Wächter dafür zuverlässig fängt, ist die Art, wie es tatsächlich
+passiert: Beim Ausprobieren einer Anmeldung eine Konstante anzulegen, ein
+Beispiel aus einem Test in den Aufruf zu kopieren oder eine geladene
+`calendar-secret.json` mit einzuchecken.
+
+In den Werten, die als Platzhalter durchgehen, steht bewusst nichts, was ein
+Schlüssel sein könnte. Geprüft wird zudem auf *exakte* Übereinstimmung höchstens
+mit Ziffern dahinter: `geheim123` ist ein Beispiel, `S3cret-Kalender-Passwort`
+ist einer – auch wenn es das Wort „Passwort" enthält.
+
 ## Beim ersten Start
 
 Wer Mimir zum ersten Mal öffnet, sieht sonst nichts: keinen Server, keine Modelle, einen leeren Chat. Die Kopfzeile sagt „Server: Offline", und die einzige Reaktion darauf ist ein Knopf, dessen Zwass man raten muss.
@@ -410,7 +445,45 @@ Geprüft wird nicht die Oberfläche, sondern die Stelle, an der aus dem eingeste
 
 Der Grund für ein eigenes Skript ist derselbe wie bei der Datumsangabe: Ein Fehler im Umfang sieht man im Chat nicht. Er äußert sich nicht als Textfehler, sondern darin, dass das Modell ein Werkzeug sieht, das es nicht sehen soll, oder einen Termin anlegt, den niemand wollte.
 
-Stand der Prüfungen: 435 Rust-Tests, dazu vier Skripte ohne Fenster. Zusätzlich gibt es einen Nachbau des Ablaufs unter jsdom mit 129 Prüfungen; er liegt nicht im Repository und ist deshalb von hier aus nicht nachprüfbar. Sechs seiner Prüfungen brauchen einen wirklich erreichbaren Ollama-Server und werden ohne ihn ausdrücklich übersprungen, statt eine Ersatzliste vorzutäuschen.
+## Die Kontenliste der Mailleiste prüfen
+
+Weil der Kontodialog und die Mailleiste aus derselben Datei lesen, dürfen sie sich nicht widersprechen können:
+
+```bash
+node src/tests/mailkonten.test.mjs
+```
+
+Geprüft wird die eine Zusammenführung, an der die Frage kippt: Die Konfiguration entscheidet, **welche** Konten es gibt, `mail_statuses` nur, **wie** sie dastehen. Der Fehler, den das verhindert, war sichtbar – der Dialog zeigte das eingetragene Postfach, die Leiste daneben „Kein Mailkonto eingetragen“, weil sie die Länge der Statusliste prüfte und die beim ersten Abruf leer war.
+
+Das Skript prüft die reine Funktion ohne Fenster und ohne Tauri-Aufruf: ein Konto ohne Statuseintrag bleibt sichtbar (nicht angemeldet, aber eingerichtet), ein Status ohne Konto wird verworfen, ein angemeldeter Zustand wird nicht von der Konfiguration überschrieben, und die Anzeigenamen folgen derselben Reihenfolge wie im Backend. Eine Prüfung liest zusätzlich den Quelltext: Sie schlägt an, sobald die Leiste die Frage „gibt es ein Konto“ wieder über die Länge der Statusliste beantwortet.
+
+## Das Nachrichtenfenster prüfen
+
+Weil ein Doppelklick zweimal klickt, hat das Öffnen einer Nachricht drei Zusagen, die alle drei schon gebrochen waren:
+
+```bash
+node src/tests/mailfenster.test.mjs
+```
+
+Geprüft wird nicht die Anzeige, sondern diese drei Zusagen: Der Abruf läuft **nur einmal** (sonst holt der zweite Klick dieselbe Nachricht noch einmal und das zweite `showModal` scheitert), er hat eine **Frist** (der Abruf baut eine neue Verbindung zum Mailserver auf) und ein Fehler landet **in der Leiste statt in der Konsole**. Zusätzlich geprüft: Der Hinweis leert die Liste nicht – sonst stünden nach einem Fehler bis zum nächsten „Neu laden“ keine Nachrichten mehr, als hätte der Klick sie gelöscht.
+
+Zwei Fehler, die erst dadurch sichtbar wurden, sind im Rust-Teil festgehalten: Eine schweigende Leitung bricht nach einer Frist ab (`ein_server_der_schweigt_bricht_ab_statt_zu_warten`), und der Text einer Nachricht wird erst **nach** der Ordnerauswahl geholt (`der_text_wird_erst_nach_der_ordnerauswahl_geholt`). Letzteres war die Ursache für „Der Mailserver hat den Befehl nicht verstanden": Die Verbindung war angemeldet, aber es war kein Ordner ausgewählt, und genau diesen Zustand prüft kein Test, der nur den Abruf am Ende betrachtet.
+
+## Die Darstellung einer Mail prüfen
+
+Wie der Rumpf einer Mail im Fenster erscheint, ist eine reine Textverarbeitung – Absätze erkennen, Zitate zurücktreten lassen, Signaturen trennen:
+
+```bash
+node src/tests/mailtext.test.mjs
+```
+
+Geprüft wird, was aus einer Antwortmail wird: Zeilen mit `>` und die Zitatköpfe von Outlook und Gmail („Am 12.10.2026 um 05:11 schrieb …“, „Von: …“) fallen in einen eigenen Block, die Trennlinie `-- ` vor der Signatur ebenfalls. Ebenso das Zusammenfügen harter Zeilenumbrüche – und zwar **nur** dort, wo eine lange Zeile auf eine gewöhnliche folgt; kurze Zeilen, Aufzählungen und nummerierte Listen bleiben, weil dort der Umbruch gewollt ist.
+
+Der wichtigste Teil des Skripts prüft die Zusage, die dabei leicht verloren geht: Fremder Mailtext ist Angriffseingabe. Die Darstellung baut Absätze als eigene Elemente auf, und deshalb wird nachgesehen, dass kein `innerHTML`, kein `insertAdjacentHTML` und kein `outerHTML` im Spiel ist – jeder Text aus einer Mail wird über `textContent` gesetzt.
+
+## Stand der Prüfungen
+
+531 bestandene Rust-Tests, dazu sieben Skripte ohne Fenster. Drei Rust-Tests fallen durch; sie prüfen Kalenderdaten, die im Quelltext fest auf den 5. bis 7. Oktober 2026 stehen und deshalb inzwischen in der Vergangenheit liegen. Sie haben nichts mit diesen Änderungen zu tun und bestehen seit demselben Stand nicht mehr.
 
 
 ## Sicherheits- und Datenhinweise

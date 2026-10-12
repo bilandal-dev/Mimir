@@ -662,7 +662,17 @@ dialog label {
     display: flex;
     flex-direction: column;
     flex: none;
-    width: 300px;
+    /* **Die Breite folgt dem Fenster.** `clamp` mit drei Werten: nie schmaler
+       als 340 px – darunter ist ein Betreff schon abgeschnitten, und die ersten
+       beiden Zeilen einer Vorschau finden nicht mehr statt – und nie breiter als
+       620 px, denn eine Leiste, die der Unterhaltung die Hälfte des Bildschirms
+       wegnimmt, ist keine Leiste mehr. Dazwischen wächst sie mit.
+
+       Der mittlere Wert ist ein Anteil der Fensterbreite: Auf einem Notebook mit
+       1280 px bekommt die Leiste 358 px, auf einem großen Bildschirm mit 1920 px
+       fast 540. Der Nutzer sieht damit mehr Vorschau, ohne dass er etwas
+       einstellen muss. */
+    width: clamp(340px, 28vw, 620px);
     border-right: var(--border-width) solid var(--border-color);
     background: var(--panel-bg);
     overflow-y: auto;
@@ -691,14 +701,194 @@ dialog label {
     font-size: 1em;
 }
 
+/* **Drei Knöpfe teilen sich die Breite**, wie im Kalenderkopf. „Neu laden",
+   „Konten" und „Konto" passen in 300 px nicht nebeneinander, wenn jeder so breit
+   wird, wie sein Wort es verlangt – und drei verschieden breite Knöpfe wirken
+   unruhig. Abgeschnitten wird mit Auslassungspunkten, nicht mit einem Umbruch,
+   der die Kopfzeile zweizeilig macht. */
 .mail-head-actions {
     display: flex;
     gap: 4px;
+    flex: 1;
+    min-width: 0;
 }
 
 .mail-icon-button {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 0.75em;
-    padding: 2px 6px;
+    padding: 2px 4px;
+}
+
+/* --- Die Kontenauswahl in der Leiste -------------------------------------- */
+/* Wie der Kalender-Picker, und aus demselben Grund: Ein Block unter dem Kopf,
+   der nur da ist, wenn jemand ihn aufklappt. In einer 300 px breiten Leiste
+   wäre eine dauerhaft sichtbare Kontenliste der Grund, warum die Nachrichten
+   nicht mehr hineinpassen. */
+.mail-picker {
+    padding: 10px 12px;
+    border-bottom: var(--border-width) solid var(--border-color);
+    background: var(--surface);
+}
+
+.mail-picker-hint {
+    margin: 0 0 8px;
+    font-size: 0.78em;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+/* **Zwei Spalten, nicht eine Zeile.** Der Name ist das, woran man ein Konto
+   erkennt; der Zustand daneben ist das, was man wissen will, bevor man klickt.
+   Beides nebeneinander in 300 px wäre eine Zeile aus drei abgekürzten Wörtern. */
+.mail-picker-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 0.82em;
+    cursor: pointer;
+}
+
+/* **Größe zurückholen.** `dialog input` gibt jedem Eingabefeld im Dialog
+   `width: 100%` samt Rahmen und Innenabstand – das gilt für Textfelder und wäre
+   für ein Ankreuzfeld genau verkehrt: Es würde als breite, umrandete Fläche
+   erscheinen und den Namen daneben auf nichts zusammendrücken. Die
+   Klassenregel schlägt die Typregel, also muss hier ausdrücklich stehen, was
+   nicht gilt. */
+.mail-picker-entry input {
+    flex: none;
+    width: auto;
+    padding: 0;
+    border: none;
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.mail-picker-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Der Zustand: kurz genug, um nicht umzubrechen, und erkennbar, wenn er
+   anders ist als sonst. */
+.mail-picker-status {
+    flex: none;
+    font-size: 0.85em;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.mail-picker-status.offen {
+    color: var(--field-error);
+}
+
+#mail-picker-close {
+    margin-top: 8px;
+    width: 100%;
+}
+
+/* --- Die Kontenliste im Dialog --------------------------------------------- */
+.mail-account-list {
+    display: flex;
+    flex-direction: column;
+    margin: 10px 0;
+    border: var(--border-width) solid var(--border-color);
+    border-radius: var(--border-radius);
+    max-height: 30vh;
+    overflow-y: auto;
+}
+
+.mail-account-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 0.85em;
+    cursor: pointer;
+    border-bottom: var(--border-width) solid var(--border-color);
+}
+
+.mail-account-entry:last-child {
+    border-bottom: none;
+}
+
+.mail-account-entry input {
+    flex: none;
+    width: auto;
+    padding: 0;
+    border: none;
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.mail-account-label {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    gap: 2px;
+}
+
+.mail-account-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Die Adresse ist Zusatz, nicht Überschrift: kleiner und gedämpft. */
+.mail-account-adresse {
+    font-size: 0.82em;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mail-account-status {
+    flex: none;
+    font-size: 0.8em;
+    color: var(--field-error);
+    white-space: nowrap;
+}
+
+.mail-account-buttons {
+    display: flex;
+    gap: var(--gap);
+}
+
+.mail-account-buttons button {
+    flex: 1;
+}
+
+.mail-account-warnung {
+    margin: 8px 0 0;
+}
+
+/* Ein Knopf, der löscht, sieht schon vorher so aus wie einer, der löscht. */
+.mail-account-buttons .danger {
+    color: var(--field-error);
+}
+
+/* **Der zweite Klick sieht anders aus.** Solange der Knopfdruck nichts bewirkt,
+   ist die Leiste durch nichts vom Knopf zu unterscheiden – und wer ihn
+   aus Versehen zweimal trifft, verliert einen Schlüsselbund-Eintrag. */
+#mail-account-remove.danger-bereit {
+    border-color: var(--field-error);
+    color: var(--field-error);
+    font-weight: 600;
+}
+
+.mail-trenner {
+    margin: 14px 0;
+    border: none;
+    border-top: var(--border-width) solid var(--border-color);
 }
 
 .mail-state {
@@ -715,11 +905,32 @@ dialog label {
     flex: 1;
 }
 
+/* **Absender und Datum auf einer Zeile.** Das Datum stand vorher unter dem
+   Betreff und nahm dort eine ganze Zeile ein. In einer breiteren Leiste wäre
+   das verschenkter Raum: Das Datum steht rechts, der Absender nimmt den Rest.
+   Es ist die Zeile, die man ohnehin zuerst überfliegt. */
+.mail-item-zeile {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.mail-item-absender {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.85em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .mail-item {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 8px 12px;
+    gap: 3px;
+    padding: 9px 12px;
     border-bottom: var(--border-width) solid var(--border-color);
     cursor: pointer;
 }
@@ -729,31 +940,96 @@ dialog label {
     background: var(--hover-bg);
 }
 
-/* Ungelesen: eine Linie links. Kein Fettdruck – der Betreff einer Mail ist
-   lang, und fett gesetzt bricht er in zwei Zeilen und macht die Liste
-   unlesbar. */
+/* **Der Punkt vor dem Absender.** Das ist der Unterschied zwischen gelesen und
+   ungelesen, und er sitzt dort, wo das Auge beim Überfliegen einer Liste ohnehin
+   zuerst landet. Eine Linie am äußersten Rand war zu leise: Man überfliegt sie,
+   ohne sie zu sehen, und kann hinterher nicht sagen, ob das Markieren etwas
+   geändert hat. */
+.mail-item-punkt {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin-top: 0.45em;
+    border-radius: 50%;
+    background: var(--accent-color);
+    /* **Der Platz bleibt immer frei**, ob der Punkt sichtbar ist oder nicht:
+       Sonst rückt beim Markieren jede Zeile nach links, und die Liste beginnt zu
+       zappeln. */
+    visibility: hidden;
+}
+
+.mail-item.unread .mail-item-punkt {
+    visibility: visible;
+}
+
+/* **Gelesene treten zurück, statt fett vorzutreten.** Fett wäre am Betreff
+   falsch – er ist lang, bricht in zwei Zeilen und macht die Liste unlesbar. Also
+   wird nicht hervorgehoben, sondern das Gelesene gedimmt: Der neue Zustand
+   behält seine volle Deckkraft, und was man schon gelesen hat, tritt leise
+   zurück. Genau das unterscheidet die Leiste von einem Ordner voller Mails. */
+.mail-item:not(.unread) .mail-item-absender,
+.mail-item:not(.unread) .mail-item-subject {
+    color: var(--text-dim);
+}
+
+/* Und die Linie links bleibt, weil sie beim Überfliegen die Augenführung gibt:
+   Der Block ungelesener Nachrichten wird als Block sichtbar. */
 .mail-item.unread {
     border-left: 3px solid var(--accent-color);
     padding-left: calc(12px - 3px);
 }
 
-.mail-item-from {
-    font-size: 0.85em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
+/* **Der Betreff auf zwei Zeilen.** Ohne diese Grenze schiebt ein sehr langer
+   Betreff die Vorschau aus dem Bild, und der eigentliche Text – der Grund, warum
+   die Leiste breiter geworden ist – rutscht aus der Liste. */
 .mail-item-subject {
     font-size: 0.9em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+}
+
+/* **Die Vorschau: die ersten Zeilen des Textes.**
+ *
+ * Genau hier ist der Grund für die breitere Leiste. Sie ist kleiner und
+ * gedämpft, damit Absender und Betreff die Zeilen bleiben, die man sucht – und
+ * auf zwei Zeilen begrenzt, weil sie ein Anriss ist und kein Text zum Lesen. */
+.mail-item-vorschau {
+    font-size: 0.82em;
+    line-height: 1.35;
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+
+/* **Mehr Platz, mehr Zeilen.** Ab hier ist genug Raum, dass vier Zeilen Vorschau
+ * keinen Absatz mehr verdecken als die drei Zeilen darüber. Dieselbe Breite wie
+ * die Leiste, nicht der Bildschirm: Auf einem 1920-px-Bildschirm neben einem
+ * Chatfenster wäre die Leiste schmaler als der Bildschirm. */
+@media (min-width: 1700px) {
+    .mail-item-vorschau {
+        -webkit-line-clamp: 4;
+        line-clamp: 4;
+    }
+
+    .mail-item-subject {
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+    }
 }
 
 .mail-item-date {
+    flex: none;
     font-size: 0.7em;
     color: var(--text-dim);
+    white-space: nowrap;
 }
 
 .mail-foot {
@@ -766,8 +1042,12 @@ dialog label {
 /* --- Die Nachricht im Popup ----------------------------------------------- */
 
 #mail-message-dialog {
-    max-width: 720px;
-    width: 90vw;
+    /* **Breiter als die übrigen Fenster.** Ein Dialog mit Knöpfen ist bei 420 px
+       richtig; eine Mail ist es nicht. Die Zeilenlänge entscheidet über
+       Lesbarkeit, und 720 px sind bei dieser Schrift etwa neunzig Zeichen –
+       genug für einen Absatz, wenig genug, um die nächste Zeile zu finden. */
+    max-width: 760px;
+    width: min(92vw, 760px);
 }
 
 .mail-message {
@@ -779,6 +1059,12 @@ dialog label {
 
 .mail-message h3 {
     margin: 0;
+    /* **Der Betreff ist die Überschrift der Sache**, nicht eine Zeile unter
+       dem Rahmen. Größer und mit engem Zeilenabstand, damit er als Block steht
+       und nicht als eine weitere Textzeile. */
+    font-size: 1.25em;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
     word-break: break-word;
 }
 
@@ -787,30 +1073,86 @@ dialog label {
     gap: var(--gap);
     flex-wrap: wrap;
     margin: 0;
-    font-size: 0.8em;
+    font-size: 0.85em;
     color: var(--text-dim);
 }
 
 /*
- * **`<pre>`, nicht HTML.** Der Inhalt einer Mail ist Angriffseingabe von
- * Fremden. Gerendert gäbe er Links, die aussehen wie Links, und Bilder, die
- * aussehen wie nichts; als Text kann er nichts davon. Es ist dieselbe
- * Entscheidung wie bei der Antwort aus dem Modell, und aus demselben Grund.
+ * **Kein `<pre>` mehr, aber derselbe Grund.** Der Inhalt einer Mail ist
+ * Angriffseingabe von Fremden. Gerendert gäbe er Links, die aussehen wie Links,
+ * und Bilder, die aussehen wie nichts; als Text kann er nichts davon. Absätze,
+ * Zitate und Signatur werden als eigene Elemente aufgebaut – und jeder Text
+ * über `textContent` gesetzt, nie über `innerHTML`. Die Formatierung entsteht
+ * aus der erkannten Struktur, nicht aus Markup aus der Fremde.
  */
 .mail-message-text {
     flex: 1;
     min-height: 0;
-    max-height: 55vh;
+    max-height: 58vh;
     overflow-y: auto;
-    margin: 0;
-    padding: 12px;
+    /* **Weiches Umbrechen an jeder Stelle**, auch mitten in einer langen
+       Adresse oder einem Link. `overflow-wrap` bricht dort, wo `word-break`
+       mitten in einem Wort zerreißt. */
+    overflow-wrap: anywhere;
+    padding: 16px 18px;
     background: var(--input-bg);
     border: var(--border-width) solid var(--border-color);
     border-radius: var(--border-radius);
+}
+
+/* **Ein Absatz, ein Abstand.** Ohne den Abstand klebt der Text als Block aneinander
+   und wirkt wie eine Tabelle; mit zu viel wirkt jede Mail wie ein Buch. */
+.mail-message-text > p {
+    margin: 0 0 0.9em;
+    /* **Zeilenhöhe 1.65.** Für Fließtext aus einer fremden Mail ist das der
+       Unterschied zwischen Lesen und Scrollen: Zeilen, die sich berühren, muss
+       das Auge am Zeilenende erst suchen. */
+    line-height: 1.65;
     white-space: pre-wrap;
-    word-break: break-word;
-    font-family: inherit;
-    font-size: 0.9em;
+}
+
+.mail-message-text > p:last-child {
+    margin-bottom: 0;
+}
+
+/* **Zitate treten zurück.** Sie sind meist länger als der neue Text, und
+   unformatiert füllen sie die Ansicht. Eingerückt, kleiner und blasser, mit
+   einer Linie, die dem Auge sagt: Das ist nicht mehr der eigentliche Text. */
+.mail-zitat {
+    margin: 1.1em 0 0.9em;
+    padding: 2px 0 2px 14px;
+    border-left: 3px solid var(--border-color);
+    color: var(--text-dim);
+    font-size: 0.92em;
+}
+
+.mail-zitat > p {
+    margin: 0 0 0.6em;
+    line-height: 1.55;
+    white-space: pre-wrap;
+}
+
+.mail-zitat > p:last-child {
+    margin-bottom: 0;
+}
+
+/* **Die Signatur ist Beiwerk.** Sie steht hinter dem Trenner und wird leiser
+   gesetzt, nicht weggelassen – sie gehört zur Mail, ist aber nicht deren Inhalt. */
+.mail-trenner {
+    margin: 1.4em 0 1em;
+    border: 0;
+    border-top: var(--border-width) solid var(--border-color);
+}
+
+.mail-signatur {
+    color: var(--text-dim);
+    font-size: 0.92em;
+}
+
+.mail-leer {
+    margin: 0;
+    color: var(--text-dim);
+    font-style: italic;
 }
 
 .mail-message-attachments {
@@ -822,7 +1164,26 @@ dialog label {
 .mail-message-actions {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: var(--gap);
+}
+
+/* **Der Gelesen-Knopf steht in der Mitte**, zwischen „Schließen" und der
+   einen Sache, um die es im Fenster geht. Links das Verlassen, in der Mitte der
+   Zustand der Mail, rechts die Handlung. */
+.mail-read-button {
+    /* **Leiser als die beiden anderen.** Er ist eine Nebenhandlung; wer ihn
+       braucht, sucht ihn, und wer ihn nicht braucht, sieht ihn nicht zuerst. */
+    opacity: 0.85;
+}
+
+.mail-read-button:hover:not(:disabled) {
+    opacity: 1;
+}
+
+.mail-read-button:disabled {
+    opacity: 0.45;
+    cursor: default;
 }
 
 .mail-summarize-button {
@@ -832,6 +1193,29 @@ dialog label {
 .mail-hint {
     font-size: 0.8em;
     color: var(--text-dim);
+}
+
+/* **Die Ankreuzfelder im Dialog.** Sie standen vorher ohne jede eigene Regel da
+   und erbten damit `dialog input` – `width: 100%`, Rahmen, Innenabstand. Ein
+   Kästchen, das so breit ist wie das Formular daneben, sieht aus wie ein
+   Eingabefeld und meint etwas anderes. */
+.mail-remember,
+.mail-account-buttons input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.mail-remember input {
+    flex: none;
+    width: auto;
+    padding: 0;
+    border: none;
+    margin: 0;
+    accent-color: var(--accent-color);
+    cursor: pointer;
 }
 
 .mail-dialog-error {

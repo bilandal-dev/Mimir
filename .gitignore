@@ -28,3 +28,27 @@ dist-ssr
 #   cargo tauri icon src-tauri/icons/source.svg
 /src-tauri/icons/android/
 /src-tauri/icons/ios/
+
+# --- Zugangsdaten -------------------------------------------------------------
+#
+# **Mimir legt seine Dateien nicht ins Repository**, sondern unter
+# `~/.config/com.bilandal.mimir/`. Diese Zeilen sind deshalb kein normaler
+# Schutz, sondern eine Schlaupforte für den einen Fall, in dem es doch passiert:
+# Jemand zeigt beim Entwickeln auf ein Konfigurationsverzeichnis im Projekt (oder
+# kopiert die Dateien dorthin, um sie zu sichern), und dann liegt beim nächsten
+# `git add .` das Postfach-Passwort im Commit.
+#
+# Aus demselben Grund stehen hier die Dateinamen und nicht nur `*.json`:
+# `ollama.json` enthält die eingetragenen Server und **die Benutzernamen aller
+# Mailkonten**, `chat-history.json` den vollständigen Verlauf im Klartext, und
+# `calendar-secret.json` – anders als der Schlüsselbund – ein CalDAV-Passwort im
+# Klartext. Keines davon gehört in eine Historie.
+ollama.json
+chat-history.json
+calendar-secret.json
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
