@@ -141,8 +141,9 @@ header h2 {
     line-height: 1.2;
 }
 
-/* Der Knopf für das Schema und der Name stehen als eine Einheit links, weil der
-   Kopf sonst den Knopf in die Mitte der Zeile schöbe. */
+/* Nur noch der Name steht hier links. Der Schemaknopf sitzt bei den
+   Bedienelementen am rechten Rand, damit die Zeile nicht an zwei Enden
+   aufgeteilt wird. */
 .header-brand {
     display: flex;
     align-items: center;
@@ -1159,6 +1160,49 @@ dialog label {
     margin: 0;
     font-size: 0.8em;
     color: var(--text-dim);
+}
+
+/* **Im Fenster, nicht in der Leiste.** Das Fenster ist modal; eine Meldung
+   über der Liste wäre vom Backdrop verdeckt, und ein Knopf, der scheitert,
+   ohne dass sich etwas tut, sieht aus wie ein Knopf, der nichts tut. */
+.mail-message-error {
+    margin: 0;
+    font-size: 0.85em;
+    color: var(--field-error);
+}
+
+/* **Warnung vor dem Löschen.** Wie der Fehler steht sie im Fenster, damit man
+   sie liest, solange das Fenster offen ist – und nur, solange der Knopf
+   scharf ist. */
+.mail-message-warnung {
+    margin: 0;
+    font-size: 0.85em;
+    color: var(--field-error);
+}
+
+/* **Ein Knopf, der endgültig löscht, sieht schon vorher so aus.** */
+.mail-delete-button {
+    opacity: 0.85;
+    color: var(--field-error);
+}
+
+.mail-delete-button:hover:not(:disabled) {
+    opacity: 1;
+}
+
+.mail-delete-button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* **Der zweite Klick sieht anders aus.** Solange der erste nichts bewirkt, ist
+   die Zeile durch nichts vom Knopf zu unterscheiden – und wer sie zweimal
+   trifft, verliert eine Mail ohne Weg zurück. */
+#mail-message-delete.loeschen-bereit {
+    border-color: var(--field-error);
+    background: var(--field-error);
+    color: var(--button-text);
+    font-weight: 600;
 }
 
 .mail-message-actions {

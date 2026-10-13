@@ -172,11 +172,68 @@ Der Zustand geht an den Server, nicht nur in die Leiste: Mimir schickt
 ausgewählten Ordner, deshalb wird er wie jeder andere Abruf mit einem `SELECT`
 eingeleitet.
 
-Markieren ist ein **eigener Befehl**, kein Zusatz zum Öffnen: Man markiert aus
-der Liste heraus, ohne eine Mail aufzuschlagen – und ein Befehl, der beides
-täte, würde beim bloss Durchsehen der Liste Nachrichten verschieben. Nach dem
-Markieren ziehen Knopf, Zeile in der Liste und Fenster nach; ein Fehler landet
-über der Liste, nicht in der Konsole.
+Markieren aus der Liste heraus ist ein **eigener Befehl** – man markiert, ohne
+eine Mail aufzuschlagen. Das bloss Durchsehen der Liste verschiebt nichts, weil
+die Vorschau mit `BODY.PEEK[]` geholt wird. Nach dem Markieren ziehen Knopf,
+Zeile in der Liste und Fenster nach; ein Fehler landet im Fenster und über der
+Liste, nicht in der Konsole.
+
+**Es gibt zwei Wege, und beide setzen das Flag beim Server.** Der Knopf im
+Fenster schaltet um, und das Öffnen einer Nachricht markiert sie als gelesen –
+wer eine Mail aufklappt, hat sie gelesen, und Mimir soll dabei nicht
+weniger vernünftig sein als ein anderes Mailprogramm.
+
+**Das Öffnen holt den Rumpf mit `PEEK` und markiert mit einem eigenen
+`STORE`.** Nach RFC 3501 setzt ein Abruf von `BODY` oder `RFC822` das
+Gelesen-Flag als Nebenwirkung – und der Server entscheidet, ob die Flags in
+seiner Antwort das Getane schon tragen. Sich darauf zu verlassen hieße, den
+Zustand zu raten. Also wird ohne Nebenwirkung gelesen und das Flag mit
+demselben `STORE` gesetzt, den auch der Knopf schickt. **Damit weiß Mimir
+danach, ob es geklappt hat**, und kann es sagen.
+
+Markiert wird nur, wenn die Nachricht noch ungelesen ist. Sonst ginge ein
+`STORE` über die Leitung, der nichts bewirkt – und bei einem Ordner, der nicht
+schreiben darf, würde genau diese unnötige Runde als Fehler gemeldet.
+
+**Klappt das Markieren nicht, kommt die Nachricht trotzdem.** Sie ist immer
+noch lesbar; sie nur nicht lesbar zu machen wäre die schlimmere halbe Lösung.
+Ihr Zustand bleibt unverändert, und das Fenster sagt es.
+
+**Der Stand im Fenster kommt vom Server.** Der Abruf des Textes holt die
+`FLAGS` mit, und die entscheiden, was der Knopf anzeigt und was die Zeile trägt.
+Eine Liste kann sie nicht kennen, wenn zwischen dem Zeichnen und dem Klick eine
+andere Mail zugestellt wurde.
+
+**Ein Fehler steht im Fenster, nicht nur in der Leiste.** Das Mailsfenster ist
+modal; eine Meldung über der Liste wäre vom Backdrop verdeckt. Ein Knopf, der
+scheitert, ohne dass man es sieht, ist von einem Knopf, der nichts tut, nicht zu
+unterscheiden – und nichts zu tun ist genau das, was man nicht erklären kann.
+Deshalb steht der Fehler im Fenster, und die Leiste behält ihn für danach.
+
+### Löschen
+
+Im Fenster steht neben dem Gelesen-Knopf ein Knopf **„Löschen"**. Mimir
+schickt `STORE <nummer> +FLAGS (\Deleted)` und danach `EXPUNGE`.
+
+**Zweimal klicken.** Der erste Klick macht den Knopf nur scharf und sagt, was
+geschehen wird; der zweite löscht. Eine Rückfrage wäre sauberer, aber
+`window.confirm` fällt in einer Webview nicht überall zuverlässig aus – und
+eine stehen gebliebene Frage sähe aus, als sei der Knopf kaputt. Der Knopf
+wird beim Öffnen und beim Schließen des Fensters zurückgesetzt, damit nicht die
+nächste Nachricht schon beim ersten Klick dran glaubt.
+
+**Gelöscht wird endgültig: Es gibt keinen Papierkorb.** `EXPUNGE` ist
+unumkehrbar, und Mimir führt die Nachricht nirgends auf.
+
+**`EXPUNGE` nimmt mehr mit, als Mimir markiert hat.** Der Befehl kennt keine
+Nachricht, sondern nur das Flag: Alles, was im Ordner als gelöscht vermerkt
+steht, geht mit – auch das, was ein anderes Programm vorgemerkt hat. Das ist
+die Art des Protokolls, keine Eigenheit hier.
+
+**Danach ist die Liste neu zu holen.** `EXPUNGE` rückt alles hinter der
+gelöschten Nachricht um eine Nummer nach vorn. Eine Liste, in der man bloss die
+Zeile streicht, hätte danach an jeder folgenden Zeile die falsche Nummer – und
+der nächste Klick auf „als gelesen markieren" träfe die Nachricht daneben.
 
 ### Zusammenfassen
 
@@ -301,6 +358,16 @@ Was Mimir schickt, ist deshalb:
 | `B1 SELECT "INBOX"` | wählt den Ordner und nennt, wie viele Nachrichten er hat |
 | `B2 FETCH 991:1000 (UID FLAGS ENVELOPE RFC822.SIZE)` | die Köpfe der neuesten zehn |
 | `B3 FETCH 991:1000 (BODY.PEEK[]<0.2048>)` | dieselben Nachrichten, nur der Anfang |
+
+Für das **Öffnen einer einzelnen Nachricht** kommen zwei weitere hinzu – auf
+derselben Verbindung und mit demselben `SELECT`:
+
+| Befehl | Bedeutung |
+| --- | --- |
+| `B3 FETCH 42 (UID FLAGS ENVELOPE BODY.PEEK[])` | eine Nachricht, mit ihrem Gelesen-Stand |
+| `B4 STORE 42 +FLAGS (\Seen)` | sie markieren – `-FLAGS` nimmt sie zurück |
+| `B4 STORE 42 +FLAGS (\Deleted)` | sie zum Löschen vormerken |
+| `B5 EXPUNGE` | alles Vorgemerkte wegräumen |
 
 `PEEK` statt `BODY` setzt das Gelesen-Flag nicht – sonst gälte beim Scrollen
 durch die Leiste alles als gelesen, und das ist der Grund, warum Mailprogramme es

@@ -1696,3 +1696,35 @@ pub async fn imap_gelesen_setzen(
 
     Ok(())
 }
+
+/// Löscht eine Nachricht aus dem eingestellten Ordner.
+///
+/// **Warnung an den Aufrufer: Danach sind die Nachrichtennummern anders.**
+/// `EXPUNGE` rückt alles hinter der gelöschten Nachricht um eins nach vorn.
+/// Wer die Liste nicht neu holt, zeigt danach die falschen Nachrichten.
+pub async fn imap_loeschen(
+    config: &MailConfig,
+    session: &MailSession,
+    nummer: u32,
+) -> Result<(), String> {
+    if !config.ist_eingerichtet() {
+        return Err(format!(
+            "Das Konto „{}“ ist nicht vollständig eingetragen",
+            config.anzeige_name()
+        ));
+    }
+
+    let passwort = session.password(&config.id).ok_or_else(|| {
+        format!(
+            "Für „{}“ ist nicht angemeldet. Mit „Konto“ in der Mailleiste anmelden.",
+            config.anzeige_name()
+        )
+    })?;
+
+    let mut verbindung = imap::verbinde(&config.imap_server, &config.username, &passwort).await?;
+
+    imap::loesche(&mut verbindung, config.ordner(), nummer).await?;
+    session.mark_success(&config.id);
+
+    Ok(())
+}

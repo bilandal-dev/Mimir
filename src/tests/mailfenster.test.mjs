@@ -122,6 +122,126 @@ gleich('das Markieren hat eine Frist', /invokeMail\(\s*'mail_gelesen_setzen'/.te
 // **Und ein Fehler landet in der Leiste**, wie bei jedem anderen Schritt.
 gleich('ein Fehler landet in der Leiste', /catch \(error\)[\s\S]*?meldeMailHinweis\(/.test(schalten), true);
 
+// **Und im Fenster, denn die Leiste ist hinter dem Backdrop.** Das Mailsfenster
+// ist modal; eine Meldung über der Liste ist unsichtbar, solange es offen ist.
+// Ein Knopf, der scheitert, ohne dass sich etwas tut, sieht genau aus wie ein
+// Knopf, der nichts tut – das war der Befund, den man nicht erklären konnte.
+const fensterFehler = funktion('meldeMailFensterFehler');
+gleich(
+  'ein Fehler landet auch im Fenster',
+  /catch \(error\)[\s\S]*?meldeMailFensterFehler\(/.test(schalten),
+  true,
+);
+// **Und er wird wieder geleert** – sonst stünde der Fehler der letzten Nachricht
+// beim nächsten Fenster noch da.
+gleich(
+  'das Fenster meldet einen Fehler nur, wenn einer da ist',
+  /mailMessageError\.hidden = !text/.test(fensterFehler),
+  true,
+);
+gleich(
+  'und der Fehler verschwindet wieder',
+  /meldeMailFensterFehler\(''\)/.test(schalten) && /meldeMailFensterFehler\([\s\S]*?: ''/.test(oeffnet),
+  true,
+);
+
+// **Und das Öffnen selbst kann einen Fehler melden.** Lesen macht gelesen; geht
+// das nicht, kommt die Nachricht trotzdem – aber der Benutzer soll erfahren,
+// dass ihr Zustand unverändert blieb, statt es beim nächsten Nachladen zu
+// merken. Ein verschwiegener Fehler ist genau das, woran sich dieser Knopf
+// nicht erklären liess.
+gleich(
+  'das Öffnen meldet ein gescheitertes Markieren',
+  /voll\.markierungsfehler/.test(oeffnet),
+  true,
+);
+
+// **Der Gelesen-Stand kommt vom Server.** Der Abruf des Textes meldet die Flags
+// mit; die Liste kann sie nicht kennen, wenn zwischen dem Zeichnen und dem
+// Klick eine andere Mail zugestellt wurde.
+gleich(
+  'der Fensterkopf kommt aus der Antwort',
+  /mailZustand\.offenKopf = \{ \.\.\.voll\.kopf/.test(oeffnet),
+  true,
+);
+gleich(
+  'und die Liste folgt dem Server',
+  /nachricht\.gelesen = voll\.kopf\.gelesen/.test(oeffnet),
+  true,
+);
+
+// --- Löschen --------------------------------------------------------------
+
+const loeschen = funktion('loescheMail');
+const zurueck = funktion('schalteLoeschenZurueck');
+
+if (!loeschen || !zurueck) {
+  console.error('FAIL loescheMail/schalteLoeschenZurueck nicht gefunden');
+  process.exit(2);
+}
+
+// **Zweimal klicken statt Rückfragen.** `EXPUNGE` ist unumkehrbar, und
+// `window.confirm` fällt in einer Webview nicht überall aus. Ohne die scharfe
+// Stufe wäre ein Klick daneben der Verlust einer Nachricht.
+gleich(
+  'der erste Klick löscht noch nichts',
+  /if \(!mailZustand\.loeschenArmiert\)[\s\S]*?return;/.test(loeschen),
+  true,
+);
+gleich('und macht den Knopf scharf', /loeschenArmiert = true/.test(loeschen), true);
+gleich(
+  'und sagt, was geschehen wird',
+  /Wirklich löschen/.test(loeschen) && /mailMessageWarnung\.textContent/.test(loeschen),
+  true,
+);
+
+// **Der Befehl hat eine Frist** – er baut eine neue Verbindung auf und
+// expungiert, das ist kein augenblickliches Geschäft.
+gleich(
+  'das Löschen hat eine Frist',
+  /invokeMail\(\s*'mail_loeschen'/.test(loeschen),
+  true,
+);
+
+// **Danach wird die Liste neu geholt, nicht geändert.** `EXPUNGE` rückt alle
+// Nummern hinter der gelöschten um eins nach vorn; eine von Hand gepatchte
+// Liste träfe beim nächsten Klick die Nachricht daneben.
+gleich(
+  'die Liste wird neu geholt',
+  /aktualisiereMail\(\)/.test(loeschen),
+  true,
+);
+
+// **Und das Fenster geht zu**, weil es sonst über einer Nachricht stünde, die
+// es nicht mehr gibt.
+gleich(
+  'das Fenster wird geschlossen',
+  /mailMessageDialog\.close\(\)/.test(loeschen),
+  true,
+);
+
+// **Der Knopf wird mit dem Fenster zurückgesetzt** – sonst wäre die nächste
+// Nachricht schon beim ersten Klick scharf.
+gleich(
+  'der Knopf wird zurückgesetzt',
+  /mailZustand\.loeschenArmiert = false/.test(zurueck) &&
+    /mailMessageDelete\.classList\.remove\('loeschen-bereit'\)/.test(zurueck),
+  true,
+);
+gleich(
+  'und zwar beim Öffnen wie beim Schließen',
+  /schalteLoeschenZurueck\(\)/.test(oeffnet) && /schalteLoeschenZurueck\(\)/.test(src),
+  true,
+);
+
+// **Ein Fehler landet im Fenster** – dort ist er lesbar, hinter dem Backdrop
+// in der Leiste nicht.
+gleich(
+  'ein Fehler beim Löschen landet im Fenster',
+  /catch \(error\)[\s\S]*?meldeMailFensterFehler\(/.test(loeschen),
+  true,
+);
+
 // **Escape räumt auf, nicht nur der Knopf.** Hängt das Aufräumen am Knopf,
 // behält der Zustand über das Fenster hinaus – und die Liste wäre die einzige
 // Stelle, die ihn kennt.

@@ -815,20 +815,28 @@ async fn gegen_server_mit_ordnerpflicht() -> Result<Vec<Vec<u8>>, String> {
 
                 notiert.lock().unwrap().push(befehl.clone());
                 let text = String::from_utf8_lossy(&befehl).to_string();
+                let tag = text.split_whitespace().next().unwrap_or("B1").to_string();
 
                 let antwort = if text.contains("SELECT") {
                     geoeffnet = true;
-                    b"* 1 EXISTS\r\nB1 OK [READ-ONLY] SELECT done\r\n".to_vec()
+                    format!("* 1 EXISTS\r\n{tag} OK [READ-WRITE] SELECT done\r\n").into_bytes()
+                } else if text.contains("STORE") {
+                    // `hole_text` markiert im Anschluss an seinen Abruf.
+                    format!("* 1 FETCH (FLAGS (\\Seen))\r\n{tag} OK STORE completed\r\n").into_bytes()
                 } else if text.contains("FETCH") && !geoeffnet {
-                    b"B3 BAD Please select a mailbox first\r\n".to_vec()
+                    format!("{tag} BAD Please select a mailbox first\r\n").into_bytes()
                 } else if text.contains("FETCH") {
-                    let roh = b"Betreff: Hallo\r\n\r\nHallo!\r\n";
-                    let mut v = format!("* 1 FETCH (RFC822 {{{}}}\r\n", roh.len()).into_bytes();
+                    let roh = b"Subject: Hallo\r\nContent-Type: text/plain\r\n\r\nHallo!\r\n";
+                    // **Auf `BODY.PEEK[]` antwortet der Server mit `BODY[]`** –
+                    // das PEEK steht im Befehl, nicht in der Antwort. Die Flags
+                    // kommen mit, weil Mimir sie aus derselben Antwort liest.
+                    let mut v =
+                        format!("* 1 FETCH (FLAGS (\\Seen) BODY[] {{{}}}\r\n", roh.len()).into_bytes();
                     v.extend_from_slice(roh);
-                    v.extend_from_slice(b")\r\nB3 OK FETCH done\r\n");
+                    v.extend_from_slice(format!(")\r\n{tag} OK FETCH done\r\n").as_bytes());
                     v
                 } else {
-                    b"B1 OK done\r\n".to_vec()
+                    format!("{tag} OK done\r\n").into_bytes()
                 };
 
                 let _ = schreiben.write_all(&antwort).await;
@@ -1356,4 +1364,513 @@ async fn ein_server_ohne_authenticate_plain_sagt_es() {
         .expect_err("BAD ist kein Erfolg");
 
     assert!(fehler.contains("A1 AUTHENTICATE PLAIN"), "{fehler}");
+}
+
+// --- Der Zustand kommt auch wieder zurück -------------------------------
+
+/// Spielt einen Server, der Flags **wirklich festhält**.
+///
+/// **Der entscheidende Unterschied zu den Attrappen oben:** Die anderen Tests
+/// prüfen, *ob* ein Befehl abging. Dieser prüft, was danach *im Ordner steht* –
+/// denn ein `STORE`, das ankommt und nichts bewirkt, ist von einem, das nichts
+/// ankommt, im Protokoll nicht zu unterscheiden.
+async fn gegen_server_mit_gedaechtnis(
+    dort: tokio::io::DuplexStream,
+) -> std::sync::Arc<std::sync::Mutex<Vec<bool>>> {
+    // Nummer -> Flag. Eine Nachricht, ungelesen.
+    let gedaechtnis = std::sync::Arc::new(std::sync::Mutex::new(vec![false]));
+
+    tokio::spawn({
+        let stand = gedaechtnis.clone();
+
+        async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let (lesen, mut schreiben) = tokio::io::split(dort);
+            let lesen = std::sync::Arc::new(tokio::sync::Mutex::new(lesen));
+
+            let mut puffer = vec![0u8; 8192];
+            let mut erwarten_zugangsdaten = false;
+
+            let _ = schreiben
+                .write_all(b"* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN] bereit\r\n")
+                .await;
+            let _ = schreiben.flush().await;
+
+            for _ in 0..12 {
+                let mut befehl = Vec::new();
+                while let Ok(anzahl) = lesen.lock().await.read(&mut puffer).await {
+                    if anzahl == 0 {
+                        break;
+                    }
+                    befehl.extend_from_slice(&puffer[..anzahl]);
+                    if befehl.ends_with(b"\r\n") {
+                        break;
+                    }
+                }
+
+                if befehl.is_empty() {
+                    break;
+                }
+
+                let text = String::from_utf8_lossy(&befehl).to_string();
+                let trim = text.trim();
+
+                // Die Zugangsdaten kommen ohne Tag.
+                if erwarten_zugangsdaten {
+                    erwarten_zugangsdaten = false;
+                    let _ = schreiben.write_all(b"A1 OK angemeldet\r\n").await;
+                    let _ = schreiben.flush().await;
+                    continue;
+                }
+
+                if trim.starts_with("A1 AUTHENTICATE") {
+                    erwarten_zugangsdaten = true;
+                    let _ = schreiben.write_all(b"+ \r\n").await;
+                    let _ = schreiben.flush().await;
+                    continue;
+                }
+
+                let tag = trim.split_whitespace().next().unwrap_or("B1").to_string();
+
+                let antwort = if trim.contains("SELECT") {
+                    format!("* FLAGS (\\Seen)\r\n* 1 EXISTS\r\n* OK [UIDVALIDITY 1] ok\r\n{tag} OK [READ-WRITE] SELECT completed\r\n")
+                } else if trim.contains("STORE") {
+                    // **Die Zahl aus dem Befehl nehmen** – das ist die Nummer,
+                    // um die es geht, nicht eine geratene.
+                    let wo = trim.find("STORE").unwrap() + "STORE".len();
+                    let rest = &trim[wo..];
+                    let nummer: usize = rest
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("1")
+                        .parse()
+                        .unwrap_or(1);
+                    {
+                        let mut w = stand.lock().unwrap();
+                        while w.len() < nummer {
+                            w.push(false);
+                        }
+                        w[nummer - 1] = rest.contains("+FLAGS");
+                    }
+                    let flag = if rest.contains("+FLAGS") { "\\Seen" } else { "" };
+                    format!("* {nummer} FETCH (FLAGS ({flag}))\r\n{tag} OK STORE completed\r\n")
+                } else if trim.contains("RFC822.SIZE") {
+                    let flag = if stand.lock().unwrap()[0] { "\\Seen" } else { "" };
+                    format!(
+                        "* 1 FETCH (UID 100 FLAGS ({flag}) RFC822.SIZE 64 ENVELOPE (\"Mon, 12 Oct 2026 09:14:00 +0200\" \"Termin\" ((\"Sarah\" NIL \"sarah\" \"example.org\")) ((\"kai\" NIL \"kai\" \"privat.invalid\")) ((\"kai\" NIL \"kai\" \"privat.invalid\")) ((\"kai\" NIL \"kai\" \"privat.invalid\")) NIL NIL NIL \"<a@example.org>\"))\r\n{tag} OK FETCH completed\r\n"
+                    )
+                } else if trim.contains("BODY.PEEK") {
+                    let roh = "Hallo Kai!\r\n";
+                    format!(
+                        "* 1 FETCH (BODY[] {{{}}}\r\n{})\r\n{tag} OK FETCH completed\r\n",
+                        roh.len(),
+                        roh
+                    )
+                } else {
+                    format!("{tag} OK done\r\n")
+                };
+
+                let _ = schreiben.write_all(antwort.as_bytes()).await;
+                let _ = schreiben.flush().await;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    });
+
+    gedaechtnis
+}
+
+/// **Die ganze Kette, einmal durch:** Liste holen, markieren, Liste holen.
+///
+/// **Bis hierher prüfte jeder Test nur den Befehl, nicht den Zustand.** Ein
+/// `+FLAGS`, das der Server annimmt und nicht ausführt, sieht in der
+/// Befehlsprotokollierung genau wie ein `+FLAGS`, das wirkt – und die Leiste
+/// zeigte weiterhin „ungelesen", ohne dass irgendwo ein Fehler aufgetaucht wäre.
+#[tokio::test]
+async fn ein_markiertes_flag_kommt_beim_naechsten_holen_wieder_zurueck() {
+    let (hier, dort) = tokio::io::duplex(256 * 1024);
+    let gedaechtnis = gegen_server_mit_gedaechtnis(dort).await;
+
+    let mut verbindung = Verbindung::new(hier);
+
+    // **Die erste Runde: ungelesen.**
+    let vorher = hole_nachrichten(&mut verbindung, "INBOX", 10)
+        .await
+        .expect("die Liste holen");
+    assert_eq!(vorher.len(), 1);
+    assert!(
+        !vorher[0].gelesen,
+        "eine frische Nachricht ist ungelesen: {:?}",
+        vorher[0].gelesen
+    );
+
+    // **Markieren – wie der Knopf es tut.**
+    setze_gelesen(&mut verbindung, "INBOX", 1, true)
+        .await
+        .expect("als gelesen markieren");
+
+    // **Und die zweite Runde: gelesen.**
+    let nachher = hole_nachrichten(&mut verbindung, "INBOX", 10)
+        .await
+        .expect("die Liste noch einmal holen");
+
+    assert!(
+        nachher[0].gelesen,
+        "nach dem Markieren muss die Nachricht als gelesen wiederkommen: {:?}",
+        nachher[0].gelesen
+    );
+
+    assert!(
+        gedaechtnis.lock().unwrap()[0],
+        "und der Server muss sie sich gemerkt haben"
+    );
+}
+
+// --- Das Öffnen markiert, und zwar ausdrücklich ---------------------------
+
+/// Spielt einen Server, der auf `BODY.PEEK[]` eine Nachricht mit gegebenen Flags
+/// antwortet – und ein `STORE` je nach `store_ok` annimmt oder ablehnt.
+async fn server_mit_antwort(
+    flags: &str,
+    store_ok: bool,
+) -> Result<(Vec<String>, NachrichtVoll), String> {
+    let (hier, dort) = tokio::io::duplex(256 * 1024);
+    let gesendet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let flags = flags.to_string();
+
+    tokio::spawn({
+        let notiert = gesendet.clone();
+
+        async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let (lesen, mut schreiben) = tokio::io::split(dort);
+            let lesen = std::sync::Arc::new(tokio::sync::Mutex::new(lesen));
+
+            let mut puffer = vec![0u8; 8192];
+            let mut geoeffnet = false;
+
+            for _ in 0..5 {
+                let mut befehl = Vec::new();
+                while let Ok(anzahl) = lesen.lock().await.read(&mut puffer).await {
+                    if anzahl == 0 {
+                        break;
+                    }
+                    befehl.extend_from_slice(&puffer[..anzahl]);
+                    if befehl.ends_with(b"\r\n") {
+                        break;
+                    }
+                }
+
+                if befehl.is_empty() {
+                    break;
+                }
+
+                notiert.lock().unwrap().push(befehl.clone());
+                let text = String::from_utf8_lossy(&befehl).to_string();
+                let tag = text.split_whitespace().next().unwrap_or("B1").to_string();
+
+                let antwort = if text.contains("SELECT") {
+                    geoeffnet = true;
+                    format!("* 1 EXISTS\r\n{tag} OK [READ-WRITE] SELECT done\r\n")
+                } else if text.contains("STORE") {
+                    if store_ok {
+                        format!("* 1 FETCH (FLAGS (\\Seen))\r\n{tag} OK STORE completed\r\n")
+                    } else {
+                        format!("{tag} NO [CANNOT] der Ordner laesst sich nicht beschreiben\r\n")
+                    }
+                } else if text.contains("FETCH") && !geoeffnet {
+                    format!("{tag} BAD Please select a mailbox first\r\n")
+                } else {
+                    let roh = "Subject: Hallo\r\nContent-Type: text/plain\r\n\r\nHallo!\r\n";
+                    format!(
+                        "* 1 FETCH (FLAGS ({flags}) BODY[] {{{}}}\r\n{})\r\n{tag} OK FETCH done\r\n",
+                        roh.len(),
+                        roh
+                    )
+                };
+
+                let _ = schreiben.write_all(antwort.as_bytes()).await;
+                let _ = schreiben.flush().await;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
+
+    let mut verbindung = Verbindung::new(hier);
+    let voll = hole_text(&mut verbindung, "INBOX", 1).await?;
+
+    let texte = gesendet
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+
+    Ok((texte, voll))
+}
+
+/// **Der Rumpf wird ohne Nebenwirkung geholt.**
+///
+/// Nach RFC 3501 setzt ein Abruf von `BODY` oder `RFC822` das Gelesen-Flag als
+/// Nebenwirkung, und der Server entscheidet, ob die Flags in seiner Antwort
+/// das schon Getane tragen. Darauf sich zu verlassen hieße, den Zustand zu
+/// raten – also wird ohne Nebenwirkung gelesen und das Flag ausdrücklich
+/// gesetzt. Das ist der Grund, warum hier `PEEK` steht und nicht `BODY`.
+#[tokio::test]
+async fn der_rumpf_wird_ohne_nebenwirkung_geholt() {
+    let (texte, _) = server_mit_antwort("", true)
+        .await
+        .expect("die Nachricht holen");
+
+    let fetch = texte
+        .iter()
+        .find(|t| t.contains("FETCH"))
+        .expect("überhaupt ein FETCH");
+
+    assert!(
+        fetch.contains("BODY.PEEK[]"),
+        "der Abruf muss PEEK sein: {fetch}"
+    );
+    assert!(
+        !fetch.contains("RFC822"),
+        "ein Abruf von RFC822 setzt das Gelesen-Flag: {fetch}"
+    );
+}
+
+/// **Und Öffnen markiert trotzdem – mit einem eigenen `STORE`.**
+///
+/// Das ist der Weg, den der Benutzer erwartet: Wer eine Mail aufklappt, hat sie
+/// gelesen. Bis hierher markierte nur der Knopf, und die Leiste behielt beim
+/// bloss Aufklappen ihren alten Stand.
+#[tokio::test]
+async fn das_oeffnen_markiert_als_gelesen() {
+    let (texte, voll) = server_mit_antwort("", true)
+        .await
+        .expect("die Nachricht holen");
+
+    let store = texte
+        .iter()
+        .find(|t| t.contains("STORE"))
+        .unwrap_or_else(|| panic!("überhaupt kein STORE: {texte:?}"));
+
+    assert!(
+        store.contains("+FLAGS") && store.contains("\\Seen"),
+        "gelesen markieren mit +FLAGS: {store}"
+    );
+    assert!(
+        voll.kopf.gelesen,
+        "die Nachricht kommt als gelesen zurück"
+    );
+    assert!(
+        voll.markierungsfehler.is_none(),
+        "es ging: {:?}",
+        voll.markierungsfehler
+    );
+}
+
+/// **Eine bereits gelesene Nachricht wird nicht noch einmal markiert.**
+///
+/// Sonst ginge ein `STORE` über die Leitung, der nichts bewirkt – und in einem
+/// Ordner, der nicht schreiben darf, würde genau diese unnötige Runde als
+/// Fehler gemeldet, obwohl gar nichts zu tun war.
+#[tokio::test]
+async fn eine_bereits_gelesene_nachricht_bleibt_ohne_store() {
+    let (texte, voll) = server_mit_antwort("\\Seen", true)
+        .await
+        .expect("die Nachricht holen");
+
+    assert!(
+        !texte.iter().any(|t| t.contains("STORE")),
+        "ein STORE ohne Anlass: {texte:?}"
+    );
+    assert!(voll.kopf.gelesen);
+    assert!(voll.markierungsfehler.is_none());
+}
+
+/// **Scheitert das Markieren, kommt die Nachricht trotzdem – und sagt es.**
+///
+/// Eine Mail, die sich nicht als gelesen setzen lässt, ist immer noch lesbar.
+/// Sie nur nicht lesbar zu machen wäre die schlimmere halbe Lösung – und ein
+/// verschwiegener Fehler ist genau das, woran sich dieser Knopf nicht erklären
+/// liess.
+#[tokio::test]
+async fn ein_fehlgeschlagenes_markieren_wird_gemeldet_und_nicht_verschluckt() {
+    let (_, voll) = server_mit_antwort("", false)
+        .await
+        .expect("die Nachricht holen");
+
+    assert!(
+        !voll.kopf.gelesen,
+        "das Flag liess sich nicht setzen, also gilt sie noch als ungelesen"
+    );
+    assert!(
+        voll.markierungsfehler.is_some(),
+        "der Fehler darf nicht verschluckt werden"
+    );
+    assert!(
+        voll.text.contains("Hallo"),
+        "die Nachricht ist trotzdem lesbar: {:?}",
+        voll.text
+    );
+}
+
+/// **Der Rumpf kommt an, PEEK hin oder her.**
+#[tokio::test]
+async fn der_text_kommt_auch_bei_peek_an() {
+    let (_, voll) = server_mit_antwort("", true)
+        .await
+        .expect("die Nachricht holen");
+
+    assert!(
+        voll.text.contains("Hallo"),
+        "der Rumpf fehlt: {:?}",
+        voll.text
+    );
+    assert_eq!(voll.kopf.betreff, "Hallo");
+}
+
+// --- Löschen ---------------------------------------------------------------
+
+/// Spielt einen Server, der jeden Befehl bestaetigt und die Reihenfolge merkt.
+async fn gegen_server_mit_reihenfolge() -> Vec<String> {
+    let (hier, dort) = tokio::io::duplex(256 * 1024);
+    let gesendet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    tokio::spawn({
+        let notiert = gesendet.clone();
+
+        async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let (lesen, mut schreiben) = tokio::io::split(dort);
+            let lesen = std::sync::Arc::new(tokio::sync::Mutex::new(lesen));
+
+            let mut puffer = vec![0u8; 8192];
+
+            for _ in 0..6 {
+                let mut befehl = Vec::new();
+                while let Ok(anzahl) = lesen.lock().await.read(&mut puffer).await {
+                    if anzahl == 0 {
+                        break;
+                    }
+                    befehl.extend_from_slice(&puffer[..anzahl]);
+                    if befehl.ends_with(b"\r\n") {
+                        break;
+                    }
+                }
+
+                if befehl.is_empty() {
+                    break;
+                }
+
+                notiert.lock().unwrap().push(befehl.clone());
+                let text = String::from_utf8_lossy(&befehl).to_string();
+                let tag = text.split_whitespace().next().unwrap_or("B1").to_string();
+
+                let _ = schreiben
+                    .write_all(format!("{tag} OK done\r\n").as_bytes())
+                    .await;
+                let _ = schreiben.flush().await;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
+
+    let mut verbindung = Verbindung::new(hier);
+
+    loesche(&mut verbindung, "INBOX", 7)
+        .await
+        .expect("loeschen gelingt");
+
+    let texte: Vec<String> = gesendet
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+
+    texte
+}
+
+/// **Löschen heisst `\Deleted` und dann `EXPUNGE` – nichts anderes.**
+///
+/// `+FLAGS (\Deleted)` allein ist nur ein Vermerk: Die Nachricht stünde danach
+/// noch da, je nach Server. Erst `EXPUNGE` verschwindet sie. Wer nur den
+/// Vermerk schickt, hat nichts gelöscht und der Leiste trotzdem etwas
+/// vorgegaukelt.
+#[tokio::test]
+async fn loeschen_setzt_das_flag_und_expungiert() {
+    let gesendet = gegen_server_mit_reihenfolge().await;
+
+    let store = gesendet
+        .iter()
+        .position(|t| t.contains("STORE"))
+        .unwrap_or_else(|| panic!("kein STORE: {gesendet:?}"));
+    let expunge = gesendet
+        .iter()
+        .position(|t| t.contains("EXPUNGE"))
+        .unwrap_or_else(|| panic!("kein EXPUNGE: {gesendet:?}"));
+
+    assert!(
+        gesendet[store].contains("+FLAGS") && gesendet[store].contains("\\Deleted"),
+        "das Flag heisst Deleted: {}",
+        gesendet[store]
+    );
+    assert!(
+        store < expunge,
+        "erst den Vermerk setzen, dann wegraeumen: {gesendet:?}"
+    );
+
+    // **Und die Nummer der Nachricht wandert mit** – sonst loeschte der Befehl
+    // irgendeine andere Nachricht.
+    assert!(
+        gesendet[store].contains(" 7 "),
+        "die Nummer steht im Befehl: {}",
+        gesendet[store]
+    );
+}
+
+/// **Und derselbe Dreisatz wie beim Markieren: erst der Ordner, dann der
+/// Befehl.** `STORE` und `EXPUNGE` wirken beide nur im ausgewaehlten Ordner.
+#[tokio::test]
+async fn loeschen_waehlt_zuerst_den_ordner() {
+    let gesendet = gegen_server_mit_reihenfolge().await;
+
+    let select = gesendet
+        .iter()
+        .position(|t| t.contains("SELECT"))
+        .unwrap_or_else(|| panic!("kein SELECT: {gesendet:?}"));
+    let store = gesendet
+        .iter()
+        .position(|t| t.contains("STORE"))
+        .unwrap_or_else(|| panic!("kein STORE: {gesendet:?}"));
+
+    assert!(
+        select < store,
+        "erst auswaehlen, dann loeschen: {gesendet:?}"
+    );
+}
+
+/// **Und das Gelesen-Flag hat mit dem Löschen nichts zu tun.** Ein Tippfehler
+/// – `\\Seen` statt `\\Deleted` – wäre eine Nachricht, die als gelesen
+/// markiert und nicht gelöscht ist: Kaum sichtbar, aber es geht eine Mail
+/// verloren.
+#[tokio::test]
+async fn loeschen_benutzt_nicht_das_gelesen_flag() {
+    let gesendet = gegen_server_mit_reihenfolge().await;
+
+    let store = gesendet
+        .iter()
+        .find(|t| t.contains("STORE"))
+        .unwrap_or_else(|| panic!("kein STORE: {gesendet:?}"));
+
+    assert!(
+        !store.contains("\\Seen"),
+        "geloescht wird mit Deleted, nicht mit Seen: {store}"
+    );
 }

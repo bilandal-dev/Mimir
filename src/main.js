@@ -1373,6 +1373,9 @@ const mailMessageAttachments = document.getElementById('mail-message-attachments
 const mailMessageClose = document.getElementById('mail-message-close');
 const mailMessageRead = document.getElementById('mail-message-read');
 const mailMessageSummarize = document.getElementById('mail-message-summarize');
+const mailMessageError = document.getElementById('mail-message-error');
+const mailMessageDelete = document.getElementById('mail-message-delete');
+const mailMessageWarnung = document.getElementById('mail-message-warnung');
 
 /**
  * Was die Leiste gerade zeigt. Nur zum Zeichnen, nie zum Senden.
@@ -1387,9 +1390,9 @@ const mailMessageSummarize = document.getElementById('mail-message-summarize');
 const mailZustand = {
     nachrichten: [],
     offen: null,
-    /** Die Zeile der Liste, aus der das Fenster geöffnet wurde. Sie kennt den
-     *  Gelesen-Zustand – anders als der Nachrichtentext, der beim Öffnen schon
-     *  als gelesen beim Server gelandet sein kann. */
+    /** Der Kopf der geöffneten Nachricht, wie der Server ihn zuletzt gemeldet
+     *  hat. Getrennt von `offen`, damit der Knopf nach einem Markieren den
+     *  Stand führt, den er selbst gesetzt hat. */
     offenKopf: null,
     ordner: 'INBOX',
     konto: null,
@@ -1398,6 +1401,8 @@ const mailZustand = {
     bearbeitet: null,
     /** Der Remove-Knopf wartet auf den zweiten Klick. */
     entfernenArmiert: false,
+    /** Dasselbe für den Löschknopf im Nachrichtenfenster. */
+    loeschenArmiert: false,
     /** Läuft gerade ein Nachrichtenabruf? Verhindert das zweite Fenster beim
      *  Doppelklick und den zweiten Abruf beim Klick auf dieselbe Mail. */
     oeffnet: false,
@@ -1820,6 +1825,22 @@ function meldeMailHinweis(text) {
     mailState.hidden = false;
 }
 
+/**
+ * Sagt im **Fenster** Bescheid, nicht nur in der Leiste.
+ *
+ * **Der Grund ist der Backdrop.** Das Mailsfenster ist modal; solange es offen
+ * ist, liegt die Leiste mit ihrer Meldung darunter und ist nicht lesbar. Ein
+ * Fehler, den man nicht sieht, ist schlimmer als keiner: Ein Knopf, der
+ * scheitert, ohne dass sich etwas tut, ist von einem Knopf, der gar nichts
+ * tut, nicht zu unterscheiden – und das war genau das, was zu klären war.
+ *
+ * Ein leerer Text leert die Zeile wieder.
+ */
+function meldeMailFensterFehler(text) {
+    mailMessageError.textContent = text;
+    mailMessageError.hidden = !text;
+}
+
 /** Wie lang eine Zeile sein muss, damit ein Zeilenumbruch im Rumpf als
  *  harten Umbruch gilt. Reine Mails sind auf etwa 72 Zeichen umgebrochen; eine
  *  kürzere Zeile ist ein gewollter Umbruch und bleibt stehen. */
@@ -2002,7 +2023,8 @@ function zeichneMailGelesen() {
  * **Erst fragen, dann zeichnen.** Die Markierung geht an den Server; ein Knopf,
  * der den Zustand sofort änderte und bei einem Fehler zurücknähme, flackerte
  * zweimal und ließe den Benutzer raten, was gilt. Hier bleibt der Knopf während
- * des Laufs gesperrt und meldet einen Fehler über der Liste.
+ * des Laufs gesperrt und meldet einen Fehler im Fenster – dort, wo man ihn
+ * auch liest, solange das Fenster offen ist.
  *
  * **Alle drei Orte werden nachgezogen**: der Knopf, die Zeile in der Liste und
  * der Zustand im Fenster. Lässt man einen davon stehen, widersprechen sie sich
@@ -2033,10 +2055,88 @@ async function schalteMailGelesen() {
 
         zeichneMailGelesen();
         zeichneMailListe();
+        meldeMailFensterFehler('');
     } catch (error) {
-        meldeMailHinweis(`Die Markierung ließ sich nicht setzen: ${error}`);
+        const text = `Die Markierung ließ sich nicht setzen: ${error}`;
+        // **An beiden Orten.** Im Fenster, weil es dort offen ist, und über der
+        // Liste, damit sie nach dem Schließen noch da steht.
+        meldeMailFensterFehler(text);
+        meldeMailHinweis(text);
     } finally {
         mailMessageRead.disabled = false;
+    }
+}
+
+/**
+ * Löscht die geöffnete Nachricht.
+ *
+ * **Zweimal klicken statt Rückfragen.** Es gibt keinen Papierkorb – `EXPUNGE`
+ * ist unumkehrbar. `window.confirm` fällt in einer Webview nicht überall
+ * zuverlässig aus, also macht der erste Klick den Knopf nur scharf und sagt,
+ * was geschehen wird; der zweite löscht. Ohne diese Stufe wäre ein
+ * vorübergehender Klick nebenbei der Verlust einer Mail.
+ *
+ * **Der Knopf wird nach jedem Öffnen zurückgesetzt.** Sonst wäre die zweite
+ * Mail schon beim ersten Klick scharf – und wer das Fenster schliesst und
+ * später wieder öffnet, wüsste nicht mehr, worauf der Knopf steht.
+ */
+function schalteLoeschenZurueck() {
+    mailZustand.loeschenArmiert = false;
+    mailMessageDelete.textContent = 'Löschen';
+    mailMessageDelete.classList.remove('loeschen-bereit');
+    mailMessageWarnung.hidden = true;
+    mailMessageWarnung.textContent = '';
+}
+
+/**
+ * **Nach dem Löschen wird die Liste neu geholt, nicht geändert.**
+ *
+ * `EXPUNGE` rückt alles hinter der gelöschten Nachricht um eine Nummer nach
+ * vorn. Eine Liste, in der man bloss die Zeile streicht, hätte danach an jeder
+ * folgenden Zeile die falsche Nummer stehen – und der nächste Klick auf „als
+ * gelesen markieren" träfe die Nachricht daneben. Neuholen kostet eine
+ * Verbindung; falsch markieren kostet mehr.
+ */
+async function loescheMail() {
+    const kopf = mailZustand.offenKopf;
+    if (!kopf) return;
+
+    if (!mailZustand.loeschenArmiert) {
+        mailZustand.loeschenArmiert = true;
+        mailMessageDelete.textContent = 'Wirklich löschen';
+        mailMessageDelete.classList.add('loeschen-bereit');
+        mailMessageWarnung.textContent =
+            'Diese Nachricht wird endgültig gelöscht. Es gibt keinen Papierkorb – ' +
+            'sie liegt danach weder hier noch beim Anbieter im Papierkorb.';
+        mailMessageWarnung.hidden = false;
+        return;
+    }
+
+    mailMessageDelete.disabled = true;
+
+    try {
+        await invokeMail(
+            'mail_loeschen',
+            { id: mailZustand.konto, nummer: kopf.nummer },
+            60,
+        );
+
+        schalteLoeschenZurueck();
+        // **Das Fenster vor dem Nachladen schliessen.** `aktualisiereMail`
+        // zeichnet die Leiste neu; solange das Fenster offen wäre, stünde es
+        // über einer Nachricht, die es nicht mehr gibt.
+        mailMessageDialog.close();
+        meldeMailHinweis('Nachricht gelöscht. Liste wird neu geholt …');
+        await aktualisiereMail();
+    } catch (error) {
+        const text = `Die Nachricht ließ sich nicht löschen: ${error}`;
+        meldeMailFensterFehler(text);
+        meldeMailHinweis(text);
+        // **Scharf bleibt er.** Der Knopf wird nicht zurückgesetzt: Der Wunsch
+        // steht noch, und ein zweiter Versuch ist billiger als ein zweiter
+        // Gedanke darüber, ob man es wirklich wollte.
+    } finally {
+        mailMessageDelete.disabled = false;
     }
 }
 
@@ -2063,7 +2163,15 @@ async function oeffneMail(nachricht) {
         );
 
         mailZustand.offen = voll;
-        mailZustand.offenKopf = nachricht;
+        // **Der Server hat den Gelesen-Stand mitgeschickt – und der ist
+        // maßgeblich.** Die Liste kann ihn nicht kennen, wenn zwischen dem
+        // Zeichnen und dem Klick eine andere Mail zugestellt wurde; der
+        // Abruf des Textes sagt genau, wie die Nachricht jetzt steht. Die
+        // Nummer bleibt die aus der Liste: Das ist die, die der Knopf
+        // zurückschickt, und die ist der angefragten Antwort entnommen.
+        mailZustand.offenKopf = { ...voll.kopf, nummer: nachricht.nummer };
+        nachricht.gelesen = voll.kopf.gelesen;
+        zeichneMailListe();
         zeichneMailGelesen();
 
         // **Als Text, nicht als HTML.** Fremder Inhalt wird in Mimir nirgends
@@ -2082,6 +2190,17 @@ async function oeffneMail(nachricht) {
             mailMessageAttachments.textContent = '';
         }
 
+// **Lesen macht gelesen – und wenn das nicht ging, steht es hier.** Die
+        // Nachricht ist trotzdem da und lesbar; nur ihr Zustand hat sich nicht
+        // geändert, und das gehört dem Benutzer gesagt, statt stillschweigend zu
+        // bleiben. Genau ein stiller Fehler ist das, woran sich dieser Knopf
+        // bisher nicht erklären liess.
+        meldeMailFensterFehler(
+            voll.markierungsfehler
+                ? `Die Nachricht ist lesbar, gilt aber noch als ungelesen: ${voll.markierungsfehler}`
+                : '',
+        );
+        schalteLoeschenZurueck();
         mailState.hidden = true;
         mailMessageDialog.showModal();
     } catch (error) {
@@ -2140,9 +2259,15 @@ mailMessageClose.addEventListener('click', () => mailMessageDialog.close());
 // kennt.
 mailMessageDialog.addEventListener('close', () => {
     mailZustand.offenKopf = null;
+    // **Der Löschknopf wird mit dem Fenster zurückgesetzt.** Er bleibt sonst
+    // scharf, und die nächste Nachricht wäre schon beim ersten Klick danach.
+    schalteLoeschenZurueck();
 });
 mailMessageRead.addEventListener('click', () => {
     void schalteMailGelesen();
+});
+mailMessageDelete.addEventListener('click', () => {
+    void loescheMail();
 });
 mailMessageSummarize.addEventListener('click', frageNachZusammenfassung);
 

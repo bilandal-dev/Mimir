@@ -73,6 +73,13 @@ pub struct NachrichtVoll {
     pub text: String,
     pub anhaenge: Vec<String>,
     pub message_id: String,
+    /// Was beim Markieren schiefging, falls etwas schiefging.
+    ///
+    /// **Die Nachricht kommt auch dann zurück, wenn das Markieren nicht
+    /// klappt.** Eine Mail, die sich nicht als gelesen setzen lässt, ist immer
+    /// noch lesbar – sie nur nicht lesbar zu machen wäre die schlimmere
+    /// halbe Lösung. `None` heisst: sie steht jetzt als gelesen im Ordner.
+    pub markierungsfehler: Option<String>,
 }
 
 /// Der Fehlerfall, an dem die Verbindung endet. Als eigener Typ, damit der
@@ -1157,11 +1164,32 @@ fn vorschau_aus_chunk(chunk: &[u8]) -> String {
     kuerze(&absaetze.join("\n\n"), MAX_MAIL_PREVIEW_BYTES)
 }
 
-/// Liest den Text einer Nachricht.
+/// Liest den Text einer Nachricht – **und markiert sie dabei als gelesen.**
 ///
 /// **Erst der Ordner, dann die Nachricht.** `FETCH` gilt nur in einem
 /// ausgewählten Ordner; wer ihn vorher schickt, bekommt `BAD` zurück und sucht
 /// den Fehler im Befehl statt im fehlenden Zustand davor.
+///
+/// **Lesen macht gelesen – so wie in jedem anderen Postfach auch.** Eine Mail,
+/// die man aufklappt, hat man gelesen; Mimir soll dabei nicht weniger
+/// vernünftig sein als ein Mailprogramm.
+///
+/// **`PEEK` beim Rumpf, `STORE` ausdrücklich danach.** Nach RFC 3501 setzt ein
+/// Abruf von `BODY` oder `RFC822` das Gelesen-Flag als Nebenwirkung – der
+/// Server bringt sie an, nicht Mimir. Darauf sich zu verlassen hieße, den
+/// Zustand zu raten: Ob die Flags in der Antwort schon das Gelesen tragen,
+/// entscheidet der Server, nicht Mimir. Also wird ohne Nebenwirkung gelesen und
+/// das Flag mit einem eigenen `STORE` gesetzt – derselbe Befehl, den auch der
+/// Knopf schickt. **Damit weiß Mimir danach, ob es geklappt hat**, und kann es
+/// sagen, statt eine Mail anzubieten, die beim nächsten Nachladen wieder
+/// ungelesen ist.
+///
+/// **Nur wenn sie noch ungelesen ist.** Sonst ginge ein `STORE` über die Leitung,
+/// der nichts bewirkt – und bei einem Ordner, der nicht schreiben darf, würde
+/// genau diese unnötige Runde als Fehler gemeldet.
+///
+/// **Der Gelesen-Stand kommt aus derselben Antwort.** `FLAGS` steht in der
+/// FETCH-Antwort; ihn zu lesen ist billiger, ihn zu raten nicht.
 pub async fn hole_text<T>(
     verbindung: &mut Verbindung<T>,
     ordner: &str,
@@ -1173,7 +1201,9 @@ where
     waehle_ordner(verbindung, ordner).await?;
 
     let antworten = verbindung
-        .befehl(&format!("B3 FETCH {nummer} (UID FLAGS ENVELOPE RFC822)"))
+        .befehl(&format!(
+            "B3 FETCH {nummer} (UID FLAGS ENVELOPE BODY.PEEK[])"
+        ))
         .await?;
 
     for antwort in antworten {
@@ -1181,30 +1211,58 @@ where
             continue;
         };
 
+        // **Beides in einer Runde über die Felder.** Der Rumpf ist ein Literal und
+        // deshalb groß; die Flags stehen daneben. Wer sie in einer zweiten Schleife
+        // sucht, hat sie längst verworfen, sobald der Rumpf gefunden war.
+        let mut roh: Option<Vec<u8>> = None;
+        let mut gelesen = false;
+
         for wert in werte {
-            let imap_proto::AttributeValue::Rfc822(Some(roh)) = wert else {
-                continue;
-            };
-
-            if roh.len() > super::MAX_MAIL_MESSAGE_BYTES {
-                return Err("Diese Nachricht ist größer, als Mimir lesen kann".to_string());
+            match wert {
+                imap_proto::AttributeValue::Flags(flaggen) => {
+                    gelesen = flaggen
+                        .iter()
+                        .any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
+                }
+                imap_proto::AttributeValue::BodySection {
+                    data: Some(teil), ..
+                } => roh = Some(teil.as_ref().to_vec()),
+                _ => {}
             }
-
-            let (kopf, anhaenge) = zerlege_mime(&roh);
-            let envelope_kopf = kopf.kopf.clone();
-
-            return Ok(NachrichtVoll {
-                kopf: NachrichtKopf {
-                    nummer: nummer_gefunden,
-                    ..envelope_kopf
-                },
-                an: kopf.an,
-                cc: kopf.cc,
-                text: kopf.text,
-                anhaenge,
-                message_id: kopf.message_id,
-            });
         }
+
+        let Some(roh) = roh else { continue };
+
+        if roh.len() > super::MAX_MAIL_MESSAGE_BYTES {
+            return Err("Diese Nachricht ist größer, als Mimir lesen kann".to_string());
+        }
+
+        let (kopf, anhaenge) = zerlege_mime(&roh);
+        let mut kopfzeile = kopf.kopf.clone();
+        kopfzeile.gelesen = gelesen;
+
+        // **Der Ordner ist schon gewählt, deshalb ohne erneutes `SELECT`.**
+        let mut markierungsfehler = None;
+
+        if !gelesen {
+            match store_gelesen(verbindung, nummer_gefunden, true).await {
+                Ok(()) => kopfzeile.gelesen = true,
+                Err(fehler) => markierungsfehler = Some(fehler),
+            }
+        }
+
+        return Ok(NachrichtVoll {
+            kopf: NachrichtKopf {
+                nummer: nummer_gefunden,
+                ..kopfzeile
+            },
+            an: kopf.an,
+            cc: kopf.cc,
+            text: kopf.text,
+            anhaenge,
+            message_id: kopf.message_id,
+            markierungsfehler,
+        });
     }
 
     Err("Diese Nachricht konnte nicht gelesen werden".to_string())
@@ -1231,11 +1289,68 @@ where
 {
     waehle_ordner(verbindung, ordner).await?;
 
+    store_gelesen(verbindung, nummer, gelesen).await
+}
+
+/// **Der `STORE` allein, für einen bereits ausgewählten Ordner.**
+///
+/// `hole_text` markiert im Anschluss an seinen Abruf, auf derselben Verbindung
+/// – dort ist der Ordner längst gewählt. Noch einmal auszuwählen wäre ein
+/// weiterer Hin und her über die Leitung für etwas, das schon stimmt.
+async fn store_gelesen<T>(
+    verbindung: &mut Verbindung<T>,
+    nummer: u32,
+    gelesen: bool,
+) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let art = if gelesen { "+FLAGS" } else { "-FLAGS" };
 
     verbindung
         .befehl(&format!("B4 STORE {nummer} {art} (\\Seen)"))
         .await?;
+
+    Ok(())
+}
+
+/// Löscht eine Nachricht aus dem Ordner.
+///
+/// **Zwei Schritte, und beide gehören dazu.** Erst `+FLAGS (\Deleted)` – das ist
+/// nur ein Vermerk, die Nachricht steht noch da. Dann `EXPUNGE`, und der Server
+/// entfernt, was als gelöscht vermerkt ist. Nur der Vermerk allein würde die
+/// Nachricht je nach Server gar nicht verschwinden lassen.
+///
+/// **Und `EXPUNGE` nimmt mehr mit, als Mimer markiert hat.** Der Befehl kennt
+/// keine Nachricht, sondern nur das Flag: Alles, was im Ordner als gelöscht
+/// vermerkt steht, geht mit – auch das, was ein anderes Programm vorgemerkt
+/// hat. Das ist keine Eigenheit dieser Implementierung, sondern die des
+/// Protokolls; ein Mailprogramm, das eine Nachricht wirklich löschen will,
+/// kommt daran nicht vorbei.
+///
+/// **Danach sind die Nummern anders.** `EXPUNGE` rückt alles nach der
+/// gelöschten Nachricht um eine Nummer nach vorn. Wer nach dem Löschen mit
+/// alten Nummern weiterarbeitet, trifft die falsche Nachricht – der Aufrufer
+/// holt deshalb die Liste neu, statt sie zu ändern.
+///
+/// **Gelöscht wird wirklich gelöscht.** Es gibt keinen Papierkorb: Was
+/// `EXPUNGE` entfernt, hat der Server entschieden, und Mimir führt es nicht
+/// irgendwo auf.
+pub async fn loesche<T>(
+    verbindung: &mut Verbindung<T>,
+    ordner: &str,
+    nummer: u32,
+) -> Result<(), String>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    waehle_ordner(verbindung, ordner).await?;
+
+    verbindung
+        .befehl(&format!("B4 STORE {nummer} +FLAGS (\\Deleted)"))
+        .await?;
+
+    verbindung.befehl("B5 EXPUNGE").await?;
 
     Ok(())
 }
@@ -1372,7 +1487,13 @@ fn zerlege_mime(roh: &[u8]) -> (Aufgeteilt, Vec<String>) {
                 absender: erste_adresse_aus(&value(&kopfzeilen, "from").unwrap_or_default()),
                 betreff,
                 datum: value(&kopfzeilen, "date").unwrap_or_default(),
-                gelesen: true,
+                // **Hier steht kein Gelesen-Stand.** Aus einer rohen Nachricht
+                // lässt sich keiner ablesen – das Flag steht in den Flags des
+                // Servers, nicht in den Kopfzeilen der Nachricht. Bis hierher
+                // stand hier fest `true`; das war geraten und stimmte nur, wenn
+                // der Server die Nachricht ohnehin schon führte. `hole_text`
+                // setzt danach das, was die Antwort wirklich sagt.
+                gelesen: false,
                 bytes: roh.len() as u32,
                 // **Hier steht keine Vorschau.** Diese Zerlegung läuft beim Öffnen
                 // einer einzelnen Nachricht; die Vorschau gehört in die Liste und

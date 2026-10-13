@@ -7370,6 +7370,28 @@ async fn mail_gelesen_setzen(
     crate::mail::imap_gelesen_setzen(konto, &session, nummer, gelesen).await
 }
 
+/// Löscht eine Nachricht aus dem eingestellten Ordner.
+///
+/// **Die Liste muss danach neu geholt werden.** `EXPUNGE` rückt die Nummern
+/// aller Nachrichten hinter der gelöschten um eins nach vorn – wer die alte
+/// Liste stehen lässt, zeigt danach Nachrichten an, die es nicht mehr gibt, und
+/// markiert beim nächsten Klick die falsche.
+///
+/// **Gelöscht wird endgültig.** Es gibt keinen Papierkorb; was der Server mit
+/// `EXPUNGE` entfernt, ist weg.
+#[tauri::command]
+async fn mail_loeschen(
+    id: String,
+    nummer: u32,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<(), String> {
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
+
+    crate::mail::imap_loeschen(konto, &session, nummer).await
+}
+
 /// Prüft das Zertifikat der Instanz, ohne Zugangsdaten zu senden, und nennt den
 /// Fingerabdruck. Das Aufrufen bestätigt nichts: Dafür gibt es
 /// `calendar_trust_certificate`.
@@ -7616,6 +7638,7 @@ pub fn run() {
             mail_messages,
             mail_message,
             mail_gelesen_setzen,
+            mail_loeschen,
             set_calendar_config,
             calendar_status,
             calendar_login,
