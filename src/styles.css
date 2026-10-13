@@ -122,6 +122,17 @@ body {
     display: flex;
     flex-direction: column;
     height: 100vh;
+
+    /* **Das Fenster selbst scrollt nicht.** Alles, was höher oder breiter wird
+     * als der Bildschirm, ist ein Fehler im Layout – und sichtbar zu machen wäre
+     * die schlechtere Hälfte der Hilfe. Scrollen soll allein der Chat machen.
+     *
+     * Ohne diese Zeile genügte ein zu breiter Kopf, und das ganze Fenster
+     * scrollte seitwärts: Links fehlte „Server: Online", rechts schnitt es den
+     * Kalender an – zwei Anzeigen, beide für sich genommen richtig und beide
+     * zusammen nicht mehr auffindbar.
+     */
+    overflow: hidden;
 }
 
 header {
@@ -133,6 +144,29 @@ header {
     gap: 16px;
     flex-wrap: wrap;
     border-bottom: var(--border-width) solid var(--border-color);
+
+    /* **Der Kopf schrumpft nicht, er nimmt so viel Höhe, wie er braucht.**
+     *
+     * `body` ist eine Spalten-Flexbox mit `height: 100vh`, und ein Flex-Element
+     * wird von Flexbox gekürzt, sobald der Platz nicht reicht – die *Box*, nicht
+     * den Inhalt. Bei einem Kopf, der durch einen weiteren Knopf breiter wurde,
+     * hieß das: Die Box wurde niedriger, die Knöpfe blieben, und der Inhalt lief
+     * oben heraus. Genau das war der Anlass.
+     *
+     * Der Platz geht stattdessen an `.main-area`, das `flex: 1` und
+     * `min-height: 0` hat – es schrumpft und scrollt in sich. Scrollen soll
+     * allein der Chat machen, nicht das ganze Fenster.
+     */
+    flex-shrink: 0;
+
+    /* **Die Trennlinie liegt über allem, was daneben liegt.** Ohne diese Zeile
+     * ist es eine Frage der Malreihenfolge, ob der Rand des Kopfs oder der
+     * Inhalt des Chats zuletzt gemalt wird – und beim Scrollen ist es der Chat.
+     * Eigener Stapel, eigene Ebene: Danach kann nichts die Linie unterbrechen,
+     * gleichgültig wie voll der Chat ist.
+     */
+    position: relative;
+    z-index: 1;
 }
 
 header h2 {
@@ -159,6 +193,18 @@ header h2 {
     border-color: var(--accent-color);
 }
 
+.header-controls {
+    /* **Darf schrumpfen, und füllt die Zeile von rechts auf.** Ohne `flex: 1` und
+     * `min-width: 0` nimmt diese Gruppe ihre volle Inhaltsbreite – rund
+     * 1 400 Pixel, weil zwei Auswahlfelder je 220 Pixel haben – und schiebt das
+     * Fenster damit breiter, als es ist. Mit beiden Angaben wird sie auf den
+     * wirklich vorhandenen Platz begrenzt und bricht die Gruppen um.
+     */
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+}
+
 .header-controls,
 .server-actions,
 .model-control {
@@ -168,6 +214,13 @@ header h2 {
     /* Alle Bedienelemente des Kopfs teilen sich die Höhe, sonst kippelt die
        Zeile, sobald ein Knopf den Text umbricht. */
     min-height: 30px;
+
+    /* **Umbruch statt Quetschen.** Ohne diese Zeile presste Flexbox die Knöpfe
+       auf ihre Mindestbreite zusammen und die Schrift brach *innerhalb* der
+       Knöpfe um – der Kopf wurde höher, ohne dass irgendwo eine Zeile extra
+       eingeplant war. Mit Umbruch rutschen die Gruppen als Ganzes in eine
+       weitere Zeile, und das Fenster scrollt nicht. */
+    flex-wrap: wrap;
 }
 
 .server-status {
@@ -205,7 +258,11 @@ header h2 {
 }
 
 header select {
-    width: 220px;
+    /* **Folgt dem Fenster, statt eine feste Breite zu beanspruchen.** Zwei
+       Felder zu je 220 Pixel sind 440 Pixel nur für die Auswahl – auf einem
+       Fenster, das kaum breiter ist, der Löwenanteil des Kopfs. Die Auswahl
+       bleibt bei 220 Pixel, wenn Platz ist, und schrumpft sonst zusammen. */
+    width: clamp(110px, 16vw, 220px);
     appearance: none;
     background-color: var(--bg-color);
     background-image:
@@ -598,6 +655,15 @@ dialog label {
     line-height: 1.4;
     white-space: nowrap;
     cursor: help;
+
+    /* **Eine Zahl, die am Rand abgeschnitten wird, ist schlimmer als eine, die
+     * auf der Hälfte fehlt.** „Kontext: ~431 Token (Modellvorgabe)" ist mit
+     * `nowrap` rund 230 Pixel breit und hält den Kopf allein damit zusammen.
+     * Deshalb kürzt die Anzeige mit den Punkten statt über den Rand hinauszu
+     * drängen; die Zahl steht vorn und bleibt lesbar. */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .context-warning {
@@ -676,7 +742,19 @@ dialog label {
     width: clamp(340px, 28vw, 620px);
     border-right: var(--border-width) solid var(--border-color);
     background: var(--panel-bg);
-    overflow-y: auto;
+
+    /* **Nur die Nachrichtenliste scrollt, nicht der Rahmen.**
+     *
+     * Vorher stand hier `overflow-y: auto`, und damit scrollte die ganze Leiste
+     * mit: Kopfzeile und Fußzeile („40 Nachrichten in INBOX“) wanderten beim
+     * Scrollen aus dem Bild. Genau die Fußzeile aber sagt, wie viele Nachrichten
+     * es überhaupt gibt – die Information, die man beim Scrollen am ehesten
+     * braucht.
+     *
+     * Der Rahmen schneidet jetzt ab, die Liste darunter bekommt den eigenen
+     * Scrollbalken. Das ist dieselbe Aufteilung wie im Chat.
+     */
+    overflow: hidden;
 }
 
 .mail-panel.collapsed {
@@ -904,6 +982,16 @@ dialog label {
     margin: 0;
     padding: 0;
     flex: 1;
+
+    /* **Der eigene Scrollbereich der Leiste.** `flex: 1` allein lässt die Liste
+     * wachsen, statt zu scrollen; `overflow-y: auto` allein lässt die Liste über
+     * den Rahmen hinauswachsen, ohne dass jemand scrollen könnte. Beides
+     * zusammen – und `min-height: 0`, damit Flexbox sie wirklich bis zum Rand
+     * schrumpfen lässt und nicht ihre Inhaltshöhe verteidigt – ergibt das
+     * Scrollen nur in der Liste.
+     */
+    overflow-y: auto;
+    min-height: 0;
 }
 
 /* **Absender und Datum auf einer Zeile.** Das Datum stand vorher unter dem
@@ -1195,6 +1283,16 @@ dialog label {
     cursor: default;
 }
 
+.mail-reply-button,
+.mail-forward-button {
+    opacity: 0.85;
+}
+
+.mail-reply-button:hover:not(:disabled),
+.mail-forward-button:hover:not(:disabled) {
+    opacity: 1;
+}
+
 /* **Der zweite Klick sieht anders aus.** Solange der erste nichts bewirkt, ist
    die Zeile durch nichts vom Knopf zu unterscheiden – und wer sie zweimal
    trifft, verliert eine Mail ohne Weg zurück. */
@@ -1205,11 +1303,103 @@ dialog label {
     font-weight: 600;
 }
 
+/* --- Das Fenster zum Schreiben ------------------------------------------- */
+
+/* **Breiter als die Nachricht.** Das Fenster zeigt, was man schreibt, und der
+   Zeilenumbruch gehört dem Verfasser – nicht dem Layout. */
+#mail-compose-dialog {
+    max-width: 720px;
+    width: min(94vw, 720px);
+}
+
+.mail-compose {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    min-height: 0;
+}
+
+.mail-compose h3 {
+    margin: 0;
+}
+
+/* **Wer absendet, steht oben und ist nicht zu ändern.** */
+.mail-compose-absender {
+    margin: 0;
+    font-size: 0.85em;
+    color: var(--text-dim);
+}
+
+/* **CC und BCC bleiben zu, bis jemand sie braucht.** */
+#mail-compose-mehr summary {
+    cursor: pointer;
+    font-size: 0.85em;
+    color: var(--text-dim);
+}
+
+#mail-compose-mehr[open] {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+#mail-compose-mehr .mail-hint {
+    margin: 0;
+}
+
+.mail-compose textarea {
+    min-height: 180px;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 1em;
+}
+
+.mail-compose-error,
+.mail-compose-warnung {
+    margin: 0;
+    font-size: 0.85em;
+    color: var(--field-error);
+}
+
+/* **Auch hier: Der Fehler steht im Fenster, nicht in der Leiste hinter dem
+   Backdrop.** */
+.mail-compose-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--gap);
+}
+
+/* **Der zweite Klick sieht anders aus** – wie beim Löschen. Eine verschickte
+   Nachricht ist nicht zurückzuholen, und der erste Klick soll einen genauen
+   Blick auf den Empfänger erlauben, bevor er geht. */
+#mail-compose-send.senden-bereit {
+    border-color: var(--accent-color);
+    background: var(--accent-color);
+    color: var(--button-text);
+    font-weight: 600;
+}
+
+/* **Schreiben ist der häufigste Gang in eine Mailleiste** und gehört deshalb an
+   den Anfang, nicht ans Ende der Knopfreihe. */
+.mail-compose-button {
+    color: var(--accent-hover);
+    font-weight: 600;
+}
+
 .mail-message-actions {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: var(--gap);
+
+    /* **Fünf Knöpfe passen nicht in eine Zeile von 720 Pixeln.** „Als gelesen
+       markieren" allein ist breit genug. Ohne Umbruch presste Flexbox die Knöpfe
+       auf ihre Mindestbreite zusammen und die Schrift brach *innerhalb* um –
+       dasselbe, was am Kopf des Fensters passiert ist. Mit Umbruch rutscht die
+       Reihe in eine zweite Zeile, statt das Fenster breiter zu machen. */
+    flex-wrap: wrap;
+    row-gap: calc(var(--gap) / 2);
 }
 
 /* **Der Gelesen-Knopf steht in der Mitte**, zwischen „Schließen" und der
@@ -1274,6 +1464,20 @@ dialog label {
     display: flex;
     flex: 1;
     min-height: 0;
+
+    /* **Ein Pixel Abstand zum Kopf – und er entsteht hier, nicht am Chat.**
+     *
+     * `#chat-container` hat zwar `padding: 20px`, aber dieses Padding **scrollt
+     * mit dem Inhalt**: Sobald man im Chat scrollt, ist es oben weg, und die
+     * erste Zeile liegt direkt an der Trennlinie. Sichtbar ist die Linie dann
+     * nur noch links und rechts von der Leiste, wo nichts darüberliegt.
+     *
+     * Der Abstand muss deshalb an etwas stehen, das **nicht** scrollt. Ein
+     * `margin` hier ist so etwas: Er gehört zu `.main-area`, und die bewegt
+     * sich nie. Der gleiche Trick steckt in der Mailleiste, wo `.mail-panel`
+     * den Rahmen schneidet und `.mail-list` in sich scrollt.
+     */
+    margin-top: 1px;
 }
 
 .chat-area {
@@ -1288,6 +1492,7 @@ dialog label {
     flex-direction: column;
     flex: none;
     width: 260px;
+    min-width: 0;
     border-left: var(--border-width) solid var(--border-color);
     background: var(--panel-bg);
     overflow-y: auto;
@@ -1644,6 +1849,14 @@ dialog label {
     text-decoration: line-through;
 }
 
+/* **Ein gescheiterter Werkzeugaufruf sieht anders aus.** Der Fehler steht
+   aufgeklappt im Schritt, aber der Schritt selbst wäre sonst optisch wie jeder
+   andere – und ein zugklappter Fehler ist nicht besser als keiner. */
+.agent-step-fehler .step-toggle {
+    color: var(--field-error);
+    font-weight: 600;
+}
+
 .step-undo {
     margin: 4px 0 2px;
     font-size: 0.9em;
@@ -1764,6 +1977,28 @@ dialog label {
     font-size: inherit;
     text-align: left;
     word-break: break-word;
+}
+
+/* **Der Knopf am Entwurf.** Er steht **vor** dem Ausgabetext und nicht darin:
+ * ein Entwurf, den man erst aufklappen muss, um ihn zu prüfen, ist ein
+ * Entwurf, den niemand prüft. Der Tonfall ist der des Schalters daneben, nur
+ * auffälliger – hier entsteht etwas zum Mitnehmen. */
+.step-entwurf-button {
+    display: block;
+    margin: 6px 0 2px;
+    padding: 5px 10px;
+    border: var(--border-width) solid var(--accent-color);
+    border-radius: var(--radius);
+    background: none;
+    color: var(--accent-color);
+    font-family: inherit;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+
+.step-entwurf-button:hover {
+    background: var(--accent-color);
+    color: var(--button-text);
 }
 
 .step-toggle:hover,

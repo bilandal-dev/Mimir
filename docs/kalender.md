@@ -110,6 +110,45 @@ Die auffälligen Fälle – Monatsanfang, 31. Dezember, Schaltjahr – fallen nu
 - jeder Wochentagsname und jede Kurzform findet denselben Wochentag
 - jeder Wochentagsname liegt in der Zukunft und höchstens eine Woche entfernt
 
+## Ein Datum ohne Jahr: Mimir fragt
+
+Nennt jemand „10. Januar“ und der 10. Januar dieses Jahres liegt zurück, ist das
+zweideutig – dieses Jahr oder das nächste. Beides ist lesbar, also wird nicht
+stillschweigend eines davon gewählt. **Mimir fragt nach dem Jahr.**
+
+Das ist derselbe Weg wie bei erfundenen Feldern: **der Eingriff sitzt im
+Werkzeug, nicht im Prompt.** Ein Prompt-Absatz mit der Bitte nachzufragen hat
+die brauchbaren Sätze einmal von 5/6 auf 3/12 verschlechtert, weil ein Modell,
+das zum Ausfüllen angewiesen wird, füllt. Dasselbe gilt für ein Jahr: Ließe man
+es das Modell entscheiden, trüge es eine Zahl ein und behauptete sie. Das
+Werkzeug verweigert die Anlage stattdessen, und das Modell muss fragen, weil es
+sonst nichts bekommt.
+
+**Steht das Jahr irgendwo, wird nicht gefragt, sondern es gilt.** „Trag am
+10.1.2027 den Termin ein“ – der Satz nennt das Jahr, und „10. Januar“ meint
+dann den 10. Januar 2027. Gezählt wird dabei nur eine vierstellige Zahl, die an
+einem Trennzeichen hängt; „2000 Euro“ ist kein Datum und darf nichts entscheiden.
+
+**Datumsangaben, die noch kommen, werden nie angefragt.** Sonst müsste Mimir bei
+„morgen“ nachfragen – und die Rückfrage wäre das lästigste Verhalten von allen.
+
+### Suche und Anlegen gehen auseinander
+
+Die beiden Wege beantworten verschiedene Fragen und sind deshalb getrennt:
+
+- **Die Suche** („welchen Termin meinst du?“) braucht eine Antwort und liefert
+  sie: sie findet den Termin, der im Kalender steht. `10.1.` springt dabei ins
+  Folgejahr, `10. Januar` bleibt im gefundenen Jahr – eine Sprungregel zeigte auf
+  einen 10. Januar, den es noch nicht gibt.
+- **Das Anlegen** darf nicht raten und fragt deshalb bei beiden Schreibweisen,
+  sobald das Jahr offen war.
+
+Die Monatsnamen kennt Mimir als volle Form und in den Kurzformen des
+Produktivcodes: `jan`, `feb`, **`mär`**, `mrz`, `mar`, `apr`, `mai`, `jun`,
+`jul`, `aug`, `sep`, `okt`, `nov`, `dez`. `mär` fehlte zunächst, obwohl es die
+Form ist, die man tatsächlich schreibt – wer „mär 20“ sagte, bekam den heutigen
+Tag.
+
 Das hat drei Fehler gefunden, die vorher keiner gesehen hat:
 
 1. **Jeder Wochentag landete einen Tag zu früh.** `naechster_wochentag` zog den heutigen Wochentag über `number_from_monday()` ab – das bei **eins** beginnt –, verglich aber gegen `WOCHENTAGE`, das bei **null** beginnt. „montag“ an einem Montag ergab den **Sonntag**. Chrono hat beide Zählweisen, `num_days_from_monday()` ist die passende.

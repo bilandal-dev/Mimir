@@ -173,7 +173,25 @@ pub fn parse_datum(value: &str) -> Result<NaiveDate, String> {
 /// „morgen 14 Uhr“ sagt, muss kein Datum rechnen; wer „2026-09-14T09:00+02:00“
 /// liefert, bekommt genau diesen Zeitpunkt.
 pub fn parse_term(raw: &str) -> Result<DateTime<Utc>, String> {
-    match parse_wann(raw) {
+    parse_term_mit_jahr(raw).map(|(zeitpunkt, _)| zeitpunkt)
+}
+
+/// Wie [`parse_term`], aber **mit der Angabe, ob das Jahr offen war**.
+///
+/// Die Terminanlage braucht sie, um nachzufragen; alle anderen Aufrufer nicht –
+/// weshalb `parse_term` unverändert bleibt und die Zusatzangabe nur hier
+/// abfällt.
+pub fn parse_term_mit_jahr(raw: &str) -> Result<(DateTime<Utc>, bool), String> {
+    match parse_wann_mit_jahr(raw) {
+        Ok((ort, offen)) => Ok((ort.with_timezone(&Utc), offen)),
+        Err(ort_fehler) => parse_zeit(raw).map(|zeit| (zeit, false)).map_err(|_| ort_fehler),
+    }
+}
+
+/// Wie [`parse_term`], aber **mit einem vorgegebenen Bezugsjahr** aus dem Satz
+/// des Benutzers.
+pub fn parse_term_am(raw: &str, jahr: i32) -> Result<DateTime<Utc>, String> {
+    match parse_wann_am(raw, jahr) {
         Ok(ort) => Ok(ort.with_timezone(&Utc)),
         Err(ort_fehler) => parse_zeit(raw).map_err(|_| ort_fehler),
     }
@@ -194,8 +212,32 @@ pub fn parse_term(raw: &str) -> Result<DateTime<Utc>, String> {
 /// - Datum: `2026-09-14`, `14.9.`, `14.09.2026`, `14. September`
 /// - Uhrzeit: `14:00`, `14.00`, `14 Uhr`, `um 14 Uhr`, `14`
 pub fn parse_wann(raw: &str) -> Result<DateTime<Local>, String> {
+    parse_wann_mit_jahr(raw).map(|(zeitpunkt, _)| zeitpunkt)
+}
+
+/// Wie [`parse_wann`], aber **mit der Angabe, ob das Jahr offen war** – also ob
+/// die Angabe ein Kalenderdatum ohne Jahr nannte, dessen Termin in diesem Jahr
+/// schon vorbei ist. Solche Angaben lassen zwei Lesarten zu, und das Werkzeug
+/// soll den Benutzer fragen statt eine davon zu wählen.
+pub fn parse_wann_mit_jahr(raw: &str) -> Result<(DateTime<Local>, bool), String> {
     let angabe = Angabe::neu(raw);
-    let tag = ermittle_tag(&angabe);
+    let (tag, offen) = ermittle_tag_mit_jahr(&angabe);
+
+    mit_uhrzeit(tag, &angabe.worte, &angabe.original).map(|zeitpunkt| (zeitpunkt, offen))
+}
+
+/// Wie [`parse_wann`], aber **mit einem vorgegebenen Bezugsjahr**.
+///
+/// Steht im Satz des Benutzers ein Jahr, ist es entschieden – auch für eine
+/// Angabe, die selbst keines nennt. Ein Bezugstag aus diesem Jahr lässt die
+/// Auflösung eindeutig werden, ohne dass ein zweiter Zweig durch den Parser
+/// entstehen muss: „10. Januar“ vor dem 10. Januar 2027 ist der 10. Januar 2027
+/// und nicht der des nächsten Jahres.
+pub fn parse_wann_am(raw: &str, jahr: i32) -> Result<DateTime<Local>, String> {
+    let bezug = NaiveDate::from_ymd_opt(jahr, 1, 1)
+        .ok_or_else(|| format!("{jahr} ist kein Jahr, mit dem sich ein Termin planen lässt"))?;
+    let angabe = Angabe::neu_am(raw, bezug);
+    let (tag, _) = ermittle_tag_mit_jahr(&angabe);
 
     mit_uhrzeit(tag, &angabe.worte, &angabe.original)
 }
@@ -247,29 +289,39 @@ impl Angabe {
 /// die Worte „am“ stolpern. Ohne jedes Wort bleibt der heutige Tag – „14 Uhr“
 /// heißt heute um 14 Uhr.
 fn ermittle_tag(angabe: &Angabe) -> NaiveDate {
+    ermittle_tag_mit_jahr(angabe).0
+}
+
+/// Wie [`ermittle_tag`], aber **mit der Angabe, ob das Jahr offen war**.
+///
+/// Beide Aufrufer brauchen sie: die Suche will nur den Tag, das Anlegen eines
+/// Termins muss nachfragen können. Sie hier zu trennen – statt überall einen
+/// Wegwerf-`bool` mitzuschleppen – hält die Suchstelle frei von Sorgen, die sie
+/// nicht hat.
+fn ermittle_tag_mit_jahr(angabe: &Angabe) -> (NaiveDate, bool) {
     match datum_aus(&angabe.worte, angabe.heute) {
-        Some(datum) => datum,
+        Some(gefunden) => gefunden,
         // Die Rückwärtswörter stehen vor „morgen“, sonst fiele „gestern“ über
         // das „morgen“ darin auf den heutigen Tag. Sie fehlten hier und machten
         // aus „lösche den Termin von gestern 14 Uhr“ eine Suche nach dem
         // heutigen Tag – ohne Treffer, mit einer rätselhaften Fehlermeldung.
         None if angabe.klein.contains("übermorgen") || angabe.klein.contains("uebermorgen") => {
-            angabe.heute + Duration::days(2)
+            (angabe.heute + Duration::days(2), false)
         }
-        None if angabe.klein.contains("vorgestern") => angabe.heute - Duration::days(2),
-        None if angabe.klein.contains("gestern") => angabe.heute - Duration::days(1),
-        None if angabe.klein.contains("morgen") => angabe.heute + Duration::days(1),
+        None if angabe.klein.contains("vorgestern") => (angabe.heute - Duration::days(2), false),
+        None if angabe.klein.contains("gestern") => (angabe.heute - Duration::days(1), false),
+        None if angabe.klein.contains("morgen") => (angabe.heute + Duration::days(1), false),
         None if angabe.klein.contains("heute")
             || angabe.klein.contains("jetzt")
             || angabe.klein.contains("woche") =>
         {
-            angabe.heute
+            (angabe.heute, false)
         }
         None => match wochentag_datum(&angabe.klein, angabe.heute) {
-            Some(datum) => datum,
+            Some(datum) => (datum, false),
             None => match tage_in_aus(&angabe.worte) {
-                Some(tage) => angabe.heute + Duration::days(tage),
-                None => angabe.heute,
+                Some(tage) => (angabe.heute + Duration::days(tage), false),
+                None => (angabe.heute, false),
             },
         },
     }
@@ -360,7 +412,7 @@ fn mit_uhrzeit(
 }
 
 /// Die deutschen Monatsnamen und ihre üblichen Abkürzungen.
-const MONATE: [(&str, u32); 25] = [
+const MONATE: [(&str, u32); 26] = [
     ("januar", 1),
     ("jan", 1),
     ("februar", 2),
@@ -369,6 +421,11 @@ const MONATE: [(&str, u32); 25] = [
     ("maerz", 3),
     ("mrz", 3),
     ("mar", 3),
+    // **„Mär" fehlte, und ist die Form, die man tatsächlich schreibt.** „mrz"
+    // und „mar" standen da, „mär" nicht – wer „mär 20" sagte, bekam den
+    // heutigen Tag und damit ein Datum, um das niemand gebeten hatte. Derselbe
+    // Fall wie bei „mitwoch" bei den Wochentagen.
+    ("mär", 3),
     ("april", 4),
     ("apr", 4),
     ("mai", 5),
@@ -394,7 +451,15 @@ const MONATE: [(&str, u32); 25] = [
 /// sowie `5. Oktober` und `Oktober 5`. Fehlt das Jahr, gilt das laufende –
 /// aber nur, wenn der Tag noch nicht vorbei ist. „14.9.“ bedeutet im Oktober
 /// also den nächsten 14. September und nicht den vergangenen.
-fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<NaiveDate> {
+/// Ein Datum aus den Worten des Benutzers.
+///
+/// **Liefert auch, ob das Jahr geraten werden musste.** Ein Datum ohne Jahr,
+/// dessen Termin in diesem Jahr schon vorbei ist, lässt zwei Lesarten zu –
+/// dieses Jahr oder das nächste – und Mimir entscheidet das nicht heimlich.
+/// Der zweite Teil des Rückgabewerts sagt der aufrufenden Stelle, dass hier
+/// etwas offen ist; das Nachfragen selbst liegt dort, weil nur die Terminanlage
+/// fragen darf und die Suche nicht.
+fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<(NaiveDate, bool)> {
     for (position, wort) in worte.iter().enumerate() {
         let teile: Vec<&str> = wort
             .split(['-', '.', '/'])
@@ -413,7 +478,7 @@ fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<NaiveDate> {
                         teile[1].parse().ok()?,
                         teile[2].parse().ok()?,
                     ) {
-                        return Some(datum);
+                        return Some((datum, false));
                     }
                 }
                 3 => {
@@ -422,7 +487,7 @@ fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<NaiveDate> {
                         teile[1].parse().ok()?,
                         teile[0].parse().ok()?,
                     ) {
-                        return Some(datum);
+                        return Some((datum, false));
                     }
                 }
                 2 => {
@@ -431,14 +496,7 @@ fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<NaiveDate> {
                     let monat: u32 = teile[1].parse().ok()?;
 
                     if let Some(datum) = as_date(heute.year(), monat, tag) {
-                        return Some(if datum < heute {
-                            match as_date(heute.year() + 1, monat, tag) {
-                                Some(folges) => folges,
-                                None => datum,
-                            }
-                        } else {
-                            datum
-                        });
+                        return Some(später_oder_jetzt(datum, heute));
                     }
                 }
                 _ => {}
@@ -465,19 +523,62 @@ fn datum_aus(worte: &[String], heute: NaiveDate) -> Option<NaiveDate> {
                     continue;
                 };
 
-                // Ein Datum ohne Jahr darf nicht in die Zukunft springen, nur
-                // weil es schon vorbei ist: „der Termin am 30. September“
-                // meint den von diesem Jahr, nicht den nächsten. Der Sprung auf
-                // das Folgejahr bleibt den reinen Wochentagen vorbehalten
-                // („nächsten Montag“), wo die Zukunft die einzig lesbare Deutung
-                // ist. Sonst landete die Suche auf einem 30. September, den es
-                // noch gar nicht gibt.
-                return Some(datum);
+                // **Hier wird nicht ins Folgejahr gesprungen, und das ist
+                // Absicht.** Eine Suche, die den 10. Januar sucht, meint den im
+                // Kalender – und der kann in diesem Jahr liegen. Springen
+                // hiesse, auf einen 10. Januar zu zeigen, den es noch gar nicht
+                // gibt, und der Termin von diesem Jahr bliebe unsichtbar.
+                //
+                // **Gefragt wird beim Anlegen, nicht bei der Suche.** Deshalb
+                // wird das offene Jahr nur *gemeldet*: Steht dieses Datum noch
+                // bevor, loest „10. Januar" im Dezember zwei Lesarten zu –
+                // dieses Jahr oder das naechste – und die aufrufende Stelle
+                // entscheidet, ob das eine Frage ist (Anlegen) oder nicht
+                // (Suche). Die Ziffernschreibweise oben verhaelt sich
+                // gegenteilig, weil sie dort schon immer sprang; der
+                // Unterschied steckt im gemeldeten `bool`, nicht mehr im
+                // Ergebnis.
+                return Some(if datum < heute {
+                    (datum, true)
+                } else {
+                    (datum, false)
+                });
             }
         }
     }
 
     None
+}
+
+/// Ein Datum ohne Jahr, das schon vorbei ist – und die Meldung dazu.
+///
+/// Liegt der Termin in diesem Jahr noch vor, ist nichts offen: „5.10." am 1.
+/// Oktober meint den 5. Oktober dieses Jahres, und danach zu fragen wäre nur
+/// lästig.
+///
+/// Liegt er zurück, gibt es zwei Lesarten – dieses Jahr, was vorbei ist, oder
+/// das nächste – und keine ist falsch.
+///
+/// **Der Sprung ins Folgejahr ist die Auflösung, nicht die Antwort.** Er sagt
+/// nur, was Mimir vorläufig anbietet; die aufrufende Stelle darf daraus keine
+/// Tatsache machen, sondern muss nachfragen. Deshalb kommt das `bool` mit:
+///
+/// `false`, wenn das Jahr stand oder eindeutig war – `true`, wenn es gewählt
+/// werden musste und die Wahl offen ist.
+fn später_oder_jetzt(datum: NaiveDate, heute: NaiveDate) -> (NaiveDate, bool) {
+    if datum >= heute {
+        return (datum, false);
+    }
+
+    match as_date(
+        datum.year() + 1,
+        datum.month(),
+        datum.day(),
+    ) {
+        Some(folges) => (folges, true),
+        // Der 29. Februar hat nicht jedes Jahr einen Nachfolger.
+        None => (datum, false),
+    }
 }
 
 fn as_date(jahr: i32, monat: u32, tag: u32) -> Option<NaiveDate> {
@@ -562,7 +663,12 @@ fn wochentag_aus(worte: &[String]) -> Option<u8> {
 /// Angabe ist kein Wunsch nach dem heutigen Tag.
 pub fn parse_zeitraum_tag(raw: &str, heute: NaiveDate) -> Result<NaiveDate, String> {
     let angabe = Angabe::neu_am(raw, heute);
+    // **Hier wird nicht gefragt, nur aufgelöst.** Dieser Weg gehört der Suche
+    // („welchen Termin meinst du?“), und eine Suche, die stehenbleibt, findet
+    // gar nichts mehr. Dasselbe Datum im Anlegen sagt mehr – dort greift
+    // `ermittle_tag_mit_jahr`.
     let gefunden = datum_aus(&angabe.worte, heute)
+        .map(|(datum, _)| datum)
         .or_else(|| {
             if angabe.klein.contains("übermorgen") || angabe.klein.contains("uebermorgen") {
                 Some(heute + Duration::days(2))
@@ -1590,6 +1696,34 @@ fn zu_weit_hinten(start: DateTime<Utc>) -> bool {
     start < Local::now() - Duration::days(MAX_RUECKLIEGEND_TAGE)
 }
 
+/// **Nennt der Satz des Benutzers ein Jahr – und zwar als Teil eines Datums?**
+///
+/// **Zählweise bewusst eng.** Es zählt nur eine vierstellige Zahl, die an einem
+/// Trennzeichen hängt: `10.1.2027`, `2027-01-10`, `14.09.2026`. Eine Zahl wie
+/// „2000 Euro“ ist kein Datum, und sie darf hier nichts entscheiden – das wäre
+/// geraten, nur an anderer Stelle.
+///
+/// **Der Fehler wiegt in beide Richtungen.** Ein Jahr zu übersehen, das doch im
+/// Satz stand, kostet einen Rückfragesatz. Eines zu erfinden, das nirgends
+/// stand, kostet einen Termin am falschen Tag – und der fällt erst auf, wenn
+/// jemand ihn verpasst.
+fn jahr_aus(benutzertext: &str) -> Option<i32> {
+    benutzertext
+        .split_whitespace()
+        .filter_map(|wort| {
+            if !(wort.contains('.') || wort.contains('-') || wort.contains('/')) {
+                return None;
+            }
+
+            wort.split(|c: char| !c.is_ascii_digit())
+                .find(|teil| teil.len() == 4)
+                .and_then(|teil| teil.parse().ok())
+        })
+        // Nur ein vernünftiges Jahr: „0999“ und „3011“ sind keine Jahreszahlen,
+        // mit denen sich ein Termin planen lässt.
+        .find(|jahr| (1970..=2999).contains(jahr))
+}
+
 /// Prüft alle Felder und baut den Termin, ohne ihn zu senden.
 pub fn plan_event(
     config: &CalendarConfig,
@@ -1752,7 +1886,37 @@ pub fn plan_event(
     // Termin mit Uhrzeit. Erst die Worte des Benutzers, dann das absolute
     // Format: Ein Modell rechnet Datumsangaben schlecht, also soll es sie gar
     // nicht erst umrechnen müssen.
-    let start = parse_term(&request.start)?;
+    //
+    // **Nennt der Satz ein Jahr, gilt dieses Jahr – auch für eine Angabe ohne.**
+    // „Trag am 10.1.2027 den Termin ein" sagt das Jahr, und „10. Januar" meint
+    // dann den 10. Januar 2027. Erst danach ist zu fragen.
+    let (start, jahr_offen) = match jahr_aus(benutzertext) {
+        Some(jahr) => (parse_term_am(&request.start, jahr)?, false),
+        None => parse_term_mit_jahr(&request.start)?,
+    };
+
+    // **Jetzt nachfragen, statt zu raten – aber nur, wenn es wirklich offen ist.**
+    //
+    // „10. Januar" im Januar ist eindeutig. „10. Januar" im Dezember ist es
+    // nicht: dieses Jahr ist vorbei, das nächste wäre es in einem Jahr. Beides
+    // ist lesbar, also wird nicht stillschweigend eines davon gewählt – und es
+    // gilt für beide Schreibweisen, die sonst verschieden entschieden würden.
+    //
+    // **Der Fehler ist die Rückfrage, nicht eine Warnung.** So steht es in
+    // `docs/agentenmodus.md`: Ein Prompt-Absatz mit der Bitte nachzufragen hat
+    // die brauchbaren Sätze von 5/6 auf 3/12 verschlechtert, weil ein Modell,
+    // das zum Ausfüllen angewiesen wird, füllt. Der Eingriff muss ins
+    // Werkzeug – und genau das ist er.
+    if jahr_offen {
+        return Err(format!(
+            "In „{}“ steht kein Jahr, und der {} dieses Jahres liegt schon zurück. \
+             Das meint entweder dieses Jahr – dann liegt der Termin in der \
+             Vergangenheit – oder das nächste. Frage den Benutzer, welches Jahr \
+             er meint, oder nimm das Jahr aus seinem Satz.",
+            request.start.trim(),
+            start.format("%-d. %-m."),
+        ));
+    }
 
     // Ein Ende ohne Tagesangabe gehört zum selben Tag wie der Beginn.
     //

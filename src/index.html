@@ -83,6 +83,7 @@
             <div class="mail-head">
                 <h3>Mail</h3>
                 <div class="mail-head-actions">
+                    <button type="button" id="mail-compose-btn" class="mail-icon-button mail-compose-button" title="Neue Nachricht schreiben">Schreiben</button>
                     <button type="button" id="mail-refresh" class="mail-icon-button" title="Postfach neu laden">Neu laden</button>
                     <button type="button" id="mail-choose-btn" class="mail-icon-button" title="Postfach auswählen">Konten</button>
                     <button type="button" id="mail-settings-btn" class="mail-icon-button" title="Mailkonto einstellen">Konto</button>
@@ -353,11 +354,67 @@
                      den Knopf nur bereit und sagt, was passiert – ohne Rückfrage,
                      die in einer Webview nicht überall zuverlässig erscheint. -->
                 <button type="button" id="mail-message-delete" class="mail-delete-button">Löschen</button>
+                <!-- **Antworten.** Das Fenster zum Schreiben ist dasselbe, nur
+                     ausgefüllt: Empfänger, „Re: " vor dem Betreff und die
+                     Kennung, an die der Server die Antwort hängen soll. Ohne
+                     diesen Knopf wäre das Fenster nur für Nachrichten an
+                     Menschen, die es nicht kennt. -->
+                <button type="button" id="mail-message-reply" class="mail-reply-button">Antworten</button>
+                <!-- **Weiterleiten geht an wen der Benutzer will** – deshalb bleibt
+                     das Feld leer, und deshalb trägt die Nachricht keine Kennung:
+                     `In-Reply-To` würde sie in ein Gespräch einhängen, in dem der
+                     Empfänger nie etwas gesagt hat. -->
+                <button type="button" id="mail-message-forward" class="mail-forward-button">Weiterleiten</button>
                 <!-- **Der Knopf, um den es hier geht.** Er legt den Text in den
                      Chat und stellt die Frage. Die Antwort landet als Nachricht
                      im Verlauf, nicht an der Mail – ein Ergebnis, das beim
                      nächsten Klick weg wäre, wäre keines. -->
                 <button type="button" id="mail-message-summarize" class="mail-summarize-button">Zusammenfassen</button>
+            </div>
+        </div>
+    </dialog>
+
+    <!-- **Das Fenster zum Schreiben.** -->
+    <dialog id="mail-compose-dialog">
+        <div class="mail-compose">
+            <h3 id="mail-compose-title">Neue Nachricht</h3>
+            <p id="mail-compose-absender" class="mail-compose-absender"></p>
+
+            <label for="mail-compose-an">An</label>
+            <input type="text" id="mail-compose-an" placeholder="name@example.org" autocomplete="off">
+            <!-- **CC und BCC sind eingeklappt.** Beide werden selten gebraucht,
+                 und vier sichtbare Adressfelder wären die Hälfte des Fensters
+                 für Felder, die meist leer bleiben. Wer sie braucht, klappt sie
+                 auf – die Beschriftung sagt, dass es sie gibt. -->
+            <details id="mail-compose-mehr">
+                <summary>Weitere Empfänger (CC, BCC)</summary>
+                <label for="mail-compose-cc">CC</label>
+                <input type="text" id="mail-compose-cc" autocomplete="off">
+                <label for="mail-compose-bcc">BCC</label>
+                <input type="text" id="mail-compose-bcc" autocomplete="off">
+                <p class="mail-hint">BCC-Empfänger sehen die anderen Empfänger nicht.</p>
+            </details>
+
+            <label for="mail-compose-betreff">Betreff</label>
+            <input type="text" id="mail-compose-betreff" autocomplete="off">
+
+            <label for="mail-compose-text">Nachricht</label>
+            <textarea id="mail-compose-text" rows="12"></textarea>
+
+            <!-- **Fehler und Bestätigung stehen im Fenster.** Hinter dem Backdrop
+                 wären sie unsichtbar, und ein Knopf, der scheitert, ohne dass man
+                 es sieht, sieht aus wie ein Knopf, der nichts tut. -->
+            <p id="mail-compose-error" class="mail-compose-error" hidden></p>
+            <p id="mail-compose-warnung" class="mail-compose-warnung" hidden></p>
+
+            <div class="dialog-actions mail-compose-actions">
+                <button type="button" id="mail-compose-cancel">Verwerfen</button>
+                <!-- **Zweimal klicken.** Eine verschickte Nachricht ist nicht
+                     zurückzuholen, und `window.confirm` fällt in einer Webview
+                     nicht überall zuverlässig aus. Der erste Klick macht den
+                     Knopf scharf und nennt Empfänger und Betreff – wer prüfen
+                     will, prüft. -->
+                <button type="button" id="mail-compose-send">Senden</button>
             </div>
         </div>
     </dialog>
@@ -417,6 +474,13 @@
             <input type="text" id="mail-address-input" placeholder="kai@example.org" autocomplete="off">
             <label for="mail-folder-input">Ordner</label>
             <input type="text" id="mail-folder-input" placeholder="INBOX" autocomplete="off">
+            <!-- **Wie viele Nachrichten die Leiste zeigt.** Das Mimir holt immer
+                 die *neuesten* dieser Zahl – ältere Nachrichten werden nicht
+                 geladen, es gibt kein Nachladen. Das Feld steht hier, weil die
+                 Vorgabe sonst für niemanden erreichbar wäre. -->
+            <label for="mail-entries-input">Nachrichten in der Leiste</label>
+            <input type="number" id="mail-entries-input" min="1" max="50" step="1" placeholder="50">
+            <p class="mail-hint">Mimir zeigt die neuesten Nachrichten. Alles davor wird nicht geholt – die Leiste blättert nicht.</p>
             <label for="mail-password-input">App-Passwort</label>
             <input type="password" id="mail-password-input" autocomplete="off">
             <!-- **Leer heißt: nur speichern.** Wer ein Konto nur umbenennt oder

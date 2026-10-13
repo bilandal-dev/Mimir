@@ -242,12 +242,265 @@ gleich(
   true,
 );
 
+// --- Schreiben und Senden ---------------------------------------------------
+
+const schreiben = funktion('sendeMail');
+const auf = funktion('oeffneSchreiben');
+
+if (!schreiben || !auf) {
+  console.error('FAIL sendeMail/oeffneSchreiben nicht gefunden');
+  process.exit(2);
+}
+
+// **Zweimal klicken, wie beim Löschen.** Eine abgeschickte Nachricht ist nicht
+// zurückzuholen. Der erste Klick muss nur den Knopf scharf machen und nichts
+// schicken – sonst wäre die Bestätigung genau die Sache, die man gerade nicht
+// hat.
+gleich(
+  'der erste Klick sendet noch nichts',
+  /if \(!mailZustand\.sendenArmiert\)[\s\S]*?return;/.test(schreiben),
+  true,
+);
+gleich('und macht den Knopf scharf', /sendenArmiert = true/.test(schreiben), true);
+gleich(
+  'und nennt Empfänger und Betreff zum Nachprüfen',
+  /mailComposeWarnung\.textContent/.test(schreiben) && /Wirklich senden/.test(schreiben),
+  true,
+);
+
+// **Der Befehl hat eine Frist und schickt wirklich.** `mail_senden` geht
+// denselben Weg wie das Werkzeug des Agenten – deshalb dieser Name und nicht
+// irgendein eigener.
+gleich(
+  'das Senden hat eine Frist',
+  /invokeMail\(\s*'mail_senden'/.test(schreiben),
+  true,
+);
+gleich(
+  'und die geschlossenen Felder werden mitgeschickt',
+  /cc:/.test(schreiben) && /bcc:/.test(schreiben) && /inAntwortAuf:/.test(schreiben),
+  true,
+);
+
+// **CC und BCC gehen nur mit, wenn etwas drinsteht.** Sonst schickte Mimir ein
+// leeres CC-Feld und der Server könnte daran ebenso scheitern wie an einer
+// kaputten Adresse.
+gleich(
+  'leere Zusatzfelder gehen als „nichts" raus',
+  /mailComposeCc\.value\.trim\(\) \|\| null/.test(schreiben) &&
+    /mailComposeBcc\.value\.trim\(\) \|\| null/.test(schreiben),
+  true,
+);
+
+// **Ein Fehler bleibt im Fenster** – hinter dem Backdrop in der Leiste wäre er
+// unsichtbar, und ein Knopf, der scheitert ohne dass man es sieht, sieht aus
+// wie ein Knopf, der nichts tut.
+gleich(
+  'ein Fehler landet im Schreibfenster',
+  /catch \(error\)[\s\S]*?meldeSchreibenFehler\(/.test(schreiben),
+  true,
+);
+// **Und nicht im Fenster der geöffneten Nachricht**, das beim Schreiben gar
+// nicht offen ist.
+gleich(
+  'nicht im Fenster der Nachricht',
+  !/catch \(error\)[\s\S]*?meldeMailFensterFehler\(/.test(schreiben),
+  true,
+);
+
+// **Antworten füllt dasselbe Fenster** – kein zweites, das auseinanderlaufen
+// könnte. Und der Knopf setzt die Kennung, an die der Server die Antwort
+// hängen soll.
+gleich(
+  'Antworten nutzt dasselbe Fenster',
+  /oeffneSchreiben\('antwort', mailZustand\.offen\)/.test(src) &&
+    /oeffneSchreiben\('weiterleitung', mailZustand\.offen\)/.test(src),
+  true,
+);
+gleich(
+  'und setzt „Re: " vor den Betreff, „Wg: " davor',
+  /`Re: \$\{betreff\}`/.test(auf) && /`Wg: \$\{betreff\}`/.test(auf),
+  true,
+);
+
+// **Eine Weiterleitung ist keine Antwort.** `In-Reply-To` hängt die Nachricht
+// in das Gespräch der Originalnachricht ein – der Empfänger sähe einen Verlauf,
+// in dem er nie etwas gesagt hat. Die Kennung gehört deshalb *nur* in die
+// Antwort.
+gleich(
+  'nur die Antwort trägt die Kennung',
+  /: istAntwort\s*\? nachricht\.message_id\s*: ''/.test(auf),
+  true,
+);
+
+// **Eine Weiterleitung geht an wen der Benutzer will**, nicht an den Absender.
+gleich(
+  'die Weiterleitung lässt das Empfängerfeld leer',
+  /: istAntwort\s*\? nachricht\.kopf\.absender\s*: ''/.test(auf),
+  true,
+);
+
+// **Beide zitieren das Original.** Eine Weiterleitung ohne den Text ist eine
+// Nachricht, die niemand versteht.
+const zitat = funktion('mailZitat');
+gleich('das Original wird zitiert', zitat.length > 0 && /nachricht\.text/.test(zitat), true);
+gleich(
+  'mit „> " vor jeder Zeile',
+  /=> \$\{zeile\}/.test(zitat) || /map\(\(zeile\) => `> /.test(zitat),
+  true,
+);
+gleich(
+  'und mit dem Kopf der Nachricht',
+  /Von:/.test(zitat) && /Betreff:/.test(zitat),
+  true,
+);
+gleich(
+  'und beide Modi benutzen es',
+  /: nachricht\s*\? mailZitat\(nachricht\)\s*: ''/.test(auf),
+  true,
+);
+
+// --- Entwürfe aus dem Modell ----------------------------------------------
+
+const entwurfsKnopf = funktion('setzeEntwurfsKnopf');
+
+if (!entwurfsKnopf) {
+  console.error('FAIL setzeEntwurfsKnopf nicht gefunden');
+  process.exit(2);
+}
+
+// **Das Ergebnis des Werkzeugs trägt die Felder**, und nur `draft_email` tut das.
+gleich(
+  'ein Entwurf kommt als Feld an',
+  /if \(output\.entwurf\)[\s\S]*?setzeEntwurfsKnopf\(entry, output\.entwurf\)/.test(src),
+  true,
+);
+
+// **Der Knopf öffnet das Schreibfenster – und nichts anderes.** Es darf keinen
+// zweiten Versandweg geben: Einer, an dem die Bestätigung vorbeiliegt, wäre
+// genau die Zusage, die hier geschützt werden soll.
+gleich(
+  'der Knopf öffnet das Schreibfenster',
+  /oeffneSchreiben\('neu', null, entwurf\)/.test(entwurfsKnopf),
+  true,
+);
+gleich(
+  'und sendet nichts von sich aus',
+  !/mail_senden/.test(entwurfsKnopf) && !/sendeMail\(/.test(entwurfsKnopf),
+  true,
+);
+
+// **Der Entwurf füllt das Fenster, statt es im Chat zu ersetzen.** Wer den Text
+// abtippen müsste, würde den Entwurf nicht abschicken – und bei der ersten
+// Ungenauigkeit ginge etwas verloren, ohne dass es jemand bemerkt.
+gleich(
+  'der Entwurf hat Vorrang vor dem, was Mimir ableitet',
+  /mailComposeAn\.value = entwurf/.test(auf) &&
+    /mailComposeBetreff\.value = entwurf/.test(auf) &&
+    /mailComposeText\.value = entwurf/.test(auf),
+  true,
+);
+// **Und Mimir setzt kein „Re: " vor einen Betreff, den das Modell gewählt hat** –
+// das hieße, das Modell zu überstimmen.
+gleich(
+  'kein „Re: " vor einem fertigen Betreff',
+  /entwurf\s*\? betreff\s*:/.test(auf),
+  true,
+);
+
+// **Ein Fenster, nicht drei.** Wäre es automatisch, müsste Mimir damit
+// rechnen, dass das Modell drei Briefe nacheinander entwirft – und drei
+// `showModal` auf ein offenes Fenster wären drei Fehler.
+gleich(
+  'es öffnet sich nicht von selbst',
+  !/setzeEntwurfsKnopf\(entry, output\.entwurf\);[\s\S]{0,80}showModal\(\)/.test(src),
+  true,
+);
+
+// --- Ein Fehler muss sichtbar sein -----------------------------------------
+
+const schrittFehler = funktion('setAgentStepFehler');
+
+if (!schrittFehler) {
+  console.error('FAIL setAgentStepFehler nicht gefunden');
+  process.exit(2);
+}
+
+// **Ein Fehler, den man nicht sieht, ist schlimmer als keiner.** Vorher stand
+// der Grund eines gescheiterten Werkzeugaufrufs im **eingeklappten** Ausgabetext –
+// und ein zugklappter Schritt sieht aus wie ein Werkzeug, das nichts getan hat.
+// Genau so ist ein Entwurf unauffindbar geworden: `draft_email` lief, schlug
+// fehl, und der Grund stand in einer Zeile, die niemand aufgeklappt hat.
+gleich(
+  'ein Fehler wird aufgeklappt',
+  /aria-expanded', 'true'/.test(schrittFehler) && /output\.hidden = false/.test(schrittFehler),
+  true,
+);
+gleich(
+  'und der Schritt sieht anders aus',
+  /agent-step-fehler/.test(schrittFehler),
+  true,
+);
+gleich(
+  'und der Lesepfad benutzt den Fehlerweg',
+  /catch \(error\)[\s\S]*?setAgentStepFehler\(entry, String\(error\)\)/.test(src),
+  true,
+);
+
+// **Und der Knopf für einen Entwurf steht nicht im Ausgabetext**, sonst wäre er
+// mit weggeklappt – ein Entwurf, den man erst aufklappen muss, um ihn prüfen
+// zu können, ist einer, den niemand prüft.
+gleich(
+  'der Entwurfsknopf steht außerhalb des Ausgabetexts',
+  /insertBefore\(knopf, entry\.output\)/.test(entwurfsKnopf),
+  true,
+);
+
+// **Der Knopf wird beim Schließen zurückgesetzt** – sonst wäre die nächste
+// Nachricht schon beim ersten Klick weg.
+gleich(
+  'das Fenster setzt beim Schließen zurück',
+  /mailComposeDialog\.addEventListener\('close'[\s\S]*?sendenZuruecksetzen\(\)/.test(src),
+  true,
+);
+
 // **Escape räumt auf, nicht nur der Knopf.** Hängt das Aufräumen am Knopf,
 // behält der Zustand über das Fenster hinaus – und die Liste wäre die einzige
 // Stelle, die ihn kennt.
 gleich(
   'das Aufräumen hängt am Schließen des Fensters',
   /mailMessageDialog\.addEventListener\('close',[\s\S]*?offenKopf = null/.test(src),
+  true,
+);
+
+// --- Der Versand muss sooner sprechen als die Leiste -----------------------
+
+// **Zwei Fristen auf dieselbe Sekunde, und die falsche gewinnt.** Die Leiste
+// bricht einen Mailbefehl nach 60 Sekunden ab und meldet dann
+// „mail_senden hat nach 60 Sekunden nicht geantwortet" – eine Meldung über
+// *Mimir*, die nichts über den Mailserver sagt. Standen beide gleich, kam diese
+// Nachricht an und die erklärende nie.
+const smtpQuelle = fs.readFileSync(
+  path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'src-tauri', 'src', 'mail', 'smtp.rs'),
+  'utf8',
+);
+
+const sendeFrist = smtpQuelle.match(/SEND_TIMEOUT[^=]*=\s*[^;]*?from_secs\((\d+)\)/);
+const leistenFrist = src.match(/'mail_senden',[\s\S]*?,\s*(\d+),\s*\)/);
+
+if (!sendeFrist || !leistenFrist) {
+  console.error('FAIL Fristen für den Versand nicht gefunden');
+  process.exit(2);
+}
+
+gleich(
+  'das Backend spricht vor der Leiste',
+  Number(sendeFrist[1]) < Number(leistenFrist[1]),
+  true,
+);
+gleich(
+  'und mit genug Spielraum, dass die Erklärung ankommt',
+  Number(leistenFrist[1]) - Number(sendeFrist[1]) >= 15,
   true,
 );
 

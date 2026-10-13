@@ -48,6 +48,14 @@ pub const VORSCHAU_BYTES: usize = 2048;
 pub const MAX_MAIL_PREVIEW_BYTES: usize = 400;
 /// So viele Nachrichten holt ein Aufruf höchstens.
 const MAX_MAIL_LIST_ENTRIES: usize = 50;
+
+/// Die Zahl der angezeigten Nachrichten, wenn im Konto keine steht.
+///
+/// **Der Deckel selbst.** Es gibt eine Bedienung dafür (im Kontodialog), aber sie
+/// kann nur nach unten wirken, solange die Vorgabe oben liegt – und eine Zahl zu
+/// senken ist der seltene Fall. Wer mehr möchte, sagt es; die Grenze steht in
+/// `MAX_MAIL_LIST_ENTRIES` und wird dort geändert.
+const VORGABE_NACHRICHTEN: usize = MAX_MAIL_LIST_ENTRIES;
 /// So viele Empfänger nimmt eine Nachricht auf. Mehr ist in aller Regel ein
 /// Fehler, und jede zusätzliche Adresse ist eine zusätzliche Stelle, an der
 /// etwas herauskommt, das nicht herauskommen sollte.
@@ -131,6 +139,14 @@ pub struct MailConfig {
     #[serde(default)]
     pub folder: String,
     /// Wie viele Nachrichten die Leiste höchstens zeigt.
+    ///
+    /// **Null heißt: unbestimmt, nicht „eine".** Das ist der ganze Grund für
+    /// dieses Feld hier: Mit `#[serde(default)]` ist der Wert eines frischen
+    /// Kontos `0`, und eine Klemmung `0..50` auf `1..50` macht daraus
+    /// `clamp(0, 1, 50) = 1` – also genau **eine** Nachricht in der Leiste,
+    /// ohne dass irgendwo ein Fehler aufträte. Das war der Zustand, und er sah
+    /// aus wie ein Fehler der Abfrage: Die Liste war da, sie war nur leer.
+    /// `anzeige_grenze` behandelt die Null deshalb als „unbestimmt“.
     #[serde(default)]
     pub max_entries: usize,
 }
@@ -161,9 +177,18 @@ impl MailConfig {
         }
     }
 
-    /// Wie viele Nachrichten die Leiste zeigt, begrenzt auf einen Bereich, in
+/// Wie viele Nachrichten die Leiste zeigt, begrenzt auf einen Bereich, in
     /// dem die Oberfläche noch bedienbar bleibt.
+    ///
+    /// **Null ist unbestimmt und wird nicht zu eins.** Siehe
+    /// [`MailConfig::max_entries`]: eine Klemmung auf `1..50` machte aus dem
+    /// Vorgabewert `0` genau eine Nachricht, und die Leiste sah damit kaputt
+    /// aus, ohne einen Fehler zu melden.
     pub fn anzeige_grenze(&self) -> usize {
+        if self.max_entries == 0 {
+            return VORGABE_NACHRICHTEN;
+        }
+
         self.max_entries.clamp(1, MAX_MAIL_LIST_ENTRIES)
     }
 
@@ -1222,14 +1247,21 @@ pub fn draft_email_schema() -> serde_json::Value {
             "description":
                 "Schreibt einen Entwurf an den Benutzer. Es wird **nichts** gesendet: \
                  Der Entwurf erscheint im Chat, und der Benutzer entscheidet, ob daraus \
-                 eine Nachricht wird. Das ist der Weg, den du immer nehmen sollst.",
+                 eine Nachricht wird. Das ist der Weg, den du immer nehmen sollst. \
+                 Am Entwurf hängt ein Knopf, der ihn in sein Schreibfenster holt – dort \
+                 kann er ihn lesen, ändern und selbst senden. Der Betreff kommt so, wie \
+                 er sein soll: mit „Re: “ , wenn es eine Antwort ist, und ohne, wenn nicht.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     werkzeug::KONTO: konto_beschreibung(),
                     "an": {
                         "type": "string",
-                        "description": "Die Empfängeradresse, eine Adresse."
+                        "description": "Die Empfängeradresse, eine Adresse. **Optional**: \
+                         lässt du sie weg, geht der Entwurf an das Postfach des Benutzers \
+                         selbst – das ist der richtige Weg für „schick mir das“ oder \
+                         „leg das als Mail ab“. Er trägt es dann im Schreibfenster ein und \
+                         ändert es nach Bedarf."
                     },
                     "cc": {
                         "type": "string",
@@ -1255,7 +1287,7 @@ pub fn draft_email_schema() -> serde_json::Value {
                         "description": "Optional die Nummer der Nachricht, auf die geantwortet wird."
                     }
                 },
-                "required": ["an", "betreff", "text"]
+                "required": ["betreff", "text"]
             }
         }
     })
@@ -1264,6 +1296,16 @@ pub fn draft_email_schema() -> serde_json::Value {
 /// Das Schema für das Senden.
 pub fn send_email_schema() -> serde_json::Value {
     let mut schema = draft_email_schema();
+
+    // **Hier ist der Empfänger wieder Pflicht.** `draft_email_schema` lässt ihn
+    // weg, damit ein Entwurf an den Benutzer selbst gehen kann – dort ist das
+    // harmlos, weil nichts gesendet wird. Beim Senden nicht: Ohne Adresse nähme
+    // `vorhaben_aus_argumenten` hier denselben Vorgang, und die Nachricht ginge
+    // an den Benutzer selbst, während er eine an jemand anderen erwartet. Also
+    // steht die Adresse hier in `required`, und diese Zeile darf nicht
+    // versehentlich mit dem Schema darüber verschoben werden.
+    schema["function"]["parameters"]["required"] = serde_json::json!(["an", "betreff", "text"]);
+
     schema["function"]["description"] = serde_json::json!(
         "Sendet eine E-Mail. **Dieser Weg ist der Ausnahme-Fall:** Das, was du hier \
          abschickst, verlässt den Rechner und lässt sich nicht zurücknehmen. \
@@ -1312,7 +1354,21 @@ pub fn mail_anweisung(konten: &[String]) -> String {
          und geht nirgendwohin – das ist der normale Weg. Gesendet wird nur, wenn der \
          Benutzer ausdrücklich darum gebeten hat, und auch dann zeigt er vorher die \
          Nachricht und bestätigt sie. Wenn du unsicher bist, ob etwas hinausgehen \
-         soll: Entwurf.\n\n",
+         soll, ist der Entwurf die richtige Wahl.\n\n",
+    );
+
+    // **Der häufigste Auftrag verlangt keine Adresse.**
+    //
+    // „Fasse das zusammen und schick es mir" heißt nicht „an wen?“, sondern
+    // „an mich". Ohne diesen Satz hat das Modell für `an` geraten, und eine
+    // geratene Adresse sieht im Aufruf völlig plausibel aus – erst das Postfach
+    // merkt, dass es sie nicht gibt.
+    text.push_str(
+        "**Will der Benutzer etwas bei sich haben – eine Zusammenfassung, eine \
+         Notiz, den Chat zum Nachlesen –, dann ist er der Empfänger.** Lass bei \
+         `draft_email` das Feld `an` einfach weg; es geht dann an sein eigenes \
+         Postfach, und er trägt es im Schreibfenster ein und ändert es nach Bedarf. \
+         Eine Adresse, die du nicht kennst, trägst du nicht ein.\n\n",
     );
 
     text.push_str(
@@ -1482,7 +1538,35 @@ fn entwurf(
     config: &MailConfig,
     arguments: &serde_json::Value,
 ) -> Result<crate::ToolOutput, String> {
-    let vorhaben = vorhaben_aus_argumenten(config, arguments)?;
+    // **Fehlt der Empfänger, geht der Entwurf an den Benutzer selbst.**
+    //
+    // „Schick mir das" ist die häufigste Bitte um einen Entwurf, und dafür muss
+    // das Modell keine Adresse kennen – **es kennt keine.** Es kann sie nicht
+    // wissen; die steht nirgends in seiner Anweisung. Also hat es geraten, und
+    // daran ist ein Entwurf hängen geblieben: Die Adresse, die im Aufruf stand,
+    // gab es im Postfach nicht.
+    //
+    // Hier ist das Raten durch eine Voreinstellung ersetzt, und zwar nur hier.
+    // **Beim Entwurf ist ein falscher Empfänger harmlos**, weil nichts gesendet
+    // wird: Der Empfänger steht im Schreibfenster, und der Benutzer ändert ihn,
+    // bevor etwas hinausgeht. Beim Senden wäre dieselbe Voreinstellung ein
+    // Fehler – dort muss das Modell eine Adresse nennen, die es kennt.
+    let eigene = normalize_address(config.absender(), "Absender")?;
+    let nennt_empfaenger = arguments
+        .get("an")
+        .and_then(serde_json::Value::as_str)
+        .map(|wert| !wert.trim().is_empty())
+        .unwrap_or(false);
+
+    let arguments = if nennt_empfaenger {
+        arguments.clone()
+    } else {
+        let mut mit_empfaenger = arguments.clone();
+        mit_empfaenger["an"] = serde_json::json!(eigene);
+        mit_empfaenger
+    };
+
+    let vorhaben = vorhaben_aus_argumenten(config, &arguments)?;
 
     Ok(crate::ToolOutput::new(
         format!(
@@ -1498,7 +1582,22 @@ fn entwurf(
             vorhaben.text
         ),
         format!("Entwurf an {}", vorhaben.kuerze_empfaenger()),
-    ))
+    )
+    // **Die Felder wandern mit, damit das Fenster sie übernehmen kann.**
+    //
+    // Ohne sie bliebe dem Benutzer nur der Text im Chat, und um ihn zu
+    // versenden, müsste er ihn abtippen. Genau daran scheitert die Zusage, dass
+    // **er** entscheidet: Ein abgetippter Entwurf ist ein anderer als der
+    // geschriebene, und bei der ersten Ungenauigkeit geht etwas verloren.
+    .mit_entwurf(crate::Entwurfsdaten {
+        konto: config.id.clone(),
+        an: vorhaben.an.join(", "),
+        cc: vorhaben.cc.join(", "),
+        bcc: vorhaben.bcc.join(", "),
+        betreff: vorhaben.betreff.clone(),
+        text: vorhaben.text.clone(),
+        in_antwort_auf: vorhaben.in_antwort_auf.clone(),
+    }))
 }
 
 async fn sende(
@@ -1727,4 +1826,68 @@ pub async fn imap_loeschen(
     session.mark_success(&config.id);
 
     Ok(())
+}
+
+/// Verschickt eine Nachricht, die der Benutzer selbst geschrieben hat.
+///
+/// **Der Agentenweg, unverändert übernommen.** `send_email` macht nichts
+/// Besonderes: Es baut aus denselben Feldern über `vorhaben_aus_argumenten`
+/// dieselbe Nachricht und ruft dieselbe `smtp::sende`. Der einzige Unterschied
+/// ist, wer die Felder gefüllt hat – der Mensch im Fenster oder das Modell im
+/// Chat. Alles andere getrennt zu halten hieße, die Prüfung der Adressen, die
+/// Kürzung des Betreffs und den BCC-Umgang zweimal zu pflegen.
+///
+/// **Viele Parameter, weil es viele Felder sind.** An, CC, BCC, Betreff, Text
+/// und die Kennung der beantworteten Nachricht beschreiben *einen* Brief; in
+/// einer Struktur müsste Tauri sie erst zerlegen. `lib.rs` erlaubt sich das an
+/// zwei Stellen ebenso.
+#[allow(clippy::too_many_arguments)]
+pub async fn imap_senden(
+    config: &MailConfig,
+    session: &MailSession,
+    an: String,
+    cc: Option<String>,
+    bcc: Option<String>,
+    betreff: String,
+    text: String,
+    in_antwort_auf: Option<String>,
+) -> Result<String, String> {
+    let feld = |wert: Option<String>| -> String { wert.unwrap_or_default() };
+
+    let vorhaben = vorhaben_aus_argumenten(
+        config,
+        &serde_json::json!({
+            "an": an,
+            "cc": feld(cc),
+            "bcc": feld(bcc),
+            "betreff": betreff,
+            "text": text,
+            "in_antwort_auf": feld(in_antwort_auf),
+        }),
+    )?;
+
+    if config.smtp_server.trim().is_empty() {
+        return Err(format!(
+            "Für das Senden aus „{}“ wird ein SMTP-Server gebraucht. Trage ihn unter \
+             „Konto“ in der Mailleiste ein.",
+            config.anzeige_name()
+        ));
+    }
+
+    let passwort = session.password(&config.id).ok_or_else(|| {
+        format!(
+            "Für „{}“ muss Mimir angemeldet sein. Mit „Konto“ in der Mailleiste anmelden.",
+            config.anzeige_name()
+        )
+    })?;
+
+    crate::mail::smtp::sende(&vorhaben, &config.smtp_server, &config.username, &passwort).await?;
+
+    session.mark_success(&config.id);
+
+    Ok(format!(
+        "Gesendet von „{}“ an {}.",
+        config.anzeige_name(),
+        vorhaben.kuerze_empfaenger()
+    ))
 }

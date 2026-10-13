@@ -150,12 +150,16 @@ const CALENDAR_TOOL_NAMES = [EVENT_TOOL, UPDATE_EVENT_TOOL, DELETE_EVENT_TOOL];
 const MAIL_TOOL_NAMES = ['list_emails', 'read_email', 'draft_email', 'send_email'];
 const WRITE_TOOL_NAMES = ['write_file', 'edit_file', 'send_email', ...CALENDAR_TOOL_NAMES];
 
-// Die beiden Umfänge, in denen das Modell Werkzeuge bekommt. `agent` ist der
-// bisherige Stand mit dem festen Arbeitsverzeichnis, `termine` nur der Kalender.
+// Die drei Umfänge, in denen das Modell Werkzeuge bekommt. `agent` ist der
+// bisherige Stand mit dem festen Arbeitsverzeichnis, `termine` nur der Kalender,
+// `mail` nur das Postfach – **jeweils ohne die Werkzeuge der anderen beiden**.
 // Der Wert kommt aus der Konfiguration und gilt über einen Neustart hinweg, weil
 // er eine Absicht beschreibt und nicht eine Sitzung.
-// Das Backend entscheidet, was daraus folgt; diese Liste hier dient nur der
-// Anzeige und der Prüfung von Schreibvorgängen.
+//
+// **`mail` stand lange nur hier.** Der Wert war in dieser Liste, aber weder
+// `/scope` noch die Hilfe noch `umfangstext` nannten ihn – wer ihn nicht in der
+// Konfiguration gefunden hatte, konnte ihn nicht einstellen. Diese Liste ohne
+// sichtbaren Weg dorthin ist der Grund, warum das hier steht.
 const SCOPE_NAMES = ['agent', 'termine', 'mail'];
 const PROVIDER_NAMES = ['remote', 'local'];
 
@@ -214,9 +218,10 @@ function umfangsname(scope) {
     return 'Agentenmodus';
 }
 
-// Der Text für `/scope`. Er nennt immer beide Umfänge mit dem Weg zurück, weil
-// der eingestellte sonst nur in der Konfiguration steht und im Chat nicht
-// auffindbar ist.
+// Der Text für `/scope`. Er nennt immer die anderen Umfänge mit dem Weg zurück,
+// weil der eingestellte sonst nur in der Konfiguration steht und im Chat nicht
+// auffindbar ist – und weil ein Umfang, den man nicht benennen kann, einer ist,
+// den man nicht abschaltet, wenn er gerade im Weg ist.
 function umfangstext(scope, config = agent) {
     if (scope === 'termine') {
         return 'Umfang: Terminumfang. Das Modell bekommt nur die vier Kalenderwerkzeuge – Termine '
@@ -225,13 +230,30 @@ function umfangstext(scope, config = agent) {
             + (calendar.status?.logged_in_hint
                 ? 'Der Kalender ist angemeldet.'
                 : 'Achtung: Ohne Anmeldung über /calendar gibt es kein Werkzeug. ')
-            + 'Umfang dauerhaft eingestellt. Mit /scope agent kommst du zu den Dateiwerkzeugen zurück.';
+            + 'Umfang dauerhaft eingestellt. Mit /scope agent kommst du zu den Dateiwerkzeugen zurück, '
+            + 'mit /scope mail zu den Mailwerkzeugen.';
+    }
+
+    // **Der Postfachumfang stand bisher nirgends.** `umfangsname` kannte ihn und
+    // `SCOPE_NAMES` führt ihn, aber weder der Text hier noch die Hilfe nannten
+    // ihn – wer ihn nicht in der Konfiguration gefunden hatte, konnte ihn nicht
+    // einstellen. Und noch schlimmer: `umfangstext` fiel für ihn auf den
+    // Agentenmodus-Zweig zurück und **behauptete damit etwas Falsches** über den
+    // Zustand, in dem das Programm gerade war.
+    if (scope === 'mail') {
+        return 'Umfang: Postfach. Das Modell bekommt die Mailwerkzeuge – Postfach auflisten, eine '
+            + 'Nachricht lesen, einen Entwurf schreiben und einen senden. Es kann **keine Dateien** '
+            + 'lesen oder schreiben, und ein Arbeitsverzeichnis ist nicht nötig. '
+            + 'Entwürfe landen im Schreibfenster und werden **erst von dir** gesendet; '
+            + 'Nachrichten werden vorher als Unterschied gezeigt und brauchen deine Freigabe. '
+            + 'Umfang dauerhaft eingestellt. Mit /scope agent kommst du zu den Dateiwerkzeugen zurück, '
+            + 'mit /scope termine zu den Kalenderwerkzeugen.';
     }
 
     return `Umfang: Agentenmodus. Das Modell kann die Dateiwerkzeuge benutzen${
         config.root ? `, begrenzt auf ${config.root}` : ', sobald ein Arbeitsverzeichnis gesetzt ist'
     }${config.writeEnabled ? '. Schreibende Werkzeuge sind für diese Sitzung freigegeben' : ''}. `
-        + 'Mit /scope termine beschränkst du es auf den Kalender.';
+        + 'Mit /scope termine beschränkst du es auf den Kalender, mit /scope mail auf das Postfach.';
 }
 
 // Wie der laufende Zug im Chat heißt. Im Terminumfang gibt es kein
@@ -1361,6 +1383,7 @@ const mailSmtpInput = document.getElementById('mail-smtp-input');
 const mailUserInput = document.getElementById('mail-user-input');
 const mailAddressInput = document.getElementById('mail-address-input');
 const mailFolderInput = document.getElementById('mail-folder-input');
+const mailEntriesInput = document.getElementById('mail-entries-input');
 const mailPasswordInput = document.getElementById('mail-password-input');
 const mailRememberInput = document.getElementById('mail-remember-input');
 const mailDialogError = document.getElementById('mail-dialog-error');
@@ -1376,6 +1399,23 @@ const mailMessageSummarize = document.getElementById('mail-message-summarize');
 const mailMessageError = document.getElementById('mail-message-error');
 const mailMessageDelete = document.getElementById('mail-message-delete');
 const mailMessageWarnung = document.getElementById('mail-message-warnung');
+
+const mailComposeBtn = document.getElementById('mail-compose-btn');
+const mailComposeDialog = document.getElementById('mail-compose-dialog');
+const mailComposeTitle = document.getElementById('mail-compose-title');
+const mailComposeAbsender = document.getElementById('mail-compose-absender');
+const mailComposeAn = document.getElementById('mail-compose-an');
+const mailComposeCc = document.getElementById('mail-compose-cc');
+const mailComposeBcc = document.getElementById('mail-compose-bcc');
+const mailComposeBetreff = document.getElementById('mail-compose-betreff');
+const mailComposeText = document.getElementById('mail-compose-text');
+const mailComposeMehr = document.getElementById('mail-compose-mehr');
+const mailComposeError = document.getElementById('mail-compose-error');
+const mailComposeWarnung = document.getElementById('mail-compose-warnung');
+const mailComposeCancel = document.getElementById('mail-compose-cancel');
+const mailComposeSend = document.getElementById('mail-compose-send');
+const mailMessageReply = document.getElementById('mail-message-reply');
+const mailMessageForward = document.getElementById('mail-message-forward');
 
 /**
  * Was die Leiste gerade zeigt. Nur zum Zeichnen, nie zum Senden.
@@ -1394,6 +1434,11 @@ const mailZustand = {
      *  hat. Getrennt von `offen`, damit der Knopf nach einem Markieren den
      *  Stand führt, den er selbst gesetzt hat. */
     offenKopf: null,
+    /** Was im Schreibfenster steht. `null`, solange es offen ist – danach wird
+     *  es beim Verwerfen und beim Schließen wieder verworfen. */
+    schreibt: null,
+    /** Der Senden-Knopf wartet auf den zweiten Klick. */
+    sendenArmiert: false,
     ordner: 'INBOX',
     konto: null,
     statuse: [],
@@ -2140,6 +2185,227 @@ async function loescheMail() {
     }
 }
 
+/**
+ * Öffnet das Fenster zum Schreiben.
+ *
+ * **`art` steuert, was schon drinsteht.** Drei Fälle, ein Fenster – ein zweites
+ * wäre nur eine weitere Stelle, an der etwas verrutschen kann:
+ *
+ * - `'neu'` – alles leer, Knopf „Neue Nachricht".
+ * - `'antwort'` – an den Absender, „Re: ", die Kennung der Nachricht, damit der
+ *   Server sie als Antwort einhängen kann.
+ * - `'weiterleitung'` – ohne Empfänger, „Wg: ", der zitierte Originaltext und
+ *   **keine** Kennung.
+ *
+ * **Der Absender steht oben und ist nicht zu ändern.** Mimir verschickt aus
+ * dem eingetragenen Konto; eine freie Absenderadresse wäre eine Fälschung, die
+ * erst beim Empfänger auffällt.
+ */
+function oeffneSchreiben(art = 'neu', nachricht = null, entwurf = null) {
+    if (!mailZustand.konto) {
+        meldeMailHinweis('Zum Schreiben muss ein Mailkonto eingetragen sein.');
+        return;
+    }
+
+    // **Ohne Nachricht nur „neu".** Die Knöpfe „Antworten" und „Weiterleiten"
+    // gibt es nur bei geöffneter Nachricht – aber eine kaputte Verdrahtung soll
+    // ein leeres Fenster ergeben und nicht `undefined.kopf` in der Konsole.
+    if (art !== 'neu' && !nachricht) art = 'neu';
+
+    mailZustand.offen = null;
+
+    // **Die Absenderadresse des gerade gezeigten Postfachs** – dieselbe Quelle,
+    // aus der die Leiste ihren Namen nimmt. Eine Absenderadresse von anderswo
+    // wäre eine Fälschung, die erst beim Empfänger auffällt.
+    const status = mailAktiverStatus();
+
+    mailComposeAbsender.textContent = `Von: ${status?.adresse || 'unbekannt'}`;
+
+    const istAntwort = art === 'antwort';
+    const istWeiterleitung = art === 'weiterleitung';
+    const betreff = entwurf
+        ? entwurf.betreff || ''
+        : nachricht
+          ? nachricht.kopf.betreff
+          : '';
+
+    mailComposeTitle.textContent = entwurf
+        ? 'Entwurf prüfen'
+        : istAntwort
+          ? 'Antworten'
+          : istWeiterleitung
+            ? 'Weiterleiten'
+            : 'Neue Nachricht';
+
+    // **Antworten geht an den Absender, Weiterleiten an wen der Benutzer will.**
+    // Bei der Weiterleitung bleibt das Feld deshalb leer – sie ist eine
+    // Nachricht an jemanden, den Mimir gar nicht kennt.
+    //
+    // **Ein Entwurf hat Vorrang:** Er kommt vom Modell und trägt dessen Wahl,
+    // nicht die, die Mimir aus einer geöffneten Nachricht ableiten würde.
+    mailComposeAn.value = entwurf
+        ? entwurf.an || ''
+        : istAntwort
+          ? nachricht.kopf.absender
+          : '';
+
+    // **„Re: " und „Wg: "** sind die Kürzel, an denen Mailprogramme erkennen,
+    // was geschehen ist. Sie gehören in den Betreff und nicht nur in den Text –
+    // die wenigsten Programme lesen den Betreff gar nicht erst. Ein Entwurf des
+    // Modells bringt seinen Betreff mit; ein „Re: " davorzusetzen hieße, das
+    // Modell zu überstimmen.
+    mailComposeBetreff.value = entwurf
+        ? betreff
+        : istAntwort
+          ? `Re: ${betreff}`
+          : istWeiterleitung
+            ? `Wg: ${betreff}`
+            : '';
+
+    // **Nur eine Antwort ist eine Antwort.** `In-Reply-To` sagt jedem Programm,
+    // dass dies hier die Fortsetzung eines Gesprächs ist. Bei einer
+    // Weiterleitung wäre das eine Lüge: Der Empfänger bekäme den Verlauf
+    // angehängt und die Nachricht in einem Gespräch einsortiert, in dem er
+    // nie etwas gesagt hat.
+    mailZustand.schreibt = {
+        inAntwortAuf: entwurf
+            ? entwurf.in_antwort_auf || ''
+            : istAntwort
+              ? nachricht.message_id
+              : '',
+    };
+
+    mailComposeCc.value = entwurf ? entwurf.cc || '' : '';
+    mailComposeBcc.value = entwurf ? entwurf.bcc || '' : '';
+    mailComposeText.value = entwurf
+        ? entwurf.text || ''
+        : nachricht
+          ? mailZitat(nachricht)
+          : '';
+    mailComposeMehr.open = Boolean(entwurf && (entwurf.cc || entwurf.bcc));
+
+    sendenZuruecksetzen();
+    meldeSchreibenFehler('');
+
+    mailComposeDialog.showModal();
+
+    // **Ins erste leere Feld.** Wer „Schreiben" gedrückt hat, will eine Adresse
+    // eintippen – nicht den Betreff. Steht schon etwas drin, gehört der Cursor
+    // in den Text.
+    const ziel =
+        entwurf || istAntwort || istWeiterleitung ? mailComposeText : mailComposeAn;
+    ziel.focus();
+}
+
+/**
+ * **Der zitierte Originaltext – in der Form, die Mailprogramme schreiben.**
+ *
+ * **Jede Zeile mit „> ".** Das ist das Format, das jedes Programm versteht und
+ * wieder als Zitat erkennt – auch Mimir selbst: `mailZeilenart` erkennt „>"
+ * am Zeilenanfang und die Kopfzeilen „Von:", „An:" und „Betreff:" und stellt
+ * daraus einen eigenen Block dar. Eine Weiterleitung ohne den Originaltext wäre
+ * eine Nachricht, die niemand versteht.
+ *
+ * **Die Kopfzeilen heißen auf Deutsch**, weil die Anzeige sie so schreibt und
+ * ein zitiertes „Sent:" neben einem eigenen „Gesendet:" wie ein Fehler aussieht.
+ */
+function mailZitat(nachricht) {
+    const kopf = nachricht.kopf;
+
+    const zeilen = [
+        `Von: ${kopf.absender}`,
+        `Betreff: ${kopf.betreff}`,
+        kopf.datum ? `Gesendet: ${formatMailDate(kopf.datum)}` : '',
+        '',
+        nachricht.text || '',
+    ];
+
+    return zeilen.map((zeile) => `> ${zeile}`).join('\n');
+}
+
+/**
+ * Sagt im Schreibfenster Bescheid – nicht im Fenster der geöffneten Nachricht.
+ *
+ * **Zwei Fenster, zwei Fehlerzeilen, aus einem Grund:** Die geöffnete Nachricht
+ * und das Schreiben sind verschiedene Vorgänge. Eine Meldung im jeweils anderen
+ * Fenster landet hinter einem geschlossenen Dialog und ist genau so wenig zu
+ * sehen, als stünde sie in der Konsole.
+ */
+function meldeSchreibenFehler(text) {
+    mailComposeError.textContent = text;
+    mailComposeError.hidden = !text;
+}
+
+/** Setzt den Senden-Knopf auf seinen Ausgangszustand zurück. */
+function sendenZuruecksetzen() {
+    mailZustand.sendenArmiert = false;
+    mailComposeSend.textContent = 'Senden';
+    mailComposeSend.classList.remove('senden-bereit');
+    mailComposeWarnung.hidden = true;
+    mailComposeWarnung.textContent = '';
+}
+
+/**
+ * Verschickt die Nachricht im Fenster.
+ *
+ * **Zweimal klicken, wie beim Löschen.** Eine abgeschickte Nachricht ist nicht
+ * zurückzuholen. Der erste Klick macht den Knopf scharf und nennt Empfänger und
+ * Betreff ein letztes Mal – wer prüfen will, prüft. `window.confirm` fällt in
+ * einer Webview nicht überall zuverlässig aus, und eine stehen gebliebene Frage
+ * sähe aus, als sei der Knopf kaputt.
+ *
+ * **Ein Fehler bleibt im Fenster und der Knopf bleibt scharf.** Der Wunsch steht
+ * noch, und nach dem Schließen des Fensters wäre die ganze Nachricht weg – bei
+ * einer halb geschriebenen Nachricht ein ärgerlicher Verlust. Genau deshalb wird
+ * hier nichts verworfen, solange es nicht gesendet wurde.
+ */
+async function sendeMail() {
+    const vorhaben = mailZustand.schreibt;
+    if (!vorhaben) return;
+
+    const an = mailComposeAn.value.trim();
+    const betreff = mailComposeBetreff.value.trim();
+
+    if (!mailZustand.sendenArmiert) {
+        mailZustand.sendenArmiert = true;
+        mailComposeSend.textContent = 'Wirklich senden';
+        mailComposeSend.classList.add('senden-bereit');
+        mailComposeWarnung.textContent = `Geht an ${an || 'niemanden'} – „${betreff || 'ohne Betreff'}". Ein zweiter Klick verschickt sie.`;
+        mailComposeWarnung.hidden = false;
+        return;
+    }
+
+    mailComposeSend.disabled = true;
+
+    try {
+        const quittung = await invokeMail(
+            'mail_senden',
+            {
+                id: mailZustand.konto,
+                an,
+                cc: mailComposeCc.value.trim() || null,
+                bcc: mailComposeBcc.value.trim() || null,
+                betreff,
+                text: mailComposeText.value,
+                inAntwortAuf: vorhaben.inAntwortAuf || null,
+            },
+            60,
+        );
+
+        meldeSchreibenFehler('');
+        mailComposeDialog.close();
+        meldeMailHinweis(quittung);
+        // **Der Postfach neu holen.** Eine gesendete Nachricht taucht in vielen
+        // Postfächern sofort wieder auf – in „Gesendet", manchmal in INBOX. Ohne
+        // das Nachladen behauptet die Leiste, es sei nichts passiert.
+        await aktualisiereMail();
+    } catch (error) {
+        meldeSchreibenFehler(`Die Nachricht ließ sich nicht senden: ${error}`);
+    } finally {
+        mailComposeSend.disabled = false;
+    }
+}
+
 /** Öffnet die Nachricht im Fenster. */
 async function oeffneMail(nachricht) {
     // **Ein Doppelklick ist kein zweiter Wunsch, sondern derselbe.** Ohne diese
@@ -2268,6 +2534,28 @@ mailMessageRead.addEventListener('click', () => {
 });
 mailMessageDelete.addEventListener('click', () => {
     void loescheMail();
+});
+mailMessageReply.addEventListener('click', () => {
+    // **Die Nachricht geht mit**, damit das Fenster weiß, worauf es antwortet.
+    // `mailZustand.offen` ist beim Klick gesetzt – sonst gäbe es den Knopf nicht.
+    oeffneSchreiben('antwort', mailZustand.offen);
+});
+mailMessageForward.addEventListener('click', () => {
+    oeffneSchreiben('weiterleitung', mailZustand.offen);
+});
+mailComposeBtn.addEventListener('click', () => {
+    oeffneSchreiben();
+});
+mailComposeCancel.addEventListener('click', () => mailComposeDialog.close());
+mailComposeSend.addEventListener('click', () => {
+    void sendeMail();
+});
+// **Am `close`, nicht am Knopf** – dasselbe wie beim Nachrichtenfenster: Escape
+// schließt ebenso, und ein nicht zurückgesetzter Knopf wäre beim nächsten
+// Schreiben schon scharf.
+mailComposeDialog.addEventListener('close', () => {
+    mailZustand.schreibt = null;
+    sendenZuruecksetzen();
 });
 mailMessageSummarize.addEventListener('click', frageNachZusammenfassung);
 
@@ -2483,6 +2771,35 @@ function mailAnzeigename(konto) {
     return konto.id;
 }
 
+/**
+ * Die eingetragene Zahl der Nachrichten – oder `null`, wenn keine eingetragen
+ * ist oder keine taugt.
+ *
+ * **Leeres Feld und unbrauchbare Eingabe sind dasselbe: nichts ändern.** Das
+ * Backend nimmt `null` als „unverändert lassen", und genau das ist hier richtig:
+ * Wer das Feld leert, will zurück zur Vorgabe; wer „viele" eintippt, hat einen
+ * Tippfehler gemacht. Beides soll den eingetragenen Wert nicht zerstören.
+ *
+ * **Die Obergrenze klemmt das Backend.** Hier steht sie absichtlich nicht, damit
+ * die Zahl nicht an zwei Stellen gepflegt werden muss – `anzeige_grenze` ist die
+ * eine Stelle, die sie kennt.
+ */
+function mailEintraege() {
+    const roh = mailEntriesInput.value.trim();
+
+    // **Ziffern, sonst nichts.** Die Zahl von Nachrichten ist keine
+    // Taschenrechnereingabe: „5e2" ergibt 500 und `Number.isInteger` hält es für
+    // eine ganze Zahl – der Benutzer hätte aber keine 500 eingetippt, sondern
+    // fünf. Geprüft wird deshalb der Text, nicht die Zahl aus ihm.
+    if (!/^\d+$/.test(roh)) return null;
+
+    const zahl = Number(roh);
+
+    if (zahl < 1) return null;
+
+    return zahl;
+}
+
 /** Trägt ein Konto in die Felder. `null` heißt: ein neues Konto. */
 function fuelleMailForm(konto, status) {
     mailNameInput.value = konto ? konto.name || '' : '';
@@ -2491,6 +2808,10 @@ function fuelleMailForm(konto, status) {
     mailUserInput.value = konto ? konto.username || '' : '';
     mailAddressInput.value = konto ? konto.address || '' : '';
     mailFolderInput.value = konto ? konto.folder || '' : '';
+    // **Leer heißt: keine eigene Zahl.** Ein Konto, das nie eines bekommen hat,
+    // steht hier mit `0` im Speicher – und die zeigt das Feld als „0", was als
+    // Absicht gelesen würde. Besser: leer lassen, dann entscheidet die Vorgabe.
+    mailEntriesInput.value = konto && konto.max_entries ? konto.max_entries : '';
     mailPasswordInput.value = '';
     mailRememberInput.checked = Boolean(status && status.gemerkt);
 
@@ -2523,7 +2844,12 @@ mailForm.addEventListener('submit', async (ereignis) => {
             username: mailUserInput.value,
             address: mailAddressInput.value,
             folder: mailFolderInput.value,
-            maxEntries: null,
+            // **Leer heißt: die Vorgabe.** Eine Zahl, die der Benutzer nicht
+            // eingetragen hat, ist keine Absicht – und `0` als Zahl zu schicken
+            // hieße „keine Nachrichten", was es im Speicher bereits war und nie
+            // gemeint sein konnte. Eine unbrauchbare Eingabe (Text, Zahl über
+            // dem Deckel) geht als `null` raus und lässt den Wert, der da ist.
+            maxEntries: mailEintraege(),
         });
 
         // **Zurück auf das, was gespeichert wurde.** Beim Anlegen hat Mimir eine
@@ -2970,10 +3296,14 @@ const COMMAND_HELP = [
                     + 'hinweg und gibt die Kalenderwerkzeuge ohne /agent und ohne /agent-write frei; jeder Vorgang '
                     + 'wird trotzdem vorher als Unterschied gezeigt. Womit das Modell Termine anlegt, hängt an den '
                     + 'Kalendernamen, die es in der Anweisung sieht – ein erfundener Name wird abgelehnt.',
-                usage: '/scope [agent|termine]',
+                usage: '/scope [agent|termine|mail]',
             },
             { name: '/scope agent', text: 'Dateiwerkzeuge im Arbeitsverzeichnis wie bisher' },
             { name: '/scope termine', text: 'Nur die Kalenderwerkzeuge, ohne Dateizugriff' },
+            {
+                name: '/scope mail',
+                text: 'Nur die Mailwerkzeuge: Postfach lesen, Entwurf schreiben, Nachricht senden',
+            },
             {
                 name: '/agent-dir',
                 text: 'Zeigt das feste Arbeitsverzeichnis und die maximale Schrittzahl',
@@ -3564,14 +3894,30 @@ async function handleChatCommand(text) {
                 return;
             }
 
-            const frage = gewaehlt === 'termine'
-                ? 'Terminumfang einstellen? Das Modell bekommt dann nur die vier Kalenderwerkzeuge. '
-                    + 'Es kann keine Dateien lesen oder schreiben, und es braucht dafür kein Arbeitsverzeichnis. '
-                    + 'Termine legt es an, ändert und löscht es, jeweils nach Vorschau und deiner Freigabe. '
-                    + 'Das gilt über einen Neustart hinweg.'
-                : 'Agentenmodus einstellen? Das Modell bekommt wieder die Dateiwerkzeuge im festen '
-                    + `Arbeitsverzeichnis${config.root ? ` (${config.root})` : ''}. Ohne Arbeitsverzeichnis `
-                    + 'gibt es dort nichts zu lesen. Termine bleiben möglich.';
+            // **Drei Umfänge, drei Rückfragen.** Vorher kannte diese Stelle nur zwei, und
+// alles andere fiel in den Agenten-Zweig: `/scope mail` hätte gefragt „Agentenmodus
+// einstellen? Das Modell bekommt wieder die Dateiwerkzeuge …“ – also genau das
+// Gegenteil dessen, was eingestellt wird. Eine Rückfrage, die das Falsche
+// ankündigt, ist schlimmer als gar keine.
+const FRAGEN = {
+    termine:
+        'Terminumfang einstellen? Das Modell bekommt dann nur die vier Kalenderwerkzeuge. '
+        + 'Es kann keine Dateien lesen oder schreiben, und es braucht dafür kein Arbeitsverzeichnis. '
+        + 'Termine legt es an, ändert und löscht es, jeweils nach Vorschau und deiner Freigabe. '
+        + 'Das gilt über einen Neustart hinweg.',
+    mail:
+        'Postfachumfang einstellen? Das Modell bekommt dann nur die Mailwerkzeuge: Postfach '
+        + 'auflisten, Nachricht lesen, Entwurf schreiben, Nachricht senden. Es kann **keine '
+        + 'Dateien** lesen oder schreiben. Entwürfe landen in deinem Schreibfenster und werden '
+        + 'erst von dir gesendet; zum Senden braucht es zusätzlich deine Bestätigung. '
+        + 'Das gilt über einen Neustart hinweg.',
+    agent:
+        'Agentenmodus einstellen? Das Modell bekommt wieder die Dateiwerkzeuge im festen '
+        + `Arbeitsverzeichnis${config.root ? ` (${config.root})` : ''}. Ohne Arbeitsverzeichnis `
+        + 'gibt es dort nichts zu lesen. Termine und Postfach bleiben möglich.',
+};
+
+const frage = FRAGEN[gewaehlt];
 
             if (!window.confirm(frage)) {
                 appendMessageToUI('system', 'Umfang unverändert.');
@@ -5800,21 +6146,92 @@ function addAgentStep(steps, call, status) {
     toggle.setAttribute('aria-expanded', 'false');
     toggle.textContent = `▸ ${label}`;
     toggle.addEventListener('click', () => {
-        const expanded = toggle.getAttribute('aria-expanded') === 'true';
-        toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-        toggle.textContent = `${expanded ? '▸' : '▾'} ${label}`;
-        output.hidden = expanded;
+        klappAgentStepAuf(entry);
     });
 
     step.append(toggle, output);
     steps.appendChild(step);
     scrollToBottom();
-    return { step, toggle, output };
+    return { step, toggle, output, label };
+}
+
+/** Klappt einen Werkzeugschritt auf oder zu – ohne den Zustand zu verlieren. */
+function klappAgentStep(entry) {
+    const expanded = entry.toggle.getAttribute('aria-expanded') === 'true';
+
+    entry.toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+    entry.toggle.textContent = `${expanded ? '▸' : '▾'} ${entry.label}`;
+    entry.output.hidden = expanded;
+}
+
+/**
+ * **Klappt den Schritt auf und macht ihn kenntlich.**
+ *
+ * **Ein Fehler, den man nicht sieht, ist schlimmer als keiner.** Vorher stand der
+ * Grund eines gescheiterten Werkzeugaufrufs im **eingeklappten** Ausgabetext – und
+ * ein zugklappter Schritt sieht aus wie ein Werkzeug, das nichts getan hat. Genau
+ * so ist ein Entwurf unauffindbar geworden: `draft_email` lief, schlug fehl, und
+ * was dann geschah, stand in einer Zeile, die niemand aufgeklappt hat.
+ *
+ * Deshalb wird ein Fehler **aufgeklappt** und der Schritt bekommt eine eigene
+ * Farbe. Es bleibt derselbe Aufbau – kein zweiter Ort für Fehlermeldungen.
+ */
+function setAgentStepFehler(entry, text) {
+    entry.output.textContent = `Fehler: ${text}`;
+    entry.step.classList.add('agent-step-done', 'agent-step-fehler');
+
+    if (entry.toggle.getAttribute('aria-expanded') !== 'true') {
+        entry.toggle.setAttribute('aria-expanded', 'true');
+        entry.toggle.textContent = `▾ ${entry.label}`;
+        entry.output.hidden = false;
+    }
 }
 
 function setAgentStepResult(entry, text) {
     entry.output.textContent = text;
     entry.step.classList.add('agent-step-done');
+}
+
+/**
+ * **Hängt an einen Werkzeugschritt den Knopf, der den Entwurf ins Schreibfenster
+ * bringt.**
+ *
+ * **Ein Knopf und kein automatisches Fenster.** Wäre es automatisch, müsste
+ * Mimir damit rechnen, dass das Modell nacheinander drei Briefe entwirft – und
+ * drei Fenster wären drei, von denen zwei nicht mehr aufgingen. Ein Knopf
+ * dagegen sagt: hier ist etwas entstanden, **du** entscheidest.
+ *
+ * **Und es ist derselbe Weg wie von Hand.** Der Entwurf landet im Fenster, in
+ * dem der Benutzer ihn liest, ändert und mit zwei Klicks verschickt. Es gibt
+ * keinen zweiten Versandweg und damit auch keinen, der die Bestätigung
+ * umgehen könnte.
+ */
+function setzeEntwurfsKnopf(entry, entwurf) {
+    const knopf = document.createElement('button');
+    knopf.type = 'button';
+    knopf.className = 'step-entwurf-button';
+    knopf.textContent = 'Im Schreibfenster öffnen';
+    knopf.title = 'Den Entwurf prüfen, ändern und von Hand senden';
+
+    knopf.addEventListener('click', () => {
+        // **Stimmt das Konto?** Bei mehreren Konten ist das ein Unterschied, und
+        // stillschweigend das falsche zu nehmen wäre der Fehler, den niemand
+        // bemerkt. Gesendet wird ohnehin nur, was der Benutzer bestätigt – die
+        // Warnung ersetzt keine Prüfung, sie benennt sie.
+        if (entwurf.konto && entwurf.konto !== mailZustand.konto) {
+            meldeMailHinweis(
+                'Der Entwurf stammt aus einem anderen Postfach als dem gerade gezeigten. ' +
+                    'Zum Senden wird das hier verwendete verwendet.',
+            );
+        }
+
+        // **`'neu'` statt `'antwort'`:** Der Entwurf bringt Empfänger, Betreff
+        // und Kennung selbst mit. Eine Nachricht, auf die er sich bezieht, muss
+        // hier nicht vorliegen – das Modell hat sie gelesen, nicht der Benutzer.
+        oeffneSchreiben('neu', null, entwurf);
+    });
+
+    entry.step.insertBefore(knopf, entry.output);
 }
 
 // Werkzeugschritte machen den Verlauf schnell länger als die Obergrenze der
@@ -5957,11 +6374,21 @@ async function runAgentTurn(model, messages, bubble) {
                         benutzertext: letzteBenutzernachricht(working),
                     });
                     setAgentStepResult(entry, `${output.summary}${output.truncated ? ' (gekürzt)' : ''}\n\n${output.content}`);
+
+                    // **Ein Entwurf ist kein Ergebnis, sondern eine Einladung.**
+                    // Er wandert ins Schreibfenster, damit der Benutzer ihn liest,
+                    // ändert und selbst sendet – ohne zweiten Versandweg, ohne
+                    // Umweg des Abtippens.
+                    if (output.entwurf) {
+                        setzeEntwurfsKnopf(entry, output.entwurf);
+                    }
                     working.push({ role: 'tool', tool_name: name, content: output.content });
                 } catch (error) {
                     // Ein Werkzeugfehler ist kein Abbruch: Das Modell soll ihn
-                    // sehen und damit weiterarbeiten können.
-                    setAgentStepResult(entry, `Fehler: ${error}`);
+                    // sehen und damit weiterarbeiten können. **Der Benutzer soll
+                    // ihn auch sehen** – deshalb steht er aufgeklappt da und
+                    // nicht versteckt hinter einem Klick.
+                    setAgentStepFehler(entry, String(error));
                     entry.step.classList.add('agent-step-failed');
                     working.push({ role: 'tool', tool_name: name, content: `Fehler: ${error}` });
                 }

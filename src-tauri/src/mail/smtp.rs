@@ -23,7 +23,20 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 pub const MAX_RUMPF_BYTES: usize = 256 * 1024;
 /// Wie lange das Senden selbst dauern darf. Eine Nachricht, die so lange hängt,
 /// ist nicht angekommen.
-const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+///
+/// **Kürzer als die Frist der Oberfläche, und das ist der ganze Grund für die
+/// Zahl.** Die Leiste bricht einen Mailbefehl nach 60 Sekunden ab und meldet
+/// dann `mail_senden hat nach 60 Sekunden nicht geantwortet` – eine Meldung
+/// über *Mimir*, die nichts über den Mailserver sagt. Bei gleicher Frist gewinnt
+/// die schnelle Nachricht, und die aussagekräftige kommt nie an: Wer einen
+/// Tippfehler im Port macht, sah deshalb 60 Sekunden lang „nicht geantwortet",
+/// statt die_portsachzu hören.
+///
+/// **Deshalb dreißig Sekunden.** Genug für einen trägen Server, kurz genug,
+/// dass die eigene Erklärung noch innerhalb der Frist liegt, die der Benutzer
+/// ohnehin wartet. Wer einen längeren Wert braucht, hat entweder einen sehr
+/// langsamen Server oder eine Leitung, die ohnehin trägt.
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Was gesendet werden soll. Geprüft und bereinigt, bevor sie gebaut wird.
 #[derive(Debug, Clone)]
@@ -274,14 +287,49 @@ pub async fn sende(
     // laufende Anzeige und wüsste nicht, ob die Nachricht angekommen ist.
     match tokio::time::timeout(SEND_TIMEOUT, transport.send(nachricht)).await {
         Ok(Ok(_)) => Ok(()),
-        Ok(Err(fehler)) => Err(format!(
-            "Die Nachricht konnte nicht gesendet werden: {fehler}"
-        )),
+        Ok(Err(fehler)) => Err(erklaere_sendefehler(&fehler)),
         Err(_) => Err(format!(
-            "Der Mailserver hat die Nachricht nach {} Sekunden nicht bestätigt",
+            "Der Mailserver hat nach {} Sekunden weder geantwortet noch die \
+             Nachricht bestätigt. Häufigste Ursache ist ein falscher Port: Trage \
+             für SMTP 465 oder 587 ein, nicht den IMAP-Port und keine \
+             Tippfehler wie 456.",
             SEND_TIMEOUT.as_secs()
         )),
     }
+}
+
+/// **Was „incomplete response" bedeutet und was nicht.**
+///
+/// Die Meldung kommt aus der SMTP-Bibliothek und ist buchstabengetreu: Der
+/// Server hat die Verbindung geschlossen, ohne zu antworten. In **jedem** Fall
+/// ist aber die wahrscheinlichste Ursache bekannt, und sie ist eine von dreien –
+/// ein falscher Port, ein abgelehntes Passwort oder ein fehlendes App-Passwort.
+///
+/// **Eine Meldung, die nichts erklärt, ist schlimmer als keine.** Sie lenkt auf
+/// den Verdacht, der am wenigsten stimmt: dass der Server kaputt sei. Also wird
+/// der häufigste Fall genannt – und die anderen zwei mit, damit die Suche nicht
+/// beim ersten Klappertreffer endet.
+fn erklaere_sendefehler(fehler: &lettre::transport::smtp::Error) -> String {
+    let roh = fehler.to_string();
+
+    if roh.contains("incomplete response") {
+        return format!(
+            "Der Mailserver hat die Verbindung geschlossen, ohne zu antworten. \
+             Meist stimmt der Port nicht: Trage für SMTP 465 oder 587 ein, nicht \
+             den IMAP-Port. Eine Meldung des Servers: {roh}"
+        );
+    }
+
+    if roh.contains("535") || roh.to_lowercase().contains("authentication") {
+        return format!(
+            "Der Mailserver hat die Anmeldung abgelehnt. Für Gmail braucht es ein \
+             App-Passwort, nicht das Hauptpasswort – und für ein anderes Konto \
+             könnte die Anmeldung unterwegs verloren gegangen sein. Die Meldung \
+             des Servers: {roh}"
+        );
+    }
+
+    format!("Die Nachricht konnte nicht gesendet werden: {roh}")
 }
 
 /// Zerlegt `smtp://host:port` in Host und Port.
@@ -306,6 +354,33 @@ fn zerlege_server(server: &str) -> Result<(String, u16), String> {
 
     if host.is_empty() {
         return Err("Die SMTP-Adresse nennt keinen Server".to_string());
+    }
+
+    // **Der häufigste Fehler in dieser Zeile, und er blieb unentdeckt.**
+    //
+    // Die Ports von IMAP und SMTP sind nicht dieselben. Wer die IMAP-Adresse
+    // unverändert in das SMTP-Feld kopiert – und womit sollte er es nicht? –
+    // schickt plaintext dorthin, wo der Server schon ein Zertifikat erwartet.
+    // Zurück kommt `incomplete response`: eine Antwort aus dem Protokoll heraus,
+    // die nichts über die Ursache sagt und auch nicht mit dem Port zu tun hat,
+    // wie sie sich anhört. Genau damit ist hier einmal eine Testmail gescheitert,
+    // mit einer Meldung, die auf den falschen Verdacht brachte.
+    //
+    // Deshalb wird der Port **hier** abgelehnt, mit einer Antwort, die den
+    // richtigen nennt. Die Ports 465 und 587 sind ausdrücklich erlaubt – sie
+    // sind nicht gleich, aber beide richtig, und `sende` entscheidet zwischen
+    // ihnen.
+    if matches!(port, 143 | 993 | 110) {
+        return Err(format!(
+            "Port {port} gehört nicht zu SMTP, sondern zu {protokoll} – dort \
+             wurde eine Adresse aus dem IMAP-Feld übernommen. Trage für \
+             „{host}“ smtps://{host}:465 oder smtps://{host}:587 ein.",
+            protokoll = match port {
+                110 => "POP3",
+                143 => "IMAP",
+                _ => "IMAPS",
+            }
+        ));
     }
 
     Ok((host.to_string(), port))

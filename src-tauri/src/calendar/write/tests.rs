@@ -1095,27 +1095,289 @@ fn ein_geschriebenes_datum_wird_gelesen() {
     }
 }
 
-#[test]
-fn monatsnamen_werden_gelesen() {
-    for angabe in ["5. Oktober 14:00", "5.10. 14:00", "okt 5 14:00"] {
-        let plan = termin(json!({"summary": "A", "start": angabe}))
-            .unwrap_or_else(|fehler| panic!("{angabe}: {fehler}"));
-        let start = Local.timestamp_opt(plan_start(&plan), 0).unwrap();
+/// Die Monatsnamen und ihre Kurzformen, um eine Angabe zu **bauen**.
+///
+/// Stehen hier und nicht im Produktivcode, weil der Parser sie an anderer Stelle
+/// führt und dieser Test sie nur zum Nachbauen braucht.
+///
+/// **Die Kurzformen sind die, die `MONATE` in `write.rs` kennt** – nicht die, die
+/// man sich spontan ausdenkt. Ein erster Fassung dieses Tests schrieb „mär" hin
+/// und scheiterte an genau diesem Unterschied: „mär" steht dort nicht, „mrz"
+/// und „mar" stehen da. Ein Test darf keinen Formfehler als Befund melden.
+const MONATE: [&str; 12] = [
+    "Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September",
+    "Oktober", "November", "Dezember",
+];
 
-        assert_eq!(start.day(), 5, "{angabe}: {}", plan.when);
-        assert_eq!(start.month(), 10, "{angabe}: {}", plan.when);
-    }
+const MONATE_KURZ: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "dez",
+];
+
+/// Der Tag, auf den diese Tests schreiben — **weit genug voraus und im selben
+/// Kalenderjahr**.
+///
+/// **Die zweite Hälfte ist der Grund, warum es diese Funktion gibt.** Trägt ein
+/// Datum *Monatsnamen*, springt Mimir ausdrücklich nicht ins Folgejahr; steht in
+/// `datum_aus`: *„der Termin am 30. September meint den von diesem Jahr, nicht
+/// den nächsten“*. Am 20. December läge ein Ziel vom 10. Januar also als **10.
+/// Januar dieses Jahres** zurück – in der Vergangenheit, und der Test schlägt an
+/// der Prüfung zur Vergangenheit an, obwohl der Parser richtig arbeitet. Das wäre
+/// ein Fehler, der jedes Jahr um die gleiche Zeit wiederkehrte und jedes Mal
+/// aussähe wie ein neuer Bug.
+///
+/// Darum: spätestens am letzten Tag des Jahres ist der 31. December das Ziel.
+/// Der Prüfung zur Vergangenheit ist das recht – sie lässt sieben Tage zu, und
+/// ein Ziel von heute ist nie zu früh.
+fn monatsziel() -> NaiveDate {
+    let heute = Local::now().date_naive();
+    let jahresende = NaiveDate::from_ymd_opt(heute.year(), 12, 31).expect("31. Dezember");
+
+    (heute + chrono::Duration::days(21)).min(jahresende)
 }
 
 #[test]
-fn ein_datum_ohne_jahr_meint_das_naechste() {
-    // Am 30. September ist „1.1.“ der nächste 1. Januar, nicht der vergangene.
-    let plan = termin(json!({"summary": "A", "start": "1.1. 12:00"})).unwrap();
-    let start = Local.timestamp_opt(plan_start(&plan), 0).unwrap();
+fn monatsnamen_werden_gelesen() {
+    // **Gerechnet, nicht fest verdrahtet.** Dieser Test prüft, ob Mimir einen
+    // Monatsnamen liest; ob der 5. Oktober schon Vergangenheit ist, sagt er
+    // nichts – und die Prüfung zur Vergangenheit schlägt dann an, obwohl der
+    // Parser richtig arbeitet.
+    let ziel = monatsziel();
+    let monat = ziel.month0() as usize;
 
-    assert_eq!(start.day(), 1, "{}", plan.when);
-    assert_eq!(start.month(), 1, "{}", plan.when);
-    assert!(start > Local::now(), "{}", plan.when);
+    let faelle = [
+        // „5. Oktober 14:00“
+        format!("{}. {} 14:00", ziel.day(), MONATE[monat]),
+        // „5.10. 14:00“
+        format!("{}.{}. 14:00", ziel.day(), ziel.format("%m")),
+        // „okt 5 14:00“
+        format!("{} {} 14:00", MONATE_KURZ[monat], ziel.day()),
+    ];
+
+    for angabe in faelle {
+        let plan = termin(json!({"summary": "A", "start": angabe.as_str()}))
+            .unwrap_or_else(|fehler| panic!("{angabe}: {fehler}"));
+        let start = Local.timestamp_opt(plan_start(&plan), 0).unwrap();
+
+        assert_eq!(start.date_naive(), ziel, "{angabe}: {}", plan.when);
+    }
+}
+
+/// **Dasselbe an vorgegebenen Tagen statt am heutigen.**
+///
+/// Der Test darüber rechnet mit dem heutigen Datum – und genau daran liegt
+/// seine blinde Stelle: Ob „10. Januar“ am 20. December auf dieses Jahr oder auf
+/// das nächste fällt, sieht man erst, wenn der echte Tag dort steht. Wer hier
+/// ein festes Datum nimmt, hat einen Test, der im Januar scheitert.
+///
+/// Der Monatsname löst sich dabei am 31. December auf **denselben** Tag auf wie
+/// sonst: Der letzte Tag des Jahres ist sein eigener nächster.
+#[test]
+fn monatsnamen_halten_den_jahreswechsel_aus() {
+    let tage = [
+        (2026, 1, 3),   // gleich nach Neujahr
+        (2026, 2, 27),  // zwei Tage vor dem Schalttag
+        (2026, 12, 20), // drei Wochen vor dem Wechsel
+        (2026, 12, 31), // am letzten Tag des Jahres
+    ];
+
+    for (jahr, monat, tag) in tage {
+        let heute = NaiveDate::from_ymd_opt(jahr, monat, tag).expect("ein gültiges Datum");
+        let jahresende = NaiveDate::from_ymd_opt(jahr, 12, 31).expect("31. Dezember");
+        let ziel = (heute + chrono::Duration::days(21)).min(jahresende);
+        let nummer = ziel.month0() as usize;
+
+        let faelle = [
+            format!("{}. {}", ziel.day(), MONATE[nummer]),
+            format!("{}.{}.", ziel.day(), ziel.format("%m")),
+            format!("{} {}", MONATE_KURZ[nummer], ziel.day()),
+        ];
+
+        for angabe in faelle {
+            let aufgeloest = ermittle_tag(&Angabe::neu_am(&angabe, heute));
+            assert_eq!(aufgeloest, ziel, "„{angabe}“ am {heute}");
+        }
+    }
+}
+
+/// **Gestern als jahresloses Datum** – also ein Datum, das heute *sicher* in der
+/// Vergangenheit liegt, und zwar an jedem Tag des Jahres.
+///
+/// Für die Rückfrage braucht es einen Tag, dessen jahreslose Schreibweise
+/// zurückliegt. „1.1." tut das an 364 Tagen im Jahr – am 1. Januar aber ist es
+/// heute, und der Test würde an diesem einen Tag etwas anderes behaupten. Der
+/// gestrige Tagestag hat diese Eigenschaft nicht.
+fn vergangenes_ziel() -> (u32, u32) {
+    let gestern = Local::now().date_naive() - chrono::Duration::days(1);
+    (gestern.day(), gestern.month())
+}
+
+/// **Statt zu raten wird gefragt.**
+///
+/// Am 30. September ist „1.1." zweideutig: der 1. Januar dieses Jahres ist vorbei,
+/// der nächste wäre es in vier Monaten. Beides ist lesbar, also entscheidet
+/// Mimir nicht – es fragt. Früher sprang die Ziffernschreibweise still ins
+/// Folgejahr, und die Monatsnamen-Schreibweise blieb still in diesem Jahr: zwei
+/// Termine aus einem Satz.
+#[test]
+fn ein_datum_ohne_jahr_fragt_nach_dem_jahr() {
+    let (tag, monat) = vergangenes_ziel();
+
+    for angabe in [
+        format!("{tag}.{monat}. 12:00"),
+        format!("{tag}. {}", MONATE[monat as usize - 1]),
+    ] {
+        let fehler = termin(json!({"summary": "A", "start": angabe.as_str()}))
+            .expect_err("ohne Jahr und zurückliegend wird nachgefragt");
+
+        assert!(
+            fehler.contains("steht kein Jahr"),
+            "die Meldung sagt, was fehlt: {fehler}"
+        );
+        assert!(
+            fehler.contains("Frage den Benutzer"),
+            "und dass gefragt werden soll: {fehler}"
+        );
+    }
+}
+
+/// **Steht das Jahr im Satz, gilt es – und es wird nicht gefragt.**
+///
+/// Das ist der ganze Sinn der zweiten Halbsatz der Regel: Nicht dass Mimir
+/// gar nicht mehr rät, sondern dass es dort, wo der Benutzer das Jahr genannt
+/// hat, auch danach handelt.
+#[test]
+fn ein_jahr_im_satz_gilt_und_unterdrueckt_die_frage() {
+    let (tag, monat) = vergangenes_ziel();
+    let jahr = Local::now().date_naive().year() + 1;
+
+    let plan = termin_mit(
+        json!({
+            "summary": "A",
+            "start": format!("{tag}.{monat}. 12:00").as_str(),
+        }),
+        &format!("Trag den Termin am {tag}.{monat}.{jahr} ein"),
+    )
+    .expect("das Jahr steht im Satz, also wird nicht gefragt");
+
+    let start = Local.timestamp_opt(plan_start(&plan), 0).unwrap();
+    assert_eq!(
+        start.year(),
+        jahr,
+        "das Jahr aus dem Satz gilt: {}",
+        plan.when
+    );
+}
+
+/// **Und es gilt auch, wenn der Benutzer es ausschreibt.**
+#[test]
+fn ein_monatsname_aus_dem_satz_gilt_und_unterdrueckt_die_frage() {
+    let (tag, monat) = vergangenes_ziel();
+    let jahr = Local::now().date_naive().year() + 1;
+
+    let plan = termin_mit(
+        json!({
+            "summary": "A",
+            "start": format!("{tag}. {}", MONATE[monat as usize - 1]).as_str(),
+        }),
+        &format!("Trag den Termin am {tag}.{monat}.{jahr} ein"),
+    )
+    .expect("das Jahr steht im Satz, also wird nicht gefragt");
+
+    let start = Local.timestamp_opt(plan_start(&plan), 0).unwrap();
+    assert_eq!(
+        start.year(),
+        jahr,
+        "das Jahr aus dem Satz gilt: {}",
+        plan.when
+    );
+}
+
+/// **Ein Datum, das noch nicht vorbei ist, wird nicht angefragt.**
+///
+/// Sonst würde Mimir bei „morgen“ und erst recht bei jedem Datum dieses Monats
+/// nachfragen – und die Rückfrage wäre das teuerste Verhalten von allen.
+#[test]
+fn ein_datum_ohne_jahr_fragt_nicht_wenn_es_noch_kommt() {
+    let ziel = monatsziel();
+
+    termin(json!({
+        "summary": "A",
+        "start": format!("{}.{}. 12:00", ziel.day(), ziel.format("%m")).as_str(),
+    }))
+    .expect("ein Datum, das noch kommt, braucht keine Rückfrage");
+
+    termin(json!({
+        "summary": "A",
+        "start": format!("{}. {}", ziel.day(), MONATE[ziel.month0() as usize]).as_str(),
+    }))
+    .expect("ein Datum, das noch kommt, braucht keine Rückfrage");
+}
+
+/// **„mär" fehlte, und ist die Form, die man tatsächlich schreibt.**
+///
+/// „mrz" und „mar" standen in der Tabelle, „mär" nicht. Wer „mär 20" sagte, bekam
+/// den heutigen Tag – ein Datum, um das niemand gebeten hatte. Derselbe Fall wie
+/// bei „mitwoch" bei den Wochentagen.
+///
+/// **Über ein vorgegebenes Bezugsjahr statt über den heutigen Tag**, sonst prüfte
+/// der Test nur im März etwas.
+#[test]
+fn maerz_liesst_sich_auch_kurz() {
+    let erwartet = NaiveDate::from_ymd_opt(2027, 3, 20).expect("ein gültiges Datum");
+
+    for angabe in [
+        "20. mär 2027 12:00",
+        "20. märz 2027 12:00",
+        "20. maerz 2027 12:00",
+        "20. mrz 2027 12:00",
+        "20. mar 2027 12:00",
+        "mär 20 2027 12:00",
+    ] {
+        let gelesen = parse_wann_am(angabe, 2027)
+            .unwrap_or_else(|fehler| panic!("„{angabe}“: {fehler}"))
+            .date_naive();
+
+        assert_eq!(gelesen, erwartet, "„{angabe}“");
+    }
+}
+
+/// **Die Suche nimmt den gefundenen Termin, das Anlegen fragt nach dem Jahr.**
+///
+/// Diese beiden Wege sind auseinandergehalten, weil sie verschiedene Fragen
+/// haben. Die **Suche** braucht eine Antwort und liefert sie: sie findet den
+/// Termin, der im Kalender steht, und der kann in diesem Jahr liegen. Das
+/// **Anlegen** darf nicht raten und fragt deshalb – siehe
+/// `ein_datum_ohne_jahr_fragt_nach_dem_jahr`.
+///
+/// Am 30. September ist „1.1." der nächste 1. Januar, nicht der vergangene.
+/// Und bei „1. Januar" bleiben die beiden Schreibweisen auseinander – die
+/// Ziffernform springt, die Namensform nicht. Das ist Absicht und in `datum_aus`
+/// begründet: Die Suche zeigt auf einen Termin, den es gibt; eine Sprungregel
+/// zeigte auf einen 10. September, den es noch nicht gibt. **Beide melden aber,
+/// dass das Jahr offen war**, und deshalb fragt das Anlegen in beiden Fällen.
+#[test]
+fn die_suche_nimmt_den_gefundenen_termin_und_das_anlegen_fragt() {
+    let heute = NaiveDate::from_ymd_opt(2026, 9, 30).expect("ein gültiger Tag");
+    let dieses = NaiveDate::from_ymd_opt(2026, 1, 1).expect("ein gültiges Datum");
+    let naechstes = NaiveDate::from_ymd_opt(2027, 1, 1).expect("ein gültiges Datum");
+
+    // **Ziffernform: ins Folgejahr.**
+    for angabe in ["1.1.", "1.1"] {
+        let (aufgeloest, offen) = ermittle_tag_mit_jahr(&Angabe::neu_am(angabe, heute));
+        assert_eq!(aufgeloest, naechstes, "„{angabe}“");
+        assert!(offen, "und das Anlegen muss nachfragen: „{angabe}“");
+    }
+
+    // **Namensform: im gefundenen Jahr, aber ebenfalls als offen gemeldet.**
+    for angabe in ["1. Januar", "1. januar", "1. jan"] {
+        let (aufgeloest, offen) = ermittle_tag_mit_jahr(&Angabe::neu_am(angabe, heute));
+        assert_eq!(aufgeloest, dieses, "„{angabe}“");
+        assert!(
+            offen,
+            "das Anlegen muss auch hier nachfragen, sonst entstünde die \
+             Ziffernschreibweise ohne Rückfrage: „{angabe}“"
+        );
+    }
 }
 
 #[test]

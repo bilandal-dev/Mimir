@@ -130,19 +130,44 @@ fn waehlt_ordner_und_absender_vernuenftig() {
     assert_eq!(config.ordner(), "Posteingang/Neu");
 }
 
+/// **Null heißt „unbestimmt" – und nicht „eine Nachricht".**
+///
+/// Dieser Test stand lange auf `max_entries: 0` ⇒ `1` und war damit der Grund,
+/// warum die Leiste nur eine Mail zeigte: Das Konto wird mit `#[serde(default)]`
+/// angelegt, bekommt also `0`, und `0.clamp(1, 50)` ist `1`. Die Prüfung war grün,
+/// die Leiste leer, und niemand hatte einen Fehler zu suchen – es gab keinen.
+///
+/// Die Zahl stand hier, weil sie plausibel aussah. Genau das ist das Problem an
+/// ihr: Sie hat den Fehler zur Sache erklärt, statt ihn zu zeigen.
 #[test]
 fn begrenzt_die_anzahl_gezeigter_nachrichten() {
-    let config = MailConfig {
+    // **Ohne Angabe gilt die Vorgabe**, nicht die kleinste mögliche Zahl.
+    let unbestimmt = MailConfig {
         max_entries: 0,
         ..MailConfig::default()
     };
-    assert_eq!(config.anzeige_grenze(), 1);
+    assert_eq!(
+        unbestimmt.anzeige_grenze(),
+        VORGABE_NACHRICHTEN,
+        "eine frische Konfiguration zeigt eine ganze Leiste, nicht eine Nachricht"
+    );
 
-    let config = MailConfig {
+    // **Eine eingetragene Zahl gilt – auch eine kleine.**
+    let wenige = MailConfig {
+        max_entries: 3,
+        ..MailConfig::default()
+    };
+    assert_eq!(wenige.anzeige_grenze(), 3);
+
+    // **Und der Deckel gilt weiterhin.**
+    let ueberhaupt_nicht = MailConfig {
         max_entries: 5000,
         ..MailConfig::default()
     };
-    assert_eq!(config.anzeige_grenze(), MAX_MAIL_LIST_ENTRIES);
+    assert_eq!(
+        ueberhaupt_nicht.anzeige_grenze(),
+        MAX_MAIL_LIST_ENTRIES
+    );
 }
 
 /// Ein Text, der ohne Hinweis endet, liest sich wie ein vollständiger.
@@ -735,5 +760,438 @@ fn die_schluesselbundfrage_braucht_einen_vollstaendigen_eintrag() {
         SCHLUESSELBUND_FRAGE,
         std::time::Duration::from_secs(3),
         "die Frist gehört in den Test: Wer sie ändert, muss das hier auch ändern"
+    );
+}
+
+// --- Schreiben und Senden aus der Oberfläche -------------------------------
+
+/// Ein Konto, das fürs Senden reicht: eingetragen, angemeldet, mit SMTP.
+fn konto_zum_senden() -> (MailConfig, MailSession) {
+    let config = MailConfig {
+        id: "konto-1".to_string(),
+        name: "Privat".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        smtp_server: "smtps://smtp.example.org:465".to_string(),
+        username: "kai".to_string(),
+        // **Mit Absenderadresse.** Ohne sie wäre `absender()` der Benutzername
+        // und damit „kai“ – und das ist keine absenderfähige Adresse. Ein
+        // eingetragenes Konto hat eine; ein Testkonto sollte sie auch haben,
+        // sonst prüft der Test die Absenderprüfung statt der Sendeprüfung.
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let session = MailSession::default();
+    session
+        .set_password(&config.id, "app-passwort")
+        .expect("das Passwort lässt sich in den Sitzungszustand legen");
+
+    (config, session)
+}
+
+async fn sende(
+    config: &MailConfig,
+    session: &MailSession,
+    an: &str,
+    betreff: &str,
+    text: &str,
+) -> Result<String, String> {
+    imap_senden(
+        config,
+        session,
+        an.to_string(),
+        None,
+        None,
+        betreff.to_string(),
+        text.to_string(),
+        None,
+    )
+    .await
+}
+
+/// **Was beim Schreiben schon abgelehnt wird, bevor irgendeine Verbindung
+/// aufgebaut wird.**
+///
+/// Der Weg vom Fenster zum Server ist derselbe wie beim Werkzeug `send_email` –
+/// und deshalb gelten dieselben Regeln. Eine halb geschriebene Nachricht, die
+/// erst am Server scheitert, wäre eine Fehlermeldung über „Verbindung", während
+/// das Problem an drei Zeichen im Betreff lag.
+#[tokio::test]
+async fn schreiben_prueft_die_angaben_und_nicht_erst_den_server() {
+    let (config, session) = konto_zum_senden();
+
+    // **Ohne Empfänger geht nichts raus.**
+    let fehler = sende(&config, &session, "", "Betreff", "Text")
+        .await
+        .expect_err("ohne Empfänger");
+    assert!(fehler.contains("Empfänger"), "{fehler}");
+
+    // **Ohne Betreff ebenfalls** – der Empfänger erkennt sie später nicht wieder.
+    let fehler = sende(&config, &session, "a@example.org", "  ", "Text")
+        .await
+        .expect_err("ohne Betreff");
+    assert!(fehler.contains("Betreff"), "{fehler}");
+
+    // **Und ohne Text.**
+    let fehler = sende(&config, &session, "a@example.org", "Betreff", "")
+        .await
+        .expect_err("ohne Text");
+    assert!(fehler.contains("Text"), "{fehler}");
+
+    // **Eine Liste im Feld ist erlaubt – sie ist die Art, wie man mehrere
+    //   Adressen angibt.** Der erste Versuch dieses Tests erwartete hier eine
+    //   Ablehnung und wäre am DNS gescheitert: `parse_recipients` zerlegt
+    //   Kommas ausdrücklich. Ein Test, der die Absicht des Codes verwechselt,
+    //   ist schlimmer als keiner.
+    //
+    // **Eine eingeschmugelte Kopfzeile dagegen nicht.** Ein Zeilenumbruch im
+    //   Empfängerfeld würde sonst im fertigen Rumpf als eigener RFC-5322-Kopf
+    //   landen – und damit eine zweite Empfängeradresse setzen, die im Fenster
+    //   nie stand.
+    let fehler = sende(
+        &config,
+        &session,
+        "a@example.org\nBcc: heimlich@example.org",
+        "Betreff",
+        "Text",
+    )
+    .await
+    .expect_err("eingeschmugelte Kopfzeile");
+    assert!(fehler.contains("Empfänger"), "{fehler}");
+}
+
+/// **Ohne eingetragenen SMTP-Server sagt Mimir das, bevor es anmeldet.**
+///
+/// Die Meldung nennt den Knopf, mit dem es einzutragen ist. Eine Meldung über
+/// „Verbindung fehlgeschlagen" wäre wahr und nutzlos.
+#[tokio::test]
+async fn ohne_smtp_server_wird_das_sagen_und_nicht_der_fehler_vom_server() {
+    let (mut config, session) = konto_zum_senden();
+    config.smtp_server = String::new();
+
+    let fehler = sende(&config, &session, "a@example.org", "Betreff", "Text")
+        .await
+        .expect_err("ohne SMTP-Server");
+
+    assert!(fehler.contains("SMTP"), "{fehler}");
+    assert!(
+        fehler.contains("Konto"),
+        "die Meldung nennt den Weg, wie es einzutragen ist: {fehler}"
+    );
+}
+
+/// **Nicht angemeldet heißt: anmelden, nicht versuchen.**
+#[tokio::test]
+async fn ohne_anmeldung_kommt_keine_nachricht_heraus() {
+    let (config, _) = konto_zum_senden();
+    let leere = MailSession::default();
+
+    let fehler = sende(&config, &leere, "a@example.org", "Betreff", "Text")
+        .await
+        .expect_err("ohne Anmeldung");
+
+    assert!(fehler.contains("angemeldet"), "{fehler}");
+}
+
+/// **Ein Entwurf trägt seine Felder mit – und sendet nichts.**
+///
+/// Das ist die Zusage, an der das Ganze hängt: Das Modell soll einen Brief
+/// schreiben können, und der Benutzer soll ihn **sehen und ändern** können, bevor
+/// etwas hinausgeht. Ein Entwurf, der nur als Text im Chat ankäme, müsste
+/// abgetippt werden – und bei der ersten Ungenauigkeit ginge etwas verloren, ohne
+/// dass es jemand bemerkte.
+#[test]
+fn ein_entwurf_trägt_die_felder_mit_und_verliert_nichts() {
+    let config = MailConfig {
+        id: "konto-7".to_string(),
+        name: "Arbeit".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai".to_string(),
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis = entwurf(
+        &config,
+        &serde_json::json!({
+            "an": "sarah@example.org",
+            "cc": "chef@example.org",
+            "bcc": "",
+            "betreff": "Termin am Donnerstag",
+            "text": "Hallo Sarah,\n\npasst 14 Uhr?\n\nKai",
+        }),
+    )
+    .expect("ein Entwurf lässt sich immer erstellen");
+
+    let daten = ergebnis.entwurf.expect("ein Entwurf trägt seine Felder mit");
+
+    // **Das Konto ist die Kennung, nicht der Name.** Bei mehreren Konten ist
+    // „Arbeit" keine Adresse, an die man etwas schicken könnte.
+    assert_eq!(daten.konto, "konto-7");
+    assert_eq!(daten.an, "sarah@example.org");
+    assert_eq!(daten.cc, "chef@example.org");
+    assert_eq!(daten.betreff, "Termin am Donnerstag");
+    assert!(
+        daten.text.contains("passt 14 Uhr"),
+        "der Text kommt vollständig an: {:?}",
+        daten.text
+    );
+    assert_eq!(daten.in_antwort_auf, None, "eine neue Mail ist keine Antwort");
+
+    // **Und der Text für das Modell bleibt lesbar** – die Felder daneben sind
+    // für das Modell nicht lesbar, und ein Text ohne sie für den Benutzer nicht
+    // versendbar.
+    assert!(ergebnis.content.contains("sarah@example.org"));
+    assert!(ergebnis.content.contains("nichts gesendet"));
+}
+
+/// **Ein Entwurf ohne Empfänger geht an den Benutzer selbst – und hat damit
+/// einen Adressaten.**
+///
+/// Dieser Test stand früher auf der anderen Seite und behauptete, ein Entwurf
+/// ohne Empfänger müsse ein Fehler sein: Sonst entstünde im Schreibfenster eine
+/// Nachricht ohne Adressat, deren Senden erst beim zweiten Klick auffiele. Die
+/// Sorge war richtig, die Antwort darauf war es nicht.
+///
+/// Denn sie hat eine Adresse verlangt, die das Modell nicht kennt. Der Entwurf
+/// scheiterte daran – nicht der Benutzer sah es zu spät, sondern gar nicht. Was
+/// hier jetzt entsteht, ist keine Nachricht ohne Adressat, sondern eine mit
+/// einem: der des Benutzers. Der steht sichtbar im Fenster, und beim Absenden
+/// muss er ihn ohnehin bestätigen.
+///
+/// **Ein Entwurf ohne jeden Empfänger ist damit ausgeschlossen.** Nicht, weil
+/// das Feld bequem wegfällt, sondern weil die Voreinstellung eine Adresse
+/// einsetzt, die es gibt.
+#[test]
+fn ein_entwurf_ohne_empfaenger_hat_einen_addressaten() {
+    // **Nur der Absender ist hier von Belang.** Alles andere braucht die Prüfung
+    // nicht, und soll sie auch nicht aufhalten: Dieser Test geht den Weg durch,
+    // den ein Entwurf ohne Empfänger wirklich nimmt.
+    let config = MailConfig {
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis =
+        entwurf(&config, &serde_json::json!({"betreff": "B", "text": "T"})).expect(
+            "ohne Empfänger entsteht ein Entwurf an das eigene Postfach, kein Fehler",
+        );
+
+    let daten = ergebnis.entwurf.expect("der Entwurf wandert mit");
+    assert_eq!(
+        daten.an, "kai@example.org",
+        "der Entwurf hat einen Adressaten, und es ist der Benutzer"
+    );
+    assert!(
+        ergebnis.content.contains("kai@example.org"),
+        "der Empfänger steht auch im Text für den Benutzer: {}",
+        ergebnis.content
+    );
+}
+
+/// **Jedes andere Werkzeug lässt das Feld leer.** Serialisiert wird es dann
+/// gar nicht – sonst stünde in jedem Ergebnis ein leerer Entwurf, den die
+/// Oberfläche nicht zu deuten wüsste.
+#[test]
+fn nur_der_entwurf_traegt_das_feld() {
+    let ohne = crate::ToolOutput::new("Text".to_string(), "Kurz".to_string());
+    assert!(ohne.entwurf.is_none());
+
+    let json = serde_json::to_string(&ohne).expect("ein Ergebnis lässt sich lesen");
+    assert!(
+        !json.contains("entwurf"),
+        "das Feld fehlt ganz und steht nicht auf null: {json}"
+    );
+}
+
+/// **Der Entwurf muss über die Rust-Grenze kommen.**
+///
+/// Bei diesem ganzen Weg fehlt eine Kette, an der man leicht denkt, sie sei
+/// selbstverständlich: `entwurf` liegt in Rust, wird in JSON übersetzt, kommt
+/// im Frontend an. Wird ein Feld beim Übersetzen übergangen, ist es im
+/// Werkzeugschritt unsichtbar – **und der Knopf zum Öffnen erscheint nicht**.
+/// Genau das wäre von außen nicht zu unterscheiden von einem Werkzeug, das nie
+/// gelaufen ist.
+#[test]
+fn der_entwurf_ueberschreitet_die_rust_grenze() {
+    let config = MailConfig {
+        id: "konto-1".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai".to_string(),
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis = entwurf(
+        &config,
+        &serde_json::json!({
+            "an": "sarah@example.org",
+            "betreff": "Termin am Donnerstag",
+            "text": "Hallo Sarah,",
+        }),
+    )
+    .expect("der Entwurf entsteht");
+
+    let json = serde_json::to_value(&ergebnis).expect("ein Ergebnis lässt sich lesen");
+
+    assert!(
+        json.get("entwurf").is_some(),
+        "der Entwurf fehlt in der Übersetzung: {json}"
+    );
+    assert_eq!(json["entwurf"]["an"], "sarah@example.org");
+    assert_eq!(json["entwurf"]["betreff"], "Termin am Donnerstag");
+    assert_eq!(json["entwurf"]["konto"], "konto-1");
+    assert_eq!(json["entwurf"]["in_antwort_auf"], serde_json::Value::Null);
+}
+
+/// **„Schick mir das" muss ohne Adresse auskommen.**
+///
+/// Der häufigste Auftrag um einen Entwurf ist einer, bei dem der Empfänger der
+/// Benutzer selbst ist. Solange das Modell dafür eine Adresse nennen musste,
+/// ohne eine zu kennen, hat es geraten – und der Aufruf ist an einer Adresse
+/// hängen geblieben, die es im Postfach nicht gab.
+///
+/// Der Test steht hier, weil das nicht am Entwurf hängt, sondern an der
+/// Reihenfolge: Erst wird die eigene Adresse eingesetzt, dann entsteht der
+/// Entwurf. Wer die Voreinstellung entfernt, bemerkt es an diesem Test – nicht
+/// an einem Bildschirm, auf dem ein Knopf fehlt.
+#[test]
+fn ein_entwurf_ohne_empfaenger_geht_an_das_eigene_postfach() {
+    let config = MailConfig {
+        id: "konto-1".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai".to_string(),
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis = entwurf(
+        &config,
+        &serde_json::json!({
+            "betreff": "Zusammenfassung unseres Chats",
+            "text": "Wir haben über den Entwurf gesprochen.",
+        }),
+    )
+    .expect("ein Entwurf ohne Empfänger entsteht");
+
+    let daten = ergebnis.entwurf.expect("der Entwurf wandert mit");
+    assert_eq!(
+        daten.an, "kai@example.org",
+        "ohne Empfänger geht der Entwurf an das eigene Postfach"
+    );
+    assert_eq!(daten.betreff, "Zusammenfassung unseres Chats");
+    assert_eq!(daten.konto, "konto-1", "das Fenster öffnet im richtigen Konto");
+}
+
+/// **Ein genannter Empfänger bleibt unangetastet.**
+///
+/// Die Voreinstellung darf nur einsetzen, wo nichts dasteht. Andernfalls würde
+/// eine Bitte wie „schick das an Sarah“ im Fenster stillschweigend an den
+/// Benutzer selbst gehen – der Entwurf entstünde, aber an den Falschen.
+#[test]
+fn ein_genannter_empfaenger_bleibt_stehen() {
+    let config = MailConfig {
+        id: "konto-1".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai".to_string(),
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis = entwurf(
+        &config,
+        &serde_json::json!({
+            "an": "sarah@example.org",
+            "betreff": "Termin am Donnerstag",
+            "text": "Hallo Sarah,",
+        }),
+    )
+    .expect("der Entwurf entsteht");
+
+    let daten = ergebnis.entwurf.expect("der Entwurf wandert mit");
+    assert_eq!(daten.an, "sarah@example.org", "der eigene Empfänger bleibt außen vor");
+}
+
+/// **Leer ist nicht genannt.**
+///
+/// Leeres Feld und fehlendes Feld sind für das Modell dasselbe – aber nur das
+/// leere darf die Voreinstellung auslösen. Ein Leerzeichen als Empfänger wäre
+/// eine Adresse, die es nicht gibt, und `parse_recipients` würde sie mit einer
+/// verständlichen Meldung ablehnen, statt still zu ersetzen.
+#[test]
+fn ein_leeres_empfaengerfeld_zaehlt_als_keine_angabe() {
+    let config = MailConfig {
+        id: "konto-1".to_string(),
+        imap_server: "imaps://imap.example.org:993".to_string(),
+        username: "kai".to_string(),
+        address: "kai@example.org".to_string(),
+        ..MailConfig::default()
+    };
+
+    let ergebnis = entwurf(
+        &config,
+        &serde_json::json!({
+            "an": "   ",
+            "betreff": "Notiz",
+            "text": "Etwas für später.",
+        }),
+    )
+    .expect("auch ein leeres Feld führt zum Entwurf");
+
+    let daten = ergebnis.entwurf.expect("der Entwurf wandert mit");
+    assert_eq!(daten.an, "kai@example.org");
+}
+
+/// **Beim Senden bleibt der Empfänger Pflicht.**
+///
+/// Das ist der Gegenentwurf zu allem Obigen, und der Grund, warum die
+/// Voreinstellung nicht in `vorhaben_aus_argumenten` steht: Dort würde sie auch
+/// das Senden treffen. Eine Mail, die beim Absender landet, während er sie an
+/// jemand anderen erwartet, ist kein Entwurf, sondern ein Versehen – und der
+/// Benutzer sähe es erst, wenn sie draußen ist.
+///
+/// Das Schema muss deshalb sagen, dass `an` dazugehört. Ohne diese Prüfung
+/// könnte es beim nächsten Umbau stillschweigend wegfallen, und das Feld wäre
+/// wieder nur noch in der Beschreibung zu finden.
+#[test]
+fn beim_senden_bleibt_der_empfaenger_pflicht() {
+    let schema = send_email_schema();
+    let pflicht = schema["function"]["parameters"]["required"]
+        .as_array()
+        .expect("das Senden nennt seine Pflichtfelder");
+
+    assert!(
+        pflicht.iter().any(|feld| feld == "an"),
+        "das Senden lässt den Empfänger wieder zu: {schema}"
+    );
+
+    // **Und die Voreinstellung steht nur in der Entwurfsbeschreibung.**
+    //
+    // Wäre sie auch hier zu lesen, würde das Modell sie fürs Senden mitnehmen
+    // und eine Mail an sich selbst schicken, weil der Empfänger fehlt.
+    let beschreibung = schema["function"]["parameters"]["properties"]["an"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        beschreibung.contains("**Optional**"),
+        "beim Senden ist der Empfänger nicht optional, die Beschreibung sagt es: {beschreibung}"
+    );
+}
+
+/// **Der Entwurfschema-description erklärt den Weg nach Hause.**
+///
+/// Der Satz ist keine Dekoration. Ohne ihn bleibt `an` ein Feld, dessen
+/// Fehlen ein Fehler scheint, und das Modell füllt es – mit einer Adresse, die
+/// es sich ausdenkt.
+#[test]
+fn der_entwurf_sagt_dem_modell_wohin_ohne_empfaenger() {
+    let schema = crate::mail::draft_email_schema();
+    let beschreibung = schema["function"]["parameters"]["properties"]["an"]["description"]
+        .as_str()
+        .unwrap_or_default();
+
+    assert!(
+        beschreibung.contains("eigenes") || beschreibung.contains("selbst"),
+        "das Schema erklärt nicht, dass ein leerer Empfänger der Benutzer selbst ist: {beschreibung}"
     );
 }

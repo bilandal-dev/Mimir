@@ -1910,6 +1910,33 @@ fn kuerze_fuer_nachricht(kopf: &str, inhalt: &str) -> (String, bool) {
     (format!("{kopf}{}{MARKE}", &inhalt[..end]), true)
 }
 
+/// Ein vom Modell entworfener Brief – **zum Prüfen und Versenden, nicht zum
+/// Senden.**
+///
+/// **Warum eigene Felder und nicht nur ein Text im Chat.** Der Entwurf eines
+/// Briefes ist etwas anderes als eine Antwort: Er soll in das Schreibfenster
+/// wandern, damit der Benutzer ihn liest, ändert und **erst dann** abschickt.
+/// Ein Text im Chat kann nichts davon – er müsste abgetippt werden, und genau
+/// daran scheitert die Zusage, dass nichts ohne den Menschen hinausgeht.
+///
+/// **Deshalb trägt das Ergebnis diese Felder getrennt vom Text.** Der Text bleibt
+/// das, was das Modell liest; diese Felder sind das, was die Oberfläche
+/// anzeigt. Ein Entwurf, den niemand sendet, ist kein Fehler – deshalb wird er
+/// auch nicht zu irgendeinem Fehler gemacht.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct Entwurfsdaten {
+    /// Kennung des Kontos, aus dem gesendet würde. Nicht der Name: Für den
+    /// Versand zählt, **welches** Konto – bei mehreren ist das ein Unterschied.
+    pub konto: String,
+    pub an: String,
+    pub cc: String,
+    pub bcc: String,
+    pub betreff: String,
+    pub text: String,
+    /// Nur bei einer Antwort. Eine Weiterleitung hängt sich an kein Gespräch.
+    pub in_antwort_auf: Option<String>,
+}
+
 /// Ergebnis eines lesenden Werkzeugs: der Text geht ans Modell, die Kurzfassung
 /// in die Oberfläche.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1917,6 +1944,14 @@ struct ToolOutput {
     content: String,
     summary: String,
     truncated: bool,
+    /// Nur von `draft_email`. `None` bei jedem anderen Werkzeug.
+    ///
+    /// **Ausgelassen statt `null`**, weil das Feld in fast jedem Ergebnis nicht
+    /// da ist: Jedes Werkzeug, das es nicht kennt, müsste es sonst ausdrücklich
+    /// auf `null` setzen – und bei der ersten neuen Stelle ohne diesen Hinweis
+    /// stünde da ein leerer Entwurf, den niemand versteht.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entwurf: Option<Entwurfsdaten>,
 }
 
 impl ToolOutput {
@@ -1926,7 +1961,18 @@ impl ToolOutput {
             content,
             summary,
             truncated,
+            entwurf: None,
         }
+    }
+
+    /// **Hängt einen Entwurf an ein Ergebnis**, ohne den Text zu verändern.
+    ///
+    /// Der Text ist, was das Modell liest, und er bleibt unverändert: Ein Brief
+    /// mit den Feldern daneben ist für das Modell unlesbar, und ein Text, der die
+    /// Felder enthält, für den Benutzer.
+    fn mit_entwurf(mut self, entwurf: Entwurfsdaten) -> Self {
+        self.entwurf = Some(entwurf);
+        self
     }
 
     /// Markiert eine Kürzung, die nicht aus der Bytegrenze stammt, etwa weil
@@ -7392,6 +7438,43 @@ async fn mail_loeschen(
     crate::mail::imap_loeschen(konto, &session, nummer).await
 }
 
+/// Verschickt eine vom Benutzer selbst geschriebene Nachricht.
+///
+/// **Derselbe Weg wie das Werkzeug `send_email`**, bewusst: Beide lesen dieselbe
+/// Prüfung (`vorhaben_aus_argumenten`) und bauen dieselbe Nachricht
+/// (`smtp::sende`). Ein zweiter, vereinfachter Weg für die Oberfläche hieße: Die
+/// Prüfung der Adresse, die Kürzung des Betreffs und die BCC-Behandlung wären an
+/// zwei Stellen gepflegt, und die eine Stelle würde irgendwann vergessen.
+///
+/// **Der Aufrufer muss vorher bestätigt haben.** Diese Funktion prüft das nicht
+/// und kann es nicht: Ob jemand eine Nachricht abschickt, entscheidet der Mensch
+/// vor dem Fenster, nicht der Code dahinter. Wie beim Löschen trägt die
+/// Oberfläche die Bestätigung – dort liegt sie, wo sie sichtbar ist.
+///
+/// **Ein Fehler ist ein Fehler.** Eine halb gesendete Nachricht gibt es nicht:
+/// Entweder der Server nimmt sie, oder es ist nichts passiert.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn mail_senden(
+    id: String,
+    an: String,
+    cc: Option<String>,
+    bcc: Option<String>,
+    betreff: String,
+    text: String,
+    in_antwort_auf: Option<String>,
+    settings: State<'_, OllamaSettings>,
+    session: State<'_, crate::mail::MailSession>,
+) -> Result<String, String> {
+    let konto = settings.get_config().await.mail;
+    let konto = konto.nach_id_gefordert(&id)?;
+
+    // **Bekannter Absender, bevor irgendetwas andere passiert.** Ein leeres
+    // An-Feld soll nicht erst am Server scheitern, wenn doch am Konto nichts
+    // eingetragen ist.
+    crate::mail::imap_senden(konto, &session, an, cc, bcc, betreff, text, in_antwort_auf).await
+}
+
 /// Prüft das Zertifikat der Instanz, ohne Zugangsdaten zu senden, und nennt den
 /// Fingerabdruck. Das Aufrufen bestätigt nichts: Dafür gibt es
 /// `calendar_trust_certificate`.
@@ -7639,6 +7722,7 @@ pub fn run() {
             mail_message,
             mail_gelesen_setzen,
             mail_loeschen,
+            mail_senden,
             set_calendar_config,
             calendar_status,
             calendar_login,

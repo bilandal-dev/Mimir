@@ -213,5 +213,55 @@ if (!ladt) {
   }
 }
 
+// --- Wie viele Nachrichten die Leiste zeigt ------------------------------
+
+// `mailEintraege` entscheidet, ob die eingetragene Zahl das Backend erreicht
+// oder der eingetragene Wert unverändert bleibt. Das ist die Frage, an der die
+// Zahl des Benutzers verloren gehen kann – deshalb wird sie hier ausgezogen und
+// mit einer Attrappe ausgeführt, statt nur im Quelltext nachzusehen.
+const e = src.indexOf('function mailEintraege');
+if (e < 0) {
+  console.error('FAIL mailEintraege nicht gefunden');
+  process.exit(2);
+}
+
+// Die Attrappe ist ein **Objekt**, nicht ein Wert: `mailEintraege` liest
+// `.value` erst im Aufruf, und deshalb muss dasselbe Ding über mehrere Prüfungen
+// hinweg verändert werden können.
+const feld = { value: '' };
+
+const eintraege = new Function(
+  'mailEntriesInput',
+  `${src.slice(e, src.indexOf('\n}', e) + 2)}\nreturn mailEintraege;`,
+)(feld);
+
+const mitFeld = (wert) => () => {
+  feld.value = wert;
+  return eintraege();
+};
+
+// **Leer heißt: nichts aussagen.** Das Backend nimmt `null` als „unverändert
+// lassen" – so kommt der Kontoeintrag zurück, statt auf `0` geklemmt zu werden.
+// `0` war genau der Wert, der die Leiste auf eine einzige Nachricht brachte.
+gleich('ein leeres Feld lässt den eingetragenen Wert', mitFeld('')(), null);
+
+// **Eine brauchbare Zahl wird durchgelassen.**
+gleich('eine eingetragene Zahl kommt an', mitFeld('7')(), 7);
+gleich('getrimmt', mitFeld(' 12 ')(), 12);
+
+// **Und alles, was keine Zahl ist, ebenso.** Wer „viele" eintippt, hat einen
+// Tippfehler gemacht – der darf den eingetragenen Wert nicht überschreiben.
+for (const unbrauchbar of ['abc', '0', '-5', '3.5', '5e2']) {
+  gleich(
+    `„${unbrauchbar}" ändert nichts`,
+    mitFeld(unbrauchbar)(),
+    null,
+  );
+}
+
+// **Die Obergrenze klemmt das Backend**, nicht diese Funktion – sonst stünde
+// die Zahl an zwei Stellen.
+gleich('eine zu grosse Zahl wird durchgelassen und oben geklemmt', mitFeld('999')(), 999);
+
 console.log(fehler === 0 ? '\nalle Prüfungen bestanden' : `\n${fehler} Prüfung(en) fehlgeschlagen`);
 process.exit(fehler === 0 ? 0 : 1);

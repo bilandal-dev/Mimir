@@ -233,3 +233,51 @@ fn die_vorgabe_ist_ein_port_mit_tls() {
     let (_, port) = zerlege_server(&adresse).unwrap();
     assert_eq!(port, 465);
 }
+
+// --- Ports ---------------------------------------------------------------
+
+/// **Ein Port von IMAP im SMTP-Feld wird abgelehnt, nicht übersetzt.
+///
+/// Das ist keine Kosmetik: Port 993 nimmt eine TLS-Verbindung an, bevor ein
+/// Wort gesprochen ist. Wer dort plaintext hineinschickt, bekommt
+/// `incomplete response` – eine Antwort, die nichts über die Ursache sagt. Ein
+/// Test, der das erlebt hat, nennt es eine Meldung, die auf den falschen
+/// Verdacht bringt.
+#[test]
+fn weist_die_ports_von_imap_und_pop3_zurueck() {
+    for port in [143, 993, 110] {
+        let fehler = zerlege_server(&format!("smtps://mail.example.org:{port}"))
+            .expect_err("ein IMAP-Port gehört nicht ins SMTP-Feld");
+
+        assert!(
+            fehler.contains(&port.to_string()),
+            "die Meldung nennt den Port: {fehler}"
+        );
+        assert!(
+            fehler.contains("465") && fehler.contains("587"),
+            "und nennt die beiden richtigen: {fehler}"
+        );
+    }
+}
+
+/// **Die beiden SMTP-Ports sind beide erlaubt.** Sie sind nicht gleich – einer
+/// nimmt TLS sofort, der andere per STARTTLS –, aber beide sind richtig, und die
+/// Wahl ist Sache von `sende`, nicht von der Adressprüfung.
+#[test]
+fn laesst_die_richtigen_smtp_ports_durch() {
+    assert_eq!(
+        zerlege_server("smtps://smtp.example.org:465").unwrap(),
+        ("smtp.example.org".to_string(), 465)
+    );
+    assert_eq!(
+        zerlege_server("smtps://smtp.example.org:587").unwrap(),
+        ("smtp.example.org".to_string(), 587)
+    );
+    // **Und ein Port, den es auf keiner Liste gibt.** Ein eigener Server darf
+    // auf einem beliebigen Port lauschen; nur die bekannten falschen werden
+    // abgelehnt.
+    assert_eq!(
+        zerlege_server("smtps://mail.example.org:2525").unwrap(),
+        ("mail.example.org".to_string(), 2525)
+    );
+}

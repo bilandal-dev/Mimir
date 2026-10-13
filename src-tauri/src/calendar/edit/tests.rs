@@ -519,28 +519,67 @@ fn ohne_kalender_wird_nichts_angefasst() {
     assert!(fehler.contains("/calendar"), "{fehler}");
 }
 
+/// Ein Datum so viele Tage in der Zukunft, wie die Prüfung zur Vergangenheit
+/// verlangt.
+///
+/// Feste Daten in Tests sind eine Zeitbombe: „2026-09-22“ war heute noch in der
+/// Zukunft und morgen ist es Vergangenheit, woran die Prüfung zur Vergangenheit
+/// anschlägt. Dieselbe Begründung wie in `write::tests::spaeter` – dort war sie
+/// schon notiert, als dieser Test noch fest verdrahtet war.
+///
+/// **Als `NaiveDate` und nicht als Text**, weil ein Ganztagestermin in zwei
+/// Formen dasteht: `2026-10-05` im Befehl und `20261005` in der ICS.
+fn spaeter(tage: i64) -> chrono::NaiveDate {
+    Local::now().date_naive() + Duration::days(tage)
+}
+
 #[test]
 fn ein_ganztagestermin_behaelt_sein_aussehen() {
-    let ganztag = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:g1\r\nDTSTAMP:20260901T120000Z\r\nDTSTART;VALUE=DATE:20260922\r\nDTEND;VALUE=DATE:20260923\r\nSUMMARY:Urlaub\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    // **Gerechnet statt fest verdrahtet.** Der Termin liegt in der Zukunft,
+    // weil die Verschiebung sonst an der Prüfung zur Vergangenheit anschlägt –
+    // und der Test dann an etwas prüft, was er nicht meint.
+    let alt = spaeter(21);
+    let neu = spaeter(28);
+
+    let ganztag = format!(
+        "BEGIN:VCALENDAR\r\n\
+         VERSION:2.0\r\n\
+         BEGIN:VEVENT\r\n\
+         UID:g1\r\n\
+         DTSTAMP:{}Z\r\n\
+         DTSTART;VALUE=DATE:{}\r\n\
+         DTEND;VALUE=DATE:{}\r\n\
+         SUMMARY:Urlaub\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n",
+        Utc::now().format("%Y%m%dT%H%M%S"),
+        alt.format("%Y%m%d"),
+        (alt + Duration::days(1)).format("%Y%m%d"),
+    );
+
+    let neues_datum = neu.format("%Y-%m-%d").to_string();
 
     let plan = plan_update(
         &config(),
         &kalender(),
-        &json!({"uid": "g1", "start": "2026-10-05"}),
-        ganztag,
+        &json!({"uid": "g1", "start": neues_datum.as_str()}),
+        &ganztag,
         "g1",
     )
     .expect("ein Ganztagestermin lässt sich verschieben");
 
-    let neu = Ics::parse(&plan.nachher).unwrap();
-    assert_eq!(neu.get("DTSTART").as_deref(), Some("20261005"));
+    let neu_start = neu.format("%Y%m%d").to_string();
+    let neu_ende = (neu + Duration::days(1)).format("%Y%m%d").to_string();
+
+    let gelesen = Ics::parse(&plan.nachher).unwrap();
+    assert_eq!(gelesen.get("DTSTART").as_deref(), Some(neu_start.as_str()));
     assert_eq!(
-        neu.get("DTEND").as_deref(),
-        Some("20261006"),
+        gelesen.get("DTEND").as_deref(),
+        Some(neu_ende.as_str()),
         "die Dauer ging verloren"
     );
     assert!(
-        plan.nachher.contains("DTSTART;VALUE=DATE:20261005"),
+        plan.nachher.contains(&format!("DTSTART;VALUE=DATE:{neu_start}")),
         "{}",
         plan.nachher
     );

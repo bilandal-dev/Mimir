@@ -483,7 +483,20 @@ Der wichtigste Teil des Skripts prüft die Zusage, die dabei leicht verloren geh
 
 ## Stand der Prüfungen
 
-531 bestandene Rust-Tests, dazu sieben Skripte ohne Fenster. Drei Rust-Tests fallen durch; sie prüfen Kalenderdaten, die im Quelltext fest auf den 5. bis 7. Oktober 2026 stehen und deshalb inzwischen in der Vergangenheit liegen. Sie haben nichts mit diesen Änderungen zu tun und bestehen seit demselben Stand nicht mehr.
+563 bestandene Rust-Tests, dazu neun Skripte ohne Fenster. Kein Test fällt durch.
+
+**An einer Zahl ist gut zu sehen, wie leicht so etwas schiefgeht.** Bis vor
+kurzem stand hier, drei Tests seien rot – und begründet war das mit Kalenderdaten,
+die im Quelltext fest auf den 5. bis 7. Oktober 2026 verdrahtet waren. Die Tests
+prüften also das Falsche: Sie behaupteten, ein festes Datum sei richtig, und der
+Fehler lag darin, dass dieses Datum inzwischen in der Vergangenheit lag. Sie waren
+grün, bis der Kalender weiterstickte.
+
+**Datumsangaben in Tests werden gerechnet, nicht geschrieben.** Die Prüfung läuft
+über ein ganzes Jahr mit vorgegebenem Startdatum, nicht über die Systemuhr – siehe
+[docs/kalender.md](kalender.md). Dasselbe gilt für die Monatsnamenschreibweisen und
+für den Ganztagestermin; ein Ziel, das über den Jahreswechsel fällt, würde einen
+Fehler melden, den es nicht gibt.
 
 
 ## Sicherheits- und Datenhinweise

@@ -32,7 +32,7 @@ Beim Anlegen wird der genannte Kalendername **exakt** verglichen, absichtlich oh
 
 Der Schreibmodus gilt **nur für die laufende Sitzung** und wird bewusst nicht in `ollama.json` gespeichert: Ein dauerhaft gesetzter Schreibzugriff würde einen Zugang hinterlassen, den niemand mehr erwartet.
 
-## Der Umfang: alles, oder nur Termine
+## Der Umfang: drei, nicht zwei
 
 Neben dem Sitzungsschalter gibt es den **Umfang**, der angibt, welche Werkzeuge das Modell überhaupt bekommt. Er steht in `ollama.json` unter `agent.scope` und wird mit `/scope` gesetzt:
 
@@ -40,12 +40,32 @@ Neben dem Sitzungsschalter gibt es den **Umfang**, der angibt, welche Werkzeuge 
 /scope
 /scope agent
 /scope termine
+/scope mail
 ```
 
 | Umfang | Werkzeuge | Arbeitsverzeichnis |
 |---|---|---|
 | `agent` (Vorgabe) | die drei lesenden, dazu die freigegebenen schreibenden, dazu der Kalender bei Anmeldung | nötig |
 | `termine` | ausschließlich die vier Kalenderwerkzeuge | nicht nötig |
+| `mail` | ausschließlich die Mailwerkzeuge | nicht nötig |
+
+**Ein Umfang schließt die anderen aus.** Das ist der Punkt: Wer Dateiwerkzeuge
+haben will, bekommt **keine** Mailwerkzeuge, und umgekehrt. Der Grund ist der
+Sandkastengedanke – wer in einem fremden Verzeichnis lesen darf, soll nicht
+gleich ein Postfach sehen. Wer beides braucht, wechselt.
+
+**Der Umfang entscheidet, ob das Modell überhaupt Mailwerkzeuge sieht.** Ohne
+`/scope mail` bietet der Agentenmodus keinerlei Postfachwerkzeuge an, und das
+Modell sagt dann sehr deutlich, dass es keine E-Mails versenden könne. Das ist
+keine Fehlfunktion, sondern die Anzeige eines Umfangs, in dem das Postfach gar
+nicht existiert.
+
+**`mail` wurde später ergänzt und war lange nur in der Konfiguration sichtbar.**
+`umfangsname` kannte den Namen und `SCOPE_NAMES` führte den Wert, aber weder
+`/scope` noch die Hilfe nannten ihn, und `umfangstext` fiel für ihn auf den
+Agentenzweig zurück – **und behauptete damit etwas Falsches** über den Zustand,
+in dem das Programm gerade war. Genau deshalb steht seitdem jeder Umfang in
+`umfangstext` und in der Hilfe.
 
 Der Umfang ist das, was den Unterschied ausmacht. Im Terminumfang gilt:
 
@@ -149,7 +169,14 @@ Jeder gelesene Dateiinhalt landet im Prompt und kann das Modell anweisen, etwas 
 
 ## Kein Netzzugriff
 
-Mimir spricht ausschließlich mit dem konfigurierten Ollama-Server und der eingetragenen Nextcloud-Instanz im lokalen Netz. Es gibt **keine** Websuche, kein Abrufen einer Adresse und keinen Weg, auf dem eine Anfrage aus Mimir hinausgeht.
+Mimir spricht ausschließlich mit dem konfigurierten Ollama-Server, der eingetragenen Nextcloud-Instanz und – **wenn ein Postfach eingerichtet ist – dem IMAP- und SMTP-Server dieses Kontos**. Es gibt **keine** Websuche, kein Abrufen einer Adresse und keinen Weg, auf dem eine Anfrage aus Mimir hinausgeht, den der Benutzer nicht selbst eingetragen hat.
+
+> **Diese Passage ist älter als der Postfachumfang.** Sie stand zuerst da und
+> behauptete, aus Mimir gehe nichts hinaus. Das stimmte, solange es nur Ollama
+> gab. Mit IMAP und SMTP war es nicht mehr wahr, und die Zusage stand trotzdem
+> weiter – eine Doku, die zu viel verspricht, ist schlimmer als eine, die zu wenig
+> sagt. Was hier jetzt steht, ist der Ist-Zustand: Drei eingetragene Ziele, kein
+> weiteres.
 
 Das ist eine bewusste Entscheidung, keine Lücke. Eine Suche hätte zwei Folgen: Der Suchanbieter sähe jede Frage – bei einer Frage nach dem eigenen Kalender also, was als Suchbegriff hinausgeht – und eine geladene Seite wäre Fremdtext im Prompt, der das Modell direkt anweisen kann, etwas zu tun. Der letzte Punkt ließe sich nur durch die Bestätigung pro Abruf begrenzen, und für einzelne Seiten ist eine Suchmaschine ohnehin die falsche Abkürzung.
 

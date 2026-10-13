@@ -160,6 +160,44 @@ console.log();
 console.log('— Die Umfangsnamen —');
 gleich('termine', F.umfangsname('termine'), 'Terminumfang');
 gleich('agent', F.umfangsname('agent'), 'Agentenmodus');
+gleich('mail', F.umfangsname('mail'), 'Postfach');
+
+// **Der Postfachumfang war unsichtbar, obwohl es ihn gab.** `umfangsname`
+// kannte ihn und `SCOPE_NAMES` führte ihn, aber weder der Text noch die Hilfe
+// nannten ihn: Wer ihn nicht in der Konfiguration gefunden hatte, konnte ihn
+// nicht einstellen. Und `umfangstext` fiel für ihn auf den Agenten-Zweig
+// zurück – und **behauptete damit etwas Falsches** über den Zustand, in dem
+// das Programm gerade war.
+const postfachtext = F.umfangstext('mail', zustand('mail'));
+gleich('der Postfachumfang wird benannt', /Umfang: Postfach/.test(postfachtext), true);
+gleich(
+  'und nicht für den Agentenmodus gehalten',
+  !/Agentenmodus\. Das Modell kann die Dateiwerkzeuge/.test(postfachtext),
+  true,
+);
+gleich(
+  'und nennt die Mailwerkzeuge',
+  /Entwurf/.test(postfachtext) && /sendet nur von dir|erst von dir/.test(postfachtext),
+  true,
+);
+gleich(
+  'und sagt, dass keine Dateien drankommen',
+  /keine Dateien/i.test(postfachtext),
+  true,
+);
+gleich(
+  'und nennt den Weg zu den anderen Umfängen',
+  /\/scope agent/.test(postfachtext) && /\/scope termine/.test(postfachtext),
+  true,
+);
+
+// **Und es steht in der Hilfe.** Ein Umfang, den man nicht benennen kann, ist
+// einer, den man nicht abschalten kann, wenn er gerade im Weg ist.
+gleich(
+  'die Hilfe führt den Postfachumfang',
+  /\/scope \[agent\|termine\|mail\]/.test(src) && /name: '\/scope mail'/.test(src),
+  true,
+);
 
 console.log();
 console.log('— Der Provider zieht den Umfang mit —');

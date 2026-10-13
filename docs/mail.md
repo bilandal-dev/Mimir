@@ -73,6 +73,17 @@ Ohne Port nimmt Mimir den, der zum Schema gehört: **465 nimmt TLS schon beim
 Verbindungsaufbau an, 587 erst danach per STARTTLS.** Das ist kein Detail – wer
 beides gleich behandelt, verschickt über Port 465 gar nichts.
 
+**Der Port von IMAP gehört nicht ins SMTP-Feld.** 993, 143 und 110 werden
+abgelehnt, und die Meldung nennt die beiden richtigen Zahlen. Der Grund ist
+nicht Pedanterie: Port 993 erwartet sofort ein Zertifikat, und wer dort
+Plaintext-SMTP hineinschickt, bekommt `incomplete response` – eine Antwort aus
+dem Protokoll heraus, die nichts über die Ursache sagt und auch nicht nach Port
+klingt. Wer die IMAP-Adresse in das SMTP-Feld kopiert, kommt genau dort hin.
+
+Deshalb nennt Mimir auch bei den beiden anderen häufigen Sendefehlern den Grund:
+eine abgelehnte Anmeldung heißt in aller Regel **Hauptpasswort statt
+App-Passwort** – und nicht, dass der Server kaputt sei.
+
 ### Die Anbieter
 
 **Gmail** braucht ein **App-Passwort**. Das Hauptpasswort gehört nicht hierher.
@@ -142,6 +153,11 @@ dann gespeichert, und die Leiste muss das zeigen.
 
 Absender und Datum auf einer Zeile, darunter der Betreff, darunter die ersten
 Zeilen des Textes.
+
+**Gescrollt wird nur die Liste.** Kopf der Leiste und die Zeile mit der Anzahl
+bleiben stehen; sie sagen, wie viele Nachrichten es gibt, während man sie liest.
+Vorher lief der Scrollbereich über den ganzen Rahmen, und die Fußzeile mit der
+Anzahl war das Erste, was aus dem Bild verschwand.
 
 **Die Breite folgt dem Fenster** – zwischen 340 und 620 Pixeln. Nie schmaler,
 weil dort ein Betreff schon abgeschnitten ist und zwei Zeilen Vorschau nicht mehr
@@ -250,10 +266,122 @@ Angriff, und die eigene Oberfläche darf ihn nicht erleichtern.
 
 ## Schreiben
 
+### Der Benutzer schreibt selbst
+
+Über **Schreiben** in der Leiste geht ein Fenster auf: An, CC und BCC (die
+letzten beiden sind eingeklappt, bis jemand sie braucht), Betreff und Text. Die
+Absenderadresse steht oben und ist **nicht zu ändern** – Mimir verschickt aus dem
+eingetragenen Konto, und eine freie Absenderadresse wäre eine Fälschung, die erst
+beim Empfänger auffällt.
+
+**Antworten** und **Weiterleiten** im Fenster einer geöffneten Nachricht sind
+dasselbe Fenster, nur unterschiedlich gefüllt:
+
+| | Antworten | Weiterleiten |
+| --- | --- | --- |
+| An | der Absender | **leer** – wen der Benutzer will |
+| Betreff | `Re: …` | `Wg: …` |
+| Text | das Original zitiert | das Original zitiert |
+| Kennung | die der Nachricht | **keine** |
+
+**Die Kennung macht den Unterschied.** `In-Reply-To` sagt jedem Mailprogramm:
+*diese Nachricht gehört zu dem Gespräch, das du siehst.* Bei einer Antwort stimmt
+das, und der Verlauf wird aneinandergehängt. Bei einer **Weiterleitung wäre es
+eine Lüge** – der Empfänger bekäme einen Verlauf angehängt, in dem er nie etwas
+gesagt hat, und seine Antworten gingen an die falschen Leute.
+
+**Beide zitieren das Original**, mit „> " vor jeder Zeile und mit deutschem Kopf
+(`Von:`, `Betreff:`, `Gesendet:`). Das ist das Format, das jedes Programm
+versteht **und wieder als Zitat erkennt** – auch Mimir selbst. Eine
+Weiterleitung ohne den Originaltext wäre eine Nachricht, die niemand versteht.
+
+`Re: ` und `Wg: ` stehen im **Betreff**, nicht nur im Text: Die wenigsten
+Programme lesen den Betreff nicht erst, und er ist das, wonach die Liste
+sortiert.
+
+**Ohne Nachricht gibt es nur „Neue Nachricht"** – die beiden Knöpfe erscheinen
+ohnehin nur bei geöffneter Nachricht, und eine kaputte Verdrahtung soll ein
+leeres Fenster ergeben und keinen Fehler in der Konsole.
+
+**Zweimal klicken.** Der erste Klick macht den Knopf scharf und nennt Empfänger
+und Betreff ein letztes Mal; der zweite verschickt. Eine verschickte Nachricht
+lässt sich nicht zurücknehmen – nicht durch Löschen in Mimir, nicht durch eine
+zweite Mail. `window.confirm` fällt in einer Webview nicht überall zuverlässig
+aus, und eine stehen gebliebene Frage sähe aus, als sei der Knopf kaputt.
+
+**Was vor dem Verbinden geprüft wird.** Empfänger, Betreff und Text gehen durch
+dieselbe Prüfung wie beim Werkzeug `send_email` (`vorhaben_aus_argumenten`), und
+derselbe Bausatz wird verschickt (`smtp::sende`). Der Weg ist bewusst nicht
+vereinfacht: Eine Nachricht, die erst am Server scheitert, ergäbe eine Meldung
+über „Verbindung", während das Problem an drei Zeichen im Betreff lag.
+
+**Der Port von IMAP gehört nicht ins SMTP-Feld.** 993, 143 und 110 werden
+abgelehnt, mit einer Meldung, die die richtigen Zahlen nennt. Wer die
+IMAP-Adresse in das SMTP-Feld kopiert, schickt Plaintext dorthin, wo ein
+Zertifikat erwartet wird, und bekommt `incomplete response` – eine Antwort, die
+nichts über die Ursache sagt. Auch 465 und 587 unterscheidet Mimir: Der eine
+nimmt TLS sofort, der andere per STARTTLS.
+
+**Die Frist des Backends ist kürzer als die der Leiste.** Sonst gewinnt die
+schnelle Nachricht, und der Benutzer sieht eine Minute lang „Mimir hat nicht
+geantwortet", statt die Ursache zu hören. Deshalb 30 gegen 60 Sekunden – und
+ein Test, der vergleicht, dass dieser Abstand bestehen bleibt.
+
+**Ein Fehler bleibt im Fenster.** Hinter dem Backdrop wäre er unsichtbar, und ein
+Knopf, der scheitert ohne dass man es sieht, sieht aus wie ein Knopf, der nichts
+tut. Nichts wird verworfen, solange nicht gesendet wurde – bei einer halb
+geschriebenen Nachricht wäre ein Verwerfen ein ärgerlicher Verlust.
+
+**Was Mimir nicht kann:** Anhänge, mehrere Konten im selben Fenster, Entwürfe
+speichern, Nachrichten planen, an alle Empfänger antworten. Und weiterhin kein
+Papierkorb – das Löschen im Nachrichtenfenster ist endgültig.
+
+### Das Modell schreibt
+
 Zwei Werkzeuge, und der Unterschied ist der ganze Punkt:
 
-- **`draft_email`** – legt einen Entwurf an. Er erscheint im Chat und geht
-  nirgendwohin. Das ist der normale Weg.
+- **`draft_email`** – legt einen Entwurf an. Es geht **nichts** hinaus. Das ist
+  der normale Weg, und der einzige, den das Modell ohne ausdrückliche Bitte
+  nehmen soll.
+
+  Am Entwurf hängt ein Knopf **„Im Schreibfenster öffnen"**. Er bringt den
+  Entwurf in **das Fenster, in dem der Benutzer sonst selbst schreibt** – dort
+  liest er ihn, ändert ihn und verschickt ihn mit zwei Klicks. **Es gibt
+  keinen zweiten Versandweg**, an dem die Bestätigung vorbeiliefe.
+
+### Ohne Empfänger: der Benutzer selbst
+
+**Lässt das Modell das Feld `an` leer, geht der Entwurf an das eigene
+Postfach.** Das ist kein Notbehelf, sondern der normale Weg für alles, was der
+Benutzer bei sich haben will: eine Zusammenfassung des Chats, eine Notiz, den
+Verlauf zum Nachlesen.
+
+Der Grund ist eine Beobachtung, keine Vorliebe. Solange `an` Pflicht war,
+musste das Modell für „schick mir das“ eine Adresse nennen, **und es kann keine
+kennen** – die eigene Adresse steht in keiner Anweisung. Also hat es geraten,
+und der Aufruf ist an einer Adresse hängen geblieben, die es im Postfach nicht
+gab. Was als Wert in einem Werkzeugaufruf völlig plausibel aussah, war eine
+Erfindung.
+
+**Im Schreibfenster ist jedes Feld änderbar, auch der Empfänger.** Der Benutzer
+entscheidet also erst dort, wohin es geht – mit dem Vorschlag des Modells im
+Feld und nicht mit einer fertigen Adresse.
+
+**Beim Senden ist der Empfänger wieder Pflicht.** Dieselbe Voreinstellung träfe
+dort eine Nachricht, die beim Absender landet, während der Benutzer sie an
+jemand anderen erwartet. Das wäre kein Entwurf, sondern ein Versehen, und er
+sähe es erst, wenn sie draußen ist.
+
+  **Warum nicht nur ein Text im Chat:** Ein Entwurf, den man abtippen müsste,
+  wird nicht abgeschickt – und bei der ersten Ungenauigkeit geht etwas
+  verloren, ohne dass es jemand bemerkt. Der Entwurf wandert deshalb als
+  **Felder** mit, nicht als Abschrift: Empfänger, CC, BCC, Betreff, Text und die  Kennung der beantworteten Nachricht. Der Text im Chat bleibt, weil ihn das
+  Modell liest; die Felder sind, was die Oberfläche anzeigt.
+
+  **Der Knopf öffnet das Fenster nicht von selbst.** Müsste er es, und das
+  Modell entwürfe drei Briefe nacheinander, stünden drei Fenster offen, von
+  denen zwei nicht mehr aufgingen.
+
 - **`send_email`** – verschickt. **Nie ohne Bestätigung.**
 
 Vor dem Senden zeigt Mimir ein Fenster mit Absender, Betreff, allen Empfängern
@@ -309,7 +437,10 @@ BCC verwendet es nur auf ausdrücklichen Wunsch.
   mitschickt, ist Inhalt und wird nie ausgeführt.
 - **Kein HTML.** Nur der Textteil einer Nachricht wird gelesen. HTML ist die
   Form, in der ein Absender mitliest, was der Empfänger zu bestätigen hat.
-- **Keine Ordnerverwaltung.** Es wird gelesen, gesendet und nicht verschoben.
+- **Keine Ordnerverwaltung.** Es wird gelesen, gesendet und gelöscht, aber
+  **nicht verschoben**: Eine Nachricht in einen anderen Ordner legen, ein
+  Gespräch fortschreiben, ein eigener Ordner anlegen – davon ist nichts da. Das
+  Löschen ist endgültig und hat keinen Papierkorb.
 - **Kein Outlook.**
 - **Keine OAuth-Anmeldung.** Nur Passwort.
 
@@ -375,6 +506,13 @@ so machen. Ein Server, der den begrenzten Abruf nicht kann, verliert nur die
 Vorschau: Die Liste steht weiter da.
 
 ## Grenzen
+
+**Höchstens fünfzig Nachrichten, und ältere kommen nicht.** Mimir holt immer
+die *neuesten* dieser Zahl – als IMAP-Bereich `von:vorhanden`, in einer Runde.
+Alles davor wird nicht geladen, und die Leiste **blättert nicht**: es gibt kein
+Nachladen und keinen Weg nach unten. Wie viele Nachrichten gezogen werden, steht
+im Kontodialog unter **„Nachrichten in der Leiste"**; leer gelassen heißt: so
+viele wie erlaubt.
 
 **Höchstens acht Konten.** Jedes ist ein eigener Zugang im Schlüsselbund und eine
 eigene Zeile in einer Leiste, die 300 Pixel breit ist. Eine Postfachübersicht mit
