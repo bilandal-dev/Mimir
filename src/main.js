@@ -137,6 +137,11 @@ const MAX_GESPEICHERTE_NACHRICHTEN = 100;
 const EVENT_TOOL = 'create_calendar_event';
 const UPDATE_EVENT_TOOL = 'update_calendar_event';
 const DELETE_EVENT_TOOL = 'delete_calendar_event';
+// Das Mailwerkzeug, das endgültig wegnimmt. Es steht hier und nicht nur in
+// `MAIL_TOOL_NAMES`, weil zwei Stellen es unterscheiden müssen: Der Dialog
+// braucht den Wortlaut für einen Termin und den für eine Mail, und der Nachlauf
+// muss die Mailleiste neu holen statt einen Rückgängig-Knopf anzubieten.
+const DELETE_EMAIL_TOOL = 'delete_email';
 // Die drei Kalenderwerkzeuge schreiben in den Kalender des Benutzers und
 // brauchen dieselbe Bestätigung wie eine Datei.
 const CALENDAR_TOOL_NAMES = [EVENT_TOOL, UPDATE_EVENT_TOOL, DELETE_EVENT_TOOL];
@@ -147,8 +152,20 @@ const CALENDAR_TOOL_NAMES = [EVENT_TOOL, UPDATE_EVENT_TOOL, DELETE_EVENT_TOOL];
 // dieser Liste, erschiene es als lesendes Werkzeug, und der Benutzer bekäme
 // ein einfaches Bestätigungsfenster mit den Argumenten statt der Vorschau von
 // Empfänger, Betreff und Text – und könnte nicht sehen, was er wegschickt.
-const MAIL_TOOL_NAMES = ['list_emails', 'read_email', 'draft_email', 'send_email'];
-const WRITE_TOOL_NAMES = ['write_file', 'edit_file', 'send_email', ...CALENDAR_TOOL_NAMES];
+//
+// **`delete_email` steht aus demselben Grund hier**, obwohl es nichts aus dem
+// Rechner herausgibt: Es nimmt etwas endgültig weg, und der Benutzer soll den
+// Brief sehen, bevor er bestätigt, dass er verschwindet. Ohne diesen Eintrag
+// bekäme er ein kleines Fenster mit der Nummer – und „Nachricht 1" sagt ihm
+// nicht, welche Mail das ist.
+const MAIL_TOOL_NAMES = ['list_emails', 'read_email', 'draft_email', 'send_email', DELETE_EMAIL_TOOL];
+const WRITE_TOOL_NAMES = [
+    'write_file',
+    'edit_file',
+    'send_email',
+    DELETE_EMAIL_TOOL,
+    ...CALENDAR_TOOL_NAMES,
+];
 
 // Die drei Umfänge, in denen das Modell Werkzeuge bekommt. `agent` ist der
 // bisherige Stand mit dem festen Arbeitsverzeichnis, `termine` nur der Kalender,
@@ -242,10 +259,11 @@ function umfangstext(scope, config = agent) {
     // Zustand, in dem das Programm gerade war.
     if (scope === 'mail') {
         return 'Umfang: Postfach. Das Modell bekommt die Mailwerkzeuge – Postfach auflisten, eine '
-            + 'Nachricht lesen, einen Entwurf schreiben und einen senden. Es kann **keine Dateien** '
-            + 'lesen oder schreiben, und ein Arbeitsverzeichnis ist nicht nötig. '
+            + 'Nachricht lesen, einen Entwurf schreiben, einen senden und einen löschen. Es kann '
+            + '**keine Dateien** lesen oder schreiben, und ein Arbeitsverzeichnis ist nicht nötig. '
             + 'Entwürfe landen im Schreibfenster und werden **erst von dir** gesendet; '
             + 'Nachrichten werden vorher als Unterschied gezeigt und brauchen deine Freigabe. '
+            + '**Löschen ist endgültig**, es gibt keinen Papierkorb. '
             + 'Umfang dauerhaft eingestellt. Mit /scope agent kommst du zu den Dateiwerkzeugen zurück, '
             + 'mit /scope termine zu den Kalenderwerkzeugen.';
     }
@@ -3302,7 +3320,7 @@ const COMMAND_HELP = [
             { name: '/scope termine', text: 'Nur die Kalenderwerkzeuge, ohne Dateizugriff' },
             {
                 name: '/scope mail',
-                text: 'Nur die Mailwerkzeuge: Postfach lesen, Entwurf schreiben, Nachricht senden',
+                text: 'Nur die Mailwerkzeuge: Postfach lesen, Entwurf schreiben, Nachricht senden, Nachricht löschen',
             },
             {
                 name: '/agent-dir',
@@ -3907,9 +3925,10 @@ const FRAGEN = {
         + 'Das gilt über einen Neustart hinweg.',
     mail:
         'Postfachumfang einstellen? Das Modell bekommt dann nur die Mailwerkzeuge: Postfach '
-        + 'auflisten, Nachricht lesen, Entwurf schreiben, Nachricht senden. Es kann **keine '
-        + 'Dateien** lesen oder schreiben. Entwürfe landen in deinem Schreibfenster und werden '
-        + 'erst von dir gesendet; zum Senden braucht es zusätzlich deine Bestätigung. '
+        + 'auflisten, Nachricht lesen, Entwurf schreiben, Nachricht senden, Nachricht löschen. '
+        + 'Es kann **keine Dateien** lesen oder schreiben. Entwürfe landen in deinem Schreibfenster '
+        + 'und werden erst von dir gesendet; zum Senden und zum Löschen braucht es zusätzlich deine '
+        + 'Bestätigung – und gelöscht wird endgültig, es gibt keinen Papierkorb. '
         + 'Das gilt über einen Neustart hinweg.',
     agent:
         'Agentenmodus einstellen? Das Modell bekommt wieder die Dateiwerkzeuge im festen '
@@ -5740,6 +5759,19 @@ function toolCallTarget(call) {
         return 'Termin';
     }
 
+    // **Bei den Mailwerkzeugen die Nummer der Nachricht.**
+    //
+    // Ohne sie stand in der Leiste nur der nackte Name – bei `delete_email` heisst
+    // das „delete_email", und die Zahl, um die es geht, steht nirgends. Das ist
+    // ausgerechnet der Fall, in dem der Benutzer am ehesten nachsehen will,
+    // bevor er bestätigt. Der Betreff wäre die bessere Beschriftung, aber er steht
+    // nicht im Aufruf: `delete_email` nimmt nur die Nummer, und ein Betreff wäre
+    // ein zweites, geratenes Argument an der Stelle, an der es am wenigsten
+    // gut geraten werden darf.
+    if (MAIL_TOOL_NAMES.includes(call?.function?.name) && typeof args.nummer === 'number') {
+        return `Nr. ${args.nummer}`;
+    }
+
     const path = args.path;
     return typeof path === 'string' && path ? path : '';
 }
@@ -5945,10 +5977,21 @@ async function requestWriteApproval(call, working) {
     const counts = renderDiff(writeDiff, preview.current, preview.next);
     const ist_termin = CALENDAR_TOOL_NAMES.includes(name);
     const ist_mail = MAIL_TOOL_NAMES.includes(name);
-    const ist_loeschung = name === DELETE_EVENT_TOOL;
+    // **Löscht er eine Mail, ist es kein Terminlöschvorgang – und trotzdem
+    // genauso unumkehrbar.** Beide brauchen denselben Rahmen, aber einen Text,
+    // der von der Sache handelt statt vom Kalender: „endgültig gelöscht" gilt
+    // für beides, „in Nextcloud lässt er sich nur von Hand wiederherstellen"
+    // nur für den Termin.
+    const loescht_mail = name === DELETE_EMAIL_TOOL;
+    const ist_loeschung = name === DELETE_EVENT_TOOL || loescht_mail;
     writeTarget.textContent = `${name}: ${preview.relative_path}`;
 
-    if (ist_loeschung) {
+    if (loescht_mail) {
+        writeScope.textContent =
+            'Diese Nachricht wird endgültig gelöscht. Es gibt keinen Papierkorb – '
+            + 'sie liegt danach weder hier noch beim Anbieter. Lies den Brief oben, bevor du bestätigst.';
+        writeSummary.textContent = `${preview.summary} – ${counts.removed} Zeilen werden entfernt`;
+    } else if (ist_loeschung) {
         // Beim Löschen gibt es keinen neuen Inhalt; das Fenster zeigt deshalb
         // genau das, was verschwindet.
         writeScope.textContent = 'Der Termin wird endgültig gelöscht. In Nextcloud lässt er sich nur von Hand wiederherstellen.';
@@ -6006,12 +6049,36 @@ async function runWriteCall(call, steps, working, label) {
     const name = call?.function?.name ?? 'unbekannt';
     const path = call?.function?.arguments?.path ?? '';
     const isEvent = CALENDAR_TOOL_NAMES.includes(name);
+    const loeschtMail = name === DELETE_EMAIL_TOOL;
     const decision = await requestWriteApproval(call, working);
 
     if (decision.previewError) {
-        const entry = addAgentStep(steps, call, decision.previewError);
-        entry.step.classList.add('agent-step-failed');
-        working.push({ role: 'tool', tool_name: name, content: decision.previewError });
+        // **Über `setAgentStepFehler`, nicht mit `addAgentStep`.** Das ist genau
+        // der Fall, für das die Funktion geschrieben wurde – ein gescheiterter
+        // Werkzeugaufruf, dessen Grund nirgends stand – und er lag an dieser
+        // Stelle am einzigen Weg vorbei: Der Schritt bekam den Text, aber weder
+        // die Fehlerfarbe noch das Aufklappen. Er sah damit aus wie ein
+        // Werkzeug, das nichts getan hat, und das Modell meldete dem Benutzer
+        // danach, der Vorgang sei erledigt. Ein zugklappter Fehler ist schlimmer
+        // als keiner, weil er den Fehler versteckt und trotzdem eine Antwort
+        // erscheinen lässt.
+        const entry = addAgentStep(steps, call, '');
+        setAgentStepFehler(entry, decision.previewError);
+
+        // **Und das Modell bekommt einen Satz, den es nicht als Erfolg lesen
+        // kann.** Im Chat hat es eben gesehen, dass der Schritt fehlschlug, und
+        // trotzdem „kann nun gelöscht werden" geschrieben. Der Grund war ein
+        // Nebensatz in einem langen Text. Hier steht er allein, und er sagt
+        // ausdrücklich, was der Benutzer sehen darf.
+        working.push({
+            role: 'tool',
+            tool_name: name,
+            content: `Der Vorgang wurde NICHT ausgeführt: ${decision.previewError}\n\n`
+                + 'Es wurde nichts verändert. **Sag dem Benutzer nicht, dass es '
+                + 'geschehen ist** – er sieht in diesem Chat, dass es nicht '
+                + 'geschehen ist. Nenne ihm die Meldung im Klartext und entscheide '
+                + 'dann, ob du es mit anderen Angaben noch einmal versuchst.',
+        });
         return;
     }
 
@@ -6045,15 +6112,49 @@ async function runWriteCall(call, steps, working, label) {
             // Die Leiste zeigt den neuen Termin gleich an, statt auf den
             // nächsten Abruf zu warten.
             aktualisiereKalender().catch((error) => console.error('Kalender:', error));
+        } else if (loeschtMail) {
+            // **Neuholen, nicht streichen – und keinen Rückgängig-Knopf.**
+            //
+            // `EXPUNGE` rückt alles hinter der gelöschten Nachricht um eine Nummer
+            // nach vorn. Eine Liste, in der man bloss die Zeile entfernt, hätte
+            // danach an jeder folgenden Zeile die falsche Nummer stehen – und der
+            // nächste Klick auf „als gelesen markieren" träfe die Nachricht
+            // daneben. Es gibt hier auch nichts rückgängig zu machen: Dieselbe
+            // Warnung steht in `loescheMail`, und ein Knopf, der eine endgültig
+            // gelöschte Mail zurückholte, wäre eine Lüge.
+            //
+            // Ist gerade ein Nachrichtenfenster offen, wird es geschlossen: Es
+            // stünde sonst über einer Nachricht, die es nicht mehr gibt. Am
+            // `close` hängt das Aufräumen – `offenKopf` und der scharfe
+            // Löschknopf –, deshalb hier nichts weiter.
+            if (mailMessageDialog.open) {
+                mailMessageDialog.close();
+            }
+            aktualisiereMail().catch((error) => console.error('Mail:', error));
         } else {
             addUndoAction(entry, path, label);
         }
 
         working.push({ role: 'tool', tool_name: name, content: output.content });
     } catch (error) {
-        setAgentStepResult(entry, `Fehler: ${error}`);
-        entry.step.classList.add('agent-step-failed');
-        working.push({ role: 'tool', tool_name: name, content: `Fehler: ${error}` });
+        // **Derselbe Weg wie oben** – und aus demselben Grund. Hier war der
+        // Benutzer schon auf „Bestätigen" geklickt, der Fehler kam also aus der
+        // Ausführung selbst. Ein zugklappter, blasser Schritt wäre hier
+        // doppelt falsch: Der Benutzer hat zugestimmt, und er sähe nicht, dass
+        // nichts geschehen ist.
+        setAgentStepFehler(entry, String(error));
+
+        // Und das Modell darf daraus keinen Erfolg machen. Dieselbe Warnung wie
+        // beim Vorschaufehler, weil es dieselbe Folge hat: Der Benutzer glaubt,
+        // die Mail sei weg, und sie ist noch da.
+        working.push({
+            role: 'tool',
+            tool_name: name,
+            content: `Der Vorgang wurde NICHT ausgeführt: ${error}\n\n`
+                + 'Der Benutzer hat ihn zwar freigegeben, er ist aber gescheitert – '
+                + 'es wurde nichts verändert. **Sag ihm nicht, dass es geschehen '
+                + 'ist.** Nenne die Meldung im Klartext.',
+        });
     }
 }
 
@@ -6090,14 +6191,17 @@ function updateAgentStepsHead() {
         return;
     }
 
+    // **Der Postfach-Umfang gibt alle fünf Werkzeuge**, unabhängig von
+    // `writeEnabled`: Senden und Löschen stehen nicht hinter dem Schalter, sie
+    // hinter ihrer eigenen Bestätigung. Die Zeile nennt deshalb, was es gibt,
+    // und nicht, was der Schalter gerade erlaubt.
+    //
     // **Im Postfach-Umfang gibt es kein Arbeitsverzeichnis**, und es wäre
     // doppelt falsch, eines zu nennen: Es gibt keins, und die Werkzeuge dort
     // schreiben nicht in Dateien. Vorher stand hier „in /tmp" unter einem
     // Werkzeugschritt, der eine Mail verschickt.
     if (agent.scope === 'mail') {
-        head.textContent = agent.writeEnabled
-            ? 'Postfach: lesen, Entwurf und Versand'
-            : 'Postfach: lesen und Entwurf';
+        head.textContent = 'Postfach: lesen, Entwurf, Versand und Löschen';
         return;
     }
 

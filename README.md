@@ -295,7 +295,7 @@ Alles im Chat, mit `/` beginnend. `/help` zeigt dieselbe Liste in der Anwendung.
 | `/scope` | zeigt oder stellt ein, wie weit das Modell reicht |
 | `/scope agent` | Dateiwerkzeuge im Arbeitsverzeichnis |
 | `/scope termine` | nur die vier Kalenderwerkzeuge, ohne Dateizugriff |
-| `/scope mail` | Postfach: lesen und Entwürfe; Senden nur mit Vorschau |
+| `/scope mail` | Postfach: lesen und Entwürfe; Senden und Löschen nur mit Vorschau, das Löschen ist endgültig |
 | `/agent` | Agentenmodus ein oder aus, nur lesende Werkzeuge |
 | `/agent-write` | schreibende Werkzeuge freigeben oder sperren |
 | `/agent-dir` | zeigt das Arbeitsverzeichnis des Agentenmodus |

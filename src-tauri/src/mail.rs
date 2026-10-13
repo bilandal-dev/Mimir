@@ -282,11 +282,20 @@ impl MailKonten {
 
     /// Das Konto, das unter diesem **Namen** bekannt ist.
     ///
-    /// Gesucht wird nach der Kennung *und* nach dem Anzeigenamen, case-insensitiv
-    /// und ohne Leerzeichen am Ende: Das Modell nennt „Gmail", der Benutzer
-    /// schreibt „gmail", und der Schlüsselbund kennt nur die Kennung. Wer alle
-    /// drei verlangen würde, bekäme bei einem Tippfehler eine Fehlermeldung, die
-    /// das eigentliche Problem nicht nennt.
+    /// Gesucht wird nach der Kennung, dem Anzeigenamen, dem Benutzernamen **und
+    /// der Absenderadresse**, case-insensitiv und ohne Leerzeichen am Ende: Das
+    /// Modell nennt „Gmail", der Benutzer schreibt „gmail", und der Schlüsselbund
+    /// kennt nur die Kennung. Wer alle vier verlangen würde, bekäme bei einem
+    /// Tippfehler eine Fehlermeldung, die das eigentliche Problem nicht nennt.
+    ///
+    /// **Die Absenderadresse gehört dazu, weil sie das ist, was das Modell am
+    /// häufigsten sieht.** Sie steht in jeder Zeile von `list_emails`, in jeder
+    /// Nachricht, die `read_email` liefert, und im Vorschaubild eines Entwurfs.
+    /// Ohne eigenen Kontonamen fällt der Anzeigename auf sie zurück – aber sobald
+    /// der Benutzer seinem Konto einen gibt („Privat"), ist sie nirgends mehr
+    /// auffindbar, obwohl sie die vertrauteste Bezeichnung ist, die das Modell
+    /// kennt. Genau daran scheitert dann ein Aufruf, der vollkommen
+    /// nachvollziehbar war.
     pub fn nach_bezeichnung(&self, was: &str) -> Option<&MailConfig> {
         let suche = was.trim().to_lowercase();
 
@@ -306,6 +315,11 @@ impl MailKonten {
                 self.konten
                     .iter()
                     .find(|konto| konto.username.trim().to_lowercase() == suche)
+            })
+            .or_else(|| {
+                self.konten
+                    .iter()
+                    .find(|konto| konto.absender().trim().to_lowercase() == suche)
             })
     }
 
@@ -1114,36 +1128,67 @@ pub mod werkzeug {
     pub const ENTWURF: &str = "draft_email";
     /// Sendet. **Verlangt immer eine Bestätigung.**
     pub const SENDEN: &str = "send_email";
+    /// Löscht eine Nachricht. **Verlangt immer eine Bestätigung**, weil es sie
+    /// nicht zurückgibt.
+    ///
+    /// **Derselbe Weg wie der Knopf in der Mailleiste** – `\Deleted` und
+    /// `EXPUNGE`, ohne Papierkorb. Ein zweiter Löschweg wäre einer, an dem sich
+    /// die beiden unterscheiden könnten; der Benutzer soll nicht merken müssen,
+    /// welchen von beiden er benutzt.
+    pub const LOESCHEN: &str = "delete_email";
 
-    pub const ALLE: &[&str] = &[LISTEN, LESEN, ENTWURF, SENDEN];
+    pub const ALLE: &[&str] = &[LISTEN, LESEN, ENTWURF, SENDEN, LOESCHEN];
 
     /// Das Argument, das ein Konto benennt.
     pub const KONTO: &str = "konto";
 
-    /// Ist es ein Werkzeug, das etwas nach außen gibt?
-    ///
-    /// **Wird nirgends im Programm gebraucht** – `crate::is_write_tool`
-    /// entscheidet das an einer Stelle, und zwei Stellen für dieselbe Frage
-    /// wären zwei, die auseinanderlaufen können. Der Test prüft beide gegen
-    /// dieselbe Absicht; das ist der Punkt.
-    #[allow(dead_code)]
-    pub fn schreibt_nach_aussen(name: &str) -> bool {
-        name == SENDEN
-    }
+/// **Ist es ein Werkzeug, das etwas nach außen gibt?**
+///
+/// **Wird nirgends im Programm gebraucht** – `crate::is_write_tool`
+/// entscheidet das an einer Stelle, und zwei Stellen für dieselbe Frage
+/// wären zwei, die auseinanderlaufen können. Der Test prüft beide gegen
+/// dieselbe Absicht; das ist der Punkt.
+#[allow(dead_code)]
+pub fn schreibt_nach_aussen(name: &str) -> bool {
+    name == SENDEN
+}
+
+/// **Vernichtet es etwas, das dem Benutzer gehört?**
+///
+/// Das Löschen geht nicht nach außen – die Mail war schon da. Es nimmt aber
+/// etwas weg, das nicht wiederkommt, und steht deshalb auf derselben Seite wie
+/// das Senden: an der Grenze, an der Mimir etwas Unumkehrbares tut.
+#[allow(dead_code)]
+pub fn vernichtet(name: &str) -> bool {
+    name == LOESCHEN
+}
 }
 
 /// Die Beschreibung des Konto-Arguments.
 ///
-/// **An allen vier Werkzeugen dieselbe.** Der Satz nennt ausdrücklich, was ohne
+/// **An allen fünf Werkzeugen dieselbe.** Der Satz nennt ausdrücklich, was ohne
 /// die Angabe passiert: Ein Weg, an dem das Modell ein Konto raten muss, ist ein
 /// Weg, an dem es das falsche nimmt.
+///
+/// **Und er sagt ausdrücklich, dass es weggelassen werden soll.** Das ist gegen
+/// die Gewohnheit – ein Feld mit einem Namen sieht nach etwas aus, das man
+/// füllt. Modelle füllen es daraufhin mit erfundenen Werten: „default" ist
+/// aufgetaucht, und der Aufruf daran ist an einer Meldung gescheitert, die das
+/// richtige Konto nannte – worauf das Modell die Meldung zwar zitierte, im
+/// nächsten Schritt aber wieder „default" schrieb.
+///
+/// Bei **einem** eingetragenen Postfach ist die Angabe nicht nur überflüssig,
+/// sondern die einzige Möglichkeit, den Vorgang zu verdrehen: Das Feld kann
+/// nichts erreichen, was nicht ohnehin gemeint wäre.
 fn konto_beschreibung() -> serde_json::Value {
     serde_json::json!({
         "type": "string",
         "description":
-            "Der Name des Kontos, aus dem gelesen oder aus dem gesendet wird. \
-             Ohne diese Angabe das Konto, das der Benutzer in der Mailleiste \
-             gewählt hat."
+            "**Lass dieses Feld weg, wenn der Benutzer nur ein Postfach hat** – \
+             dann wird das benutzt, das er gerade in der Mailleiste gewählt hat, \
+             und das ist in aller Regel das gemeinte. Nenne hier nur den Namen \
+             eines Postfachs aus der Anweisung; einen Namen erfinden ist schlimmer \
+             als gar keinen."
     })
 }
 
@@ -1179,12 +1224,69 @@ pub fn konto_aus_argumenten<'a>(
         return konten.aktiv_gefordert();
     }
 
-    konten.nach_bezeichnung(gewaehlt).ok_or_else(|| {
-        format!(
-            "Es gibt kein Mailkonto mit dem Namen „{gewaehlt}“. Vorhanden: {}",
-            konten.bezeichnungen()
-        )
-    })
+    // **Ein erfundener Name bei genau einem Konto bekommt einen anderen Rat als
+    // bei mehreren.** „Es gibt kein Konto mit dem Namen X" lässt offen, was
+    // stattdessen gilt; bei einem einzigen Konto ist die Antwort aber
+    // eindeutig, und die ist eine: **Lass das Feld weg.** Das ist der Fall, in
+    // dem Modelle Namen erfinden – und der, in dem die Meldung mit „default"
+    // nicht weitergeholfen hat, obwohl sie das richtige Konto nannte.
+    // **Erst nachsehen, dann reden.** Die Suche muss VOR der Sonderbehandlung für
+    // ein einzelnes Konto stehen. Sonst wäre jedes Argument abgelehnt – auch das
+    // richtige – und die Meldung nannte einen Namen, den man ihr gerade erst
+    // vorgehalten hat: *„Es gibt kein Konto mit dem Namen X. Eingerichtet ist
+    // genau eines: X“*. Genau das ist hier passiert, nachdem der Rat für erfundene
+    // Namen eingebaut wurde: Der Name stand in der Anweisung, das Modell nannte
+    // ihn, und er wurde abgelehnt.
+    if let Some(konto) = konten.nach_bezeichnung(gewaehlt) {
+        return Ok(konto);
+    }
+
+    // **Ein erfundener Name bei genau einem Konto bekommt einen anderen Rat als
+    // bei mehreren.** „Es gibt kein Konto mit dem Namen X" lässt offen, was
+    // stattdessen gilt; bei einem einzigen Konto ist die Antwort aber
+    // eindeutig, und sie ist eine: **Lass das Feld weg.** Das ist der Fall, in
+    // dem Modelle Namen erfinden – und der, in dem die Meldung mit „default"
+    // nicht weitergeholfen hat, obwohl sie das richtige Konto nannte.
+    //
+    // **Erst nach der Suche.** Der Zweig steht hinter
+    // [`MailKonten::nach_bezeichnung`] und nicht davor – sonst läge jeder
+    // Name daneben, auch der richtige.
+    if konten.konten.len() == 1 {
+        let einziges = konten.konten[0].anzeige_name();
+
+        return Err(format!(
+            "Es gibt kein Mailkonto mit dem Namen „{gewaehlt}“. Eingerichtet ist \
+             genau eines: „{einziges}“ – **lass `konto` einfach weg**, dann wird \
+             es benutzt. Den Namen „{gewaehlt}“ zu verwenden wäre geraten."
+        ));
+    }
+
+    Err(format!(
+        "Es gibt kein Mailkonto mit dem Namen „{gewaehlt}“. Vorhanden: {}",
+        konten.bezeichnungen()
+    ))
+}
+
+/// Liest die Nummer einer Nachricht aus den Werkzeugargumenten.
+///
+/// **Zahl oder Ziffernfolge.** Modelle schreiben dasselbe Feld mal als `1` und
+/// mal als `"1"` – je nach Laune und Vorlage. Ein Schema, das `integer` sagt,
+/// hält sie nicht davon ab, und `as_u64` fiele bei der Ziffernfolge still auf
+/// `None` zurück: Der Aufruf scheiterte an der Schreibweise und nicht an der
+/// Absicht. Beim Löschen ist das der Unterschied zwischen „gelöscht" und
+/// „Nachricht 1 gelöscht, allerdings die gar nicht".
+///
+/// **Beides führt zu derselben Zahl**, und die Grenze wird hier geprüft, weil
+/// sie hier billiger zu halten ist als an jeder Stelle, die aus einer Zahl
+/// brauchbarer Text machen muss.
+pub fn nummer_aus_argumenten(arguments: &serde_json::Value) -> Option<u32> {
+    let roh = match arguments.get("nummer") {
+        Some(serde_json::Value::Number(zahl)) => zahl.as_u64()?,
+        Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok()?,
+        _ => return None,
+    };
+
+    u32::try_from(roh).ok()
 }
 
 /// Das Schema für das Auflisten.
@@ -1294,8 +1396,21 @@ pub fn draft_email_schema() -> serde_json::Value {
 }
 
 /// Das Schema für das Senden.
+///
+/// **Es erbt die Felder vom Entwurf und setzt drei eigene Dinge: den Namen, den
+/// Empfänger als Pflichtfeld und die Beschreibung.** Der Name fehlte hier eine
+/// Weile – dadurch stand im Werkzeugsatz zweimal `draft_email`, einmal mit der
+/// Entwurfsbeschreibung und einmal mit dieser, und `send_email` kam gar nicht
+/// vor. Der Benutzer sah im Dialog „Wird übertragen", weil er den Namen erkannte
+/// statt weil er ihn gewählt hatte; gerufen hat `draft_email` alles, und das
+/// Schema, das hier steht, war tot.
 pub fn send_email_schema() -> serde_json::Value {
     let mut schema = draft_email_schema();
+
+    // **Der Name zuerst.** Alles andere an dieser Funktion setzt ein Feld der
+    // Vorlage um – und vergisst man den Namen, ist das Ergebnis ein zweiter
+    // Entwurf mit einem anderen Text und keinem anderen Namen.
+    schema["function"]["name"] = serde_json::json!(werkzeug::SENDEN);
 
     // **Hier ist der Empfänger wieder Pflicht.** `draft_email_schema` lässt ihn
     // weg, damit ein Entwurf an den Benutzer selbst gehen kann – dort ist das
@@ -1315,6 +1430,64 @@ pub fn send_email_schema() -> serde_json::Value {
     );
 
     schema
+}
+
+/// Das Schema für das Löschen.
+///
+/// **Endgültig, und der Satz steht im Schema, nicht nur in der Anweisung.** Das
+/// Schema ist die Stelle, an der das Modell vor dem Aufruf nachliest; eine
+/// Warnung, die nur in der Anweisung steht, fehlt genau dann, wenn das Modell
+/// ohnehin genau hinschaut – nämlich wenn es gerade vor dem gefährlichen
+/// Werkzeug steht. Deshalb steht hier, dass es keinen Papierkorb gibt.
+///
+/// **Die Nummer kommt aus `list_emails` oder aus `read_email`.** Beide nennen sie
+/// in ihrer Antwort, und diese Nummer ist das einzige, was die Nachricht
+/// eindeutig macht: Der Betreff ändert sich beim Antworten („AW: …"), und zwei
+/// Nachrichten teilen ihn sich.
+///
+/// **Der Betreff kommt nicht ins Löschen, und aus einem guten Grund:** Er wäre
+/// bequem, aber er ist keine Angabe, mit der man etwas sicher findet, und er
+/// wäre ein zweites Argument genau an der Stelle, an der ein geratenes am
+/// meisten schadet.
+pub fn delete_email_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": werkzeug::LOESCHEN,
+            "description":
+                "Löscht eine Nachricht aus dem eingestellten Postfach. **Das ist endgültig:** \
+                 Es gibt keinen Papierkorb, weder hier noch beim Anbieter – die Nachricht \
+                 ist danach weder hier noch in einem anderen Ordner auffindbar. Der Benutzer \
+                 sieht vorher die vollständige Nachricht und muss das Löschen bestätigen; \
+                 lehnt er ab, bleibt sie liegen.\n\n\
+                 **Die Nummer musst du einer Antwort entnehmen, niemals selbst erfinden.** \
+                 Sie steht in jeder Zeile von list_emails und in der ersten Zeile dessen, \
+                 was read_email zurückgibt. Sie zählt **alle** Nachrichten im Ordner, auch \
+                 die nicht angezeigten: Nr. 1 ist die älteste, nicht die neueste, und bei \
+                 einem gefüllten Postfach ist sie eine Nachricht von vor Jahren. Eine \
+                 geratene Nummer trifft eine fremde Nachricht – der Benutzer sieht sie im \
+                 Fenster und verliert eine Nachricht, die er behalten wollte.\n\n\
+                 Nimm delete_email nur, wenn der Benutzer ausdrücklich darum gebeten hat, \
+                 eine bestimmte Nachricht zu löschen: Für „weg damit“, „räum das auf“ oder \
+                 „lösch die ungelesenen“ ist es richtig, für Unbehagen über eine Mail nicht. \
+                 **Nach dem Löschen sind die Nummern aller Nachrichten danach neu** – für \
+                 einen weiteren Löschvorgang brauchst du also eine neue Liste aus list_emails.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    werkzeug::KONTO: konto_beschreibung(),
+                    "nummer": {
+                        "type": "integer",
+                        "description": "Die Nummer der Nachricht, **wörtlich aus list_emails \
+                                        oder read_email übernommen**. Nicht die Position in \
+                                        deiner Antwort, nicht die laufende Nummer eines Gesprächs \
+                                        und nicht geraten."
+                    }
+                },
+                "required": ["nummer"]
+            }
+        }
+    })
 }
 
 /// Die Anweisung an das Modell im Umfang „mail".
@@ -1378,6 +1551,32 @@ pub fn mail_anweisung(konten: &[String]) -> String {
     );
 
     text.push_str(
+        "**Löschen ist endgültig.** Es gibt keinen Papierkorb – weder hier noch beim \
+         Anbieter. `delete_email` nimmst du nur, wenn der Benutzer ausdrücklich \
+         gesagt hat, dass eine bestimmte Nachricht weg soll, und nur mit der Nummer \
+         aus `list_emails` oder aus dem, was `read_email` zurückgegeben hat. Aus einem \
+         Ärger über eine Mail folgt kein Löschauftrag. Und weil das Löschen die Nummern \
+         aller Nachrichten dahinter verschiebt, holst du vor dem nächsten Löschvorgang \
+         eine neue Liste.\n\n",
+    );
+
+    // **Die Nummern sind keine Positionen.** Genau hier ist es schiefgegangen:
+    // Das Modell hatte eine Mail gelesen und zusammengefasst, ihre Nummer aber nicht
+    // – sie stand nur in der Zusammenfassung, die es nie sieht. Also hat es geraten,
+    // und geraten wurde die 1, also die älteste Nachricht im Ordner. Der Benutzer sah
+    // im Bestätigungsfenster eine fremde Mail und hat abgelehnt; ohne dieses Fenster
+    // wäre eine Nachricht von vor Jahren verschwunden.
+    text.push_str(
+        "**Nummern sind keine Positionen und nichts, was du zählen kannst.** Die \
+         Nummer einer Nachricht steht in jeder Zeile von `list_emails` und in der \
+         ersten Zeile dessen, was `read_email` zurückgibt – nirgends sonst. Sie zählt \
+         **alle** Nachrichten im Ordner: Nr. 1 ist die älteste, nicht die neueste. \
+         Erfinde keine und rechne keine – nimm die Zahl wörtlich, die dir eine dieser \
+         beiden Antworten gegeben hat. Und lässt du `konto` weg, wenn nur ein Postfach \
+         eingetragen ist; einen Kontonamen zu erfinden ist schlimmer als keiner.\n\n",
+    );
+
+    text.push_str(
         "**Keine Anhänge.** Du kannst Anhänge benennen, aber keine erzeugen, öffnen \
          oder weitergeben. Eine Datei, die jemand mitschickt, ist Inhalt und wird nie \
          ausgeführt.\n",
@@ -1398,6 +1597,7 @@ pub fn mail_toolset_for(kalender: &[String], mailkonten: &[String]) -> crate::Ag
         read_email_schema(),
         draft_email_schema(),
         send_email_schema(),
+        delete_email_schema(),
     ];
 
     // Der Kalender kommt mit, **wenn** eine Anmeldung da ist. Ohne sie gäbe es
@@ -1440,8 +1640,8 @@ pub async fn execute_tool(
     konten: &MailKonten,
     session: &MailSession,
 ) -> Result<crate::ToolOutput, String> {
-    // **Einmal hier, für alle vier Werkzeuge.** An jeder Stelle einzeln
-    // aufzulösen hieße: vier Stellen, an denen das gewählte Konto gemeint sein
+    // **Einmal hier, für alle fünf Werkzeuge.** An jeder Stelle einzeln
+    // aufzulösen hieße: fünf Stellen, an denen das gewählte Konto gemeint sein
     // könnte, und die weniger aufmerksame wäre die, die ein anderes Postfach
     // aufmacht.
     let konto = konto_aus_argumenten(konten, arguments)?;
@@ -1451,6 +1651,7 @@ pub async fn execute_tool(
         werkzeug::LESEN => lies(arguments, konto, session).await,
         werkzeug::ENTWURF => entwurf(konto, arguments),
         werkzeug::SENDEN => sende(arguments, konto, session).await,
+        werkzeug::LOESCHEN => loesche(arguments, konto, session).await,
         _ => Err(format!("Unbekanntes Mailwerkzeug: {name}")),
     }
 }
@@ -1462,7 +1663,11 @@ async fn liste(
 ) -> Result<crate::ToolOutput, String> {
     let grenze = arguments
         .get("anzahl")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(|wert| match wert {
+            serde_json::Value::Number(zahl) => zahl.as_u64(),
+            serde_json::Value::String(text) => text.trim().parse::<u64>().ok(),
+            _ => None,
+        })
         .map(|n| (n as usize).clamp(1, config.anzeige_grenze()))
         .unwrap_or_else(|| config.anzeige_grenze());
 
@@ -1511,25 +1716,42 @@ async fn lies(
     config: &MailConfig,
     session: &MailSession,
 ) -> Result<crate::ToolOutput, String> {
-    let nummer = arguments
-        .get("nummer")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| "Welche Nachricht soll gelesen werden? Nenne ihre Nummer.".to_string())?
-        as u32;
+    let nummer = nummer_aus_argumenten(arguments)
+        .ok_or_else(|| "Welche Nachricht soll gelesen werden? Nenne ihre Nummer.".to_string())?;
 
     let nachricht = crate::mail::imap_text(config, session, nummer).await?;
 
     Ok(crate::ToolOutput::new(
-        format!(
-            "Von: {}\nAn: {}\nBetreff: {}\nDatum: {}\n\n{}",
-            nachricht.kopf.absender,
-            nachricht.an,
-            nachricht.kopf.betreff,
-            nachricht.kopf.datum,
-            nachricht.text
-        ),
-        format!("Nachricht {}", nummer),
+        gelesen_text(&nachricht, nummer),
+        format!("Nachricht Nr. {nummer}"),
     ))
+}
+
+/// Der Text, den `lies` dem Modell zurückgibt.
+///
+/// **Die Nummer steht in der ersten Zeile.** Das ist der ganze Grund, warum es
+/// diese Funktion gibt: Das Modell sieht ausschließlich den Inhalt – die
+/// Zusammenfassung geht in den Chip der Oberfläche und erreicht es nie. Ohne die
+/// Nummer hatte es nach dem Lesen eine Mail vor sich und **keine Ahnung, welche
+/// es war**; es musste sie raten, und es ratete die 1, weil 1 die vertrauteste
+/// Zahl ist. Dann kam ein Löschaufruf zustande, der eine uralte Nachricht meinte.
+///
+/// „Fasse das zusammen" und „lösch sie danach" sind zwei Aufrufe an **dieselbe**
+/// Nachricht. Dass das überhaupt möglich ist, setzt voraus, dass das Modell nach
+/// dem Lesen weiß, welche es war.
+///
+/// **Vor dem Brief, nicht unter ihm.** Das Modell liest von oben, und eine
+/// Fußzeile unter einem langen Text wird nicht mehr mit der Kopfzeile darüber
+/// verbunden – sie gehört dann zu gar nichts mehr.
+fn gelesen_text(nachricht: &imap::NachrichtVoll, nummer: u32) -> String {
+    format!(
+        "Nachricht Nr. {nummer}.\n\nVon: {}\nAn: {}\nBetreff: {}\nDatum: {}\n\n{}",
+        nachricht.kopf.absender,
+        nachricht.an,
+        nachricht.kopf.betreff,
+        nachricht.kopf.datum,
+        nachricht.text
+    )
 }
 
 /// Der Entwurf. **Es wird nichts gesendet** – es geht ein Text an das Modell
@@ -1633,6 +1855,50 @@ async fn sende(
             vorhaben.kuerze_empfaenger()
         ),
         format!("Mail an {}", vorhaben.kuerze_empfaenger()),
+    ))
+}
+
+/// Löscht eine Nachricht. **Derselbe Aufruf wie der Knopf in der Leiste**.
+///
+/// **Der Kopf wird vorher geholt, und zwar über `imap_text` – denselben Weg wie
+/// `lies`.** Es gibt keinen Abruf, der nur den Kopf holt; einen zweiten dafür zu
+/// bauen hieße, zwei Wege zu haben, an denen die Server sich unterschieden
+/// verhalten könnten. Der Text kommt also mit – der Aufwand fällt weg, weil er
+/// in der Vorschau ohnehin geholt wurde.
+///
+/// **Trotzdem wird er nicht mitgeschickt.** Das Ergebnis an das Modell nennt
+/// Betreff und Absender: genug, damit es in einem mehrstufigen Zug prüfen kann,
+/// ob der richtige Postfachvorgang gemeint war. Der Text stünde ein zweites Mal
+/// im Kontext und wäre reines Ballast.
+async fn loesche(
+    arguments: &serde_json::Value,
+    config: &MailConfig,
+    session: &MailSession,
+) -> Result<crate::ToolOutput, String> {
+    let nummer = nummer_aus_argumenten(arguments).ok_or_else(|| {
+        "Welche Nachricht soll gelöscht werden? Nenne ihre Nummer aus list_emails.".to_string()
+    })?;
+
+    // **Vorher der Kopf, damit die Meldung danach etwas sagen kann.**
+    let nachricht = crate::mail::imap_text(config, session, nummer).await?;
+
+    crate::mail::imap_loeschen(config, session, nummer).await?;
+
+    Ok(crate::ToolOutput::new(
+        format!(
+            "Endgültig gelöscht: „{}“ von {} ({}), vorher Nr. {} im Ordner „{}“.\n\n\
+             Es gibt keinen Papierkorb – die Nachricht ist weder hier noch beim \
+             Anbieter wieder auffindbar. **Die Nummern der Nachrichten dahinter \
+             sind jetzt um eins kleiner**: Für einen weiteren Löschvorgang, oder \
+             um etwas anderes zu nennen, brauchst du eine neue Liste aus \
+             list_emails.",
+            nachricht.kopf.betreff,
+            nachricht.kopf.absender,
+            nachricht.kopf.datum,
+            nummer,
+            config.ordner(),
+        ),
+        format!("Nachricht {} gelöscht", nummer),
     ))
 }
 

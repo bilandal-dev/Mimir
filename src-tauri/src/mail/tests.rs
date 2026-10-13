@@ -566,7 +566,333 @@ fn ohne_konten_gibt_es_die_schuetzende_antwort() {
     assert!(leer.aktiv_gefordert().is_err());
 }
 
-/// **Alle vier Mailwerkzeuge nehmen ein Konto entgegen.** An einem einzigen
+/// **Die Nummer wird auch dann gelesen, wenn sie als Text kommt.**
+///
+/// Modelle schreiben dasselbe Feld mal als `1` und mal als `"1"`. `as_u64`
+/// fiel bei der Ziffernfolge still auf `None` zurück, und der Aufruf scheiterte
+/// an der Schreibweise statt an der Absicht. Beim Löschen ist das der
+/// Unterschied zwischen „gelöscht" und „Nachricht 1 gelöscht, allerdings die
+/// gar nicht" – die Nachricht mit dieser Nummer wurde nie angetastet.
+#[test]
+fn die_nummer_wird_auch_als_text_gelesen() {
+    for argumente in [
+        serde_json::json!({ "nummer": 7 }),
+        serde_json::json!({ "nummer": "7" }),
+        serde_json::json!({ "nummer": " 7 " }),
+    ] {
+        assert_eq!(nummer_aus_argumenten(&argumente), Some(7), "{argumente}");
+    }
+
+    // Und was keine Nummer ist, bleibt draußen – mit Grenze in beide Richtungen.
+    for argumente in [
+        serde_json::json!({}),
+        serde_json::json!({ "nummer": null }),
+        serde_json::json!({ "nummer": "" }),
+        serde_json::json!({ "nummer": "sieben" }),
+        serde_json::json!({ "nummer": 1.5 }),
+        serde_json::json!({ "nummer": -1 }),
+        serde_json::json!({ "nummer": u64::MAX }),
+    ] {
+        assert_eq!(nummer_aus_argumenten(&argumente), None, "{argumente}");
+    }
+}
+
+/// **Das Konto ist auch unter seiner Absenderadresse erreichbar.**
+///
+/// Die Adresse steht in jeder Zeile von `list_emails` und in jeder Nachricht, die
+/// `read_email` liefert – sie ist die vertrauteste Bezeichnung, die das Modell
+/// hat. Ohne eigenen Kontonamen wird sie ohnehin über den Anzeigenamen gefunden;
+/// sobald der Benutzer seinem Konto einen Namen gibt, ist sie es sonst nirgends
+/// mehr, und ein völlig nachvollziehbarer Aufruf scheitert an einer Angabe, die
+/// das Modell sich aus der Postfachliste abgelesen hat.
+#[test]
+fn das_konto_ist_auch_unter_seiner_absenderadresse_erreichbar() {
+    let konten = MailKonten {
+        konten: vec![MailConfig {
+            id: "konto-1".to_string(),
+            name: "Privat".to_string(),
+            username: "kai.weg".to_string(),
+            address: "kai.weg@example.org".to_string(),
+            ..MailConfig::default()
+        }],
+        aktiv: "konto-1".to_string(),
+    };
+
+    for bezeichnung in [
+        "konto-1",
+        "Privat",
+        "privat",
+        "kai.weg",
+        "kai.weg@example.org",
+        "KAI.WEG@EXAMPLE.ORG",
+        "  privat  ",
+    ] {
+        assert!(
+            konten.nach_bezeichnung(bezeichnung).is_some(),
+            "nicht gefunden: {bezeichnung}"
+        );
+    }
+
+    assert!(konten.nach_bezeichnung("kai@example.org").is_none());
+}
+
+/// **Eine gelesene Nachricht nennt ihre Nummer – im Inhalt, nicht nur in der
+/// Zusammenfassung.**
+///
+/// Genau daran ist das Löschen gescheitert. Das Modell hatte eine Mail gelesen
+/// und zusammengefasst; ihre Nummer stand in der `summary`, und die sieht nur
+/// die Oberfläche. Also hat es geraten – und die 1 geraten, also die älteste
+/// Nachricht im Ordner. Der Benutzer sah im Bestätigungsfenster eine fremde Mail
+/// und hat abgelehnt.
+///
+/// „Zusammenfassen" und „dann löschen" sind zwei Aufrufe an **dieselbe**
+/// Nachricht. Dass das überhaupt möglich ist, setzt voraus, dass das Modell nach
+/// dem Lesen weiß, welche es war.
+#[test]
+fn eine_gelesene_nachricht_nennt_ihre_nummer() {
+    let nachricht = imap::NachrichtVoll {
+        kopf: imap::NachrichtKopf {
+            nummer: 1187,
+            absender: "diggingthegreats@creator.patreon.com".to_string(),
+            betreff: "Were the 90s Actually Better?".to_string(),
+            datum: "Mi, 01 Okt 2026".to_string(),
+            gelesen: false,
+            bytes: 812,
+            vorschau: String::new(),
+        },
+        an: "bilandal.dev@gmail.com".to_string(),
+        cc: String::new(),
+        text: "Viel Dank für die Informations-Mail.".to_string(),
+        anhaenge: Vec::new(),
+        message_id: String::new(),
+        markierungsfehler: None,
+    };
+
+    let text = gelesen_text(&nachricht, 1187);
+
+    assert!(text.contains("Nr. 1187"), "{text}");
+    // Und sie steht **vor** dem Brief: Das Modell liest von oben, und eine Zahl
+    // unter einem langen Text wird nicht mehr mit der Kopfzeile darüber
+    // verbunden – sie gehört dann zu gar nichts mehr.
+    assert!(
+        text.find("Nr. 1187") < text.find("Viel Dank"),
+        "die Nummer steht hinter dem Brief:\n{text}"
+    );
+    // Und der Brief selbst ist vollständig, sonst wäre das um den Preis der
+    // Nummer erkauft.
+    for teil in ["diggingthegreats@creator.patreon.com", "Were the 90s Actually Better?"] {
+        assert!(text.contains(teil), "{teil} fehlt:\n{text}");
+    }
+}
+
+/// **Ein erfundener Kontoname wird bei einem einzigen Konto anders beantwortet
+/// als bei mehreren.** Aufgetaucht ist „default": Das Modell schrieb es in einen
+/// Löschaufruf, bekam „Es gibt kein Mailkonto mit dem Namen 'default'. Vorhanden:
+/// bilandal.dev@gmail.com" – zitierte die Meldung im nächsten Schritt wortgetreu
+/// und schrieb trotzdem wieder „default".
+///
+/// Die Meldung nannte also das richtige Konto und half trotzdem nicht, weil sie
+/// offenließ, was stattdessen zu tun ist. Bei einem einzigen Konto ist die
+/// Antwort eindeutig, und sie ist eine: **weglassen.**
+#[test]
+fn ein_erfundenes_konto_bekommt_bei_einem_konto_den_ausweg() {
+    let konten = MailKonten {
+        konten: vec![MailConfig {
+            id: "konto-1".to_string(),
+            username: "bilandal.dev@gmail.com".to_string(),
+            address: "bilandal.dev@gmail.com".to_string(),
+            ..MailConfig::default()
+        }],
+        aktiv: "konto-1".to_string(),
+    };
+
+    let fehler = konto_aus_argumenten(&konten, &serde_json::json!({ "konto": "default" }))
+        .expect_err("default gibt es nicht");
+
+    assert!(fehler.contains("default"), "{fehler}");
+    // Der Ausweg steht drin – ohne ihn nennt die Meldung nur das Problem.
+    assert!(
+        fehler.contains("weg") && fehler.to_lowercase().contains("konto"),
+        "die Meldung sagt nicht, was zu tun ist: {fehler}"
+    );
+    assert!(
+        fehler.contains("bilandal.dev@gmail.com"),
+        "die Meldung nennt das richtige Konto nicht: {fehler}"
+    );
+
+    // **Bei zwei Konten bleibt die Meldung die andere**: Dort ist „weglassen"
+    // falsch, weil damit das falsche Postfach gemeint sein könnte.
+    let zwei = MailKonten {
+        konten: vec![
+            MailConfig {
+                id: "konto-1".to_string(),
+                username: "a@example.org".to_string(),
+                ..MailConfig::default()
+            },
+            MailConfig {
+                id: "konto-2".to_string(),
+                username: "b@example.org".to_string(),
+                ..MailConfig::default()
+            },
+        ],
+        aktiv: "konto-1".to_string(),
+    };
+
+    let fehler = konto_aus_argumenten(&zwei, &serde_json::json!({ "konto": "default" }))
+        .expect_err("default gibt es nicht");
+
+    assert!(fehler.contains("Vorhanden"), "{fehler}");
+    assert!(
+        !fehler.contains("lass `konto` einfach weg"),
+        "bei zwei Konten wäre der Ausweg falsch: {fehler}"
+    );
+}
+
+/// **Ein Konto mit einem einzigen Eintrag nimmt trotzdem seinen Namen an.**
+///
+/// Der Sonderrat für erfundene Namen war zuerst **vor** die Suche gesetzt. Damit
+/// wurde bei genau einem Konto *jedes* Argument abgelehnt – auch das richtige –
+/// und die Meldung las sich wie eine Kette: „Es gibt kein Mailkonto mit dem
+/// Namen ‚bilandal.dev@gmail.com'. Eingerichtet ist genau eines: ‚bilandal.dev@gmail.com'".
+/// Die Antwort auf die Frage war in der Antwort enthalten.
+///
+/// Der Test dafür ist genau der, der oben fehlt: Der erste prüft den *falschen*
+/// Namen und war grün, während das *richtige* danebenlag. Beide gehören in eine
+/// Prüfung, weil sie dieselbe Funktion von zwei Seiten nehmen.
+#[test]
+fn ein_einzelnes_konto_nimmt_seinen_eigenen_namen_an() {
+    let konten = MailKonten {
+        konten: vec![MailConfig {
+            id: "konto-1".to_string(),
+            username: "bilandal.dev@gmail.com".to_string(),
+            address: "bilandal.dev@gmail.com".to_string(),
+            ..MailConfig::default()
+        }],
+        aktiv: "konto-1".to_string(),
+    };
+
+    // Jede Bezeichnung, unter der das Konto bekannt ist, muss auch als Argument
+    // durchgehen – bei einem Konto genauso wie bei mehreren.
+    for bezeichnung in [
+        "konto-1",
+        "bilandal.dev@gmail.com",
+        "Bilandal.Dev@Gmail.com",
+        "  bilandal.dev@gmail.com  ",
+    ] {
+        assert!(
+            konto_aus_argumenten(&konten, &serde_json::json!({ "konto": bezeichnung })).is_ok(),
+            "das eigene Konto wurde unter „{bezeichnung}“ abgelehnt"
+        );
+    }
+
+    // Und ohne Argument ist es das gewählte.
+    assert!(konto_aus_argumenten(&konten, &serde_json::json!({})).is_ok());
+
+    // **Nur der erfundene Name fällt durch – mit dem Rat, wegzulassen.**
+    let fehler = konto_aus_argumenten(&konten, &serde_json::json!({ "konto": "default" }))
+        .expect_err("default gibt es nicht");
+    assert!(fehler.contains("lass `konto` einfach weg"), "{fehler}");
+}
+
+/// **Dasselbe bei mehreren Konten** – sonst repariert man den einen Fehler und
+/// baut den anderen.
+#[test]
+fn ein_richtiger_kontoname_wird_auch_bei_mehreren_gefunden() {
+    let zwei = MailKonten {
+        konten: vec![
+            MailConfig {
+                id: "konto-1".to_string(),
+                username: "a@example.org".to_string(),
+                ..MailConfig::default()
+            },
+            MailConfig {
+                id: "konto-2".to_string(),
+                username: "b@example.org".to_string(),
+                ..MailConfig::default()
+            },
+        ],
+        aktiv: "konto-1".to_string(),
+    };
+
+    for (bezeichnung, erwartet) in [
+        ("konto-2", "konto-2"),
+        ("b@example.org", "konto-2"),
+    ] {
+        let konto = konto_aus_argumenten(&zwei, &serde_json::json!({ "konto": bezeichnung }))
+            .unwrap_or_else(|fehler| panic!("„{bezeichnung}“ abgelehnt: {fehler}"));
+        assert_eq!(konto.id, erwartet);
+    }
+}
+
+/// **Das Schema sagt, dass `konto` weggelassen werden soll.** Ein Feld mit einem
+/// Namen sieht nach etwas aus, das man füllt, und Modelle füllen es – mit
+/// erfundenen Werten, wenn keine zur Wahl stehen.
+#[test]
+fn das_konto_argument_sagt_dass_es_weggehoert() {
+    let beschreibung = konto_beschreibung()["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        beschreibung.contains("weg") && beschreibung.contains("Postfach"),
+        "{beschreibung}"
+    );
+    assert!(
+        beschreibung.contains("erfinden"),
+        "die Beschreibung warnt nicht vor erfundenen Namen: {beschreibung}"
+    );
+}
+
+/// **Das Schema sagt, dass Nummern nicht zu raten sind, und dass 1 die älteste
+/// ist.** Beides hat das Modell nicht getan: Es hat die 1 geraten, und die 1 ist
+/// bei einem gefüllten Postfach eine Nachricht von vor Jahren.
+#[test]
+fn das_loeschschema_warnt_vor_geratenen_nummern() {
+    let schema = delete_email_schema();
+    let beschreibung = schema["function"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let nummer = schema["function"]["parameters"]["properties"]["nummer"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(
+        beschreibung.contains("älteste"),
+        "das Schema sagt nicht, dass Nr. 1 die älteste ist: {beschreibung}"
+    );
+    assert!(
+        beschreibung.contains("erfinden") || nummer.contains("nicht geraten"),
+        "weder Schema noch Feld sagen, dass die Nummer nicht geraten wird"
+    );
+    // Und beide nennen die Quelle, aus der die Zahl stammt.
+    for quelle in [&beschreibung, &nummer] {
+        assert!(
+            quelle.contains("list_emails") && quelle.contains("read_email"),
+            "die Quelle der Nummer steht nicht dabei: {quelle}"
+        );
+    }
+}
+
+/// **Die Anweisung sagt dasselbe.** Das Schema ist die Stelle, an der das Modell
+/// unmittelbar vor dem Aufruf nachliest – aber nur, wenn es dort auch
+/// hinschaut. Für eine Regel, die einen ganzen Zug über-spannt, ist die
+/// Anweisung die richtige Stelle.
+#[test]
+fn die_anweisung_sagt_dass_nummern_keine_positionen_sind() {
+    let anweisung = mail_anweisung(&["bilandal.dev@gmail.com".to_string()]);
+
+    assert!(anweisung.contains("älteste"), "{anweisung}");
+    assert!(anweisung.contains("Positionen"), "{anweisung}");
+    assert!(
+        anweisung.contains("konto") && anweisung.contains("erfinden"),
+        "die Anweisung sagt nicht, dass Kontonamen nicht erfunden werden: {anweisung}"
+    );
+}
+
+/// **Alle fünf Mailwerkzeuge nehmen ein Konto entgegen.** An einem einzigen
 /// fehlenden könnte ein Modell nicht raten, welches Postfach gemeint ist.
 #[test]
 fn jedes_mailwerkzeug_nimmt_ein_konto_entgegen() {
@@ -575,7 +901,14 @@ fn jedes_mailwerkzeug_nimmt_ein_konto_entgegen() {
         read_email_schema(),
         draft_email_schema(),
         send_email_schema(),
+        delete_email_schema(),
     ];
+
+    assert_eq!(
+        schemata.len(),
+        werkzeug::ALLE.len(),
+        "die Liste der Werkzeugnamen und die der Schemata laufen auseinander"
+    );
 
     for schema in schemata {
         let name = schema["function"]["name"].as_str().unwrap_or_default();
@@ -593,6 +926,121 @@ fn jedes_mailwerkzeug_nimmt_ein_konto_entgegen() {
             "{name} sagt nicht, was ohne die Angabe gilt: {beschreibung}"
         );
     }
+}
+
+/// **Jedes Schema kommt im Werkzeugsatz vor, und keines zu viel.** Ein Werkzeug,
+/// das es im Satz nicht gibt, kann das Modell nicht benutzen; eines, das nur im
+/// Satz steht, existiert nicht – und genau daran scheitert der Aufruf später
+/// mit einer Meldung, die niemand versteht.
+///
+/// **Und keiner kommt zweimal vor.** Das ist keine Feinheit: `send_email_schema`
+/// erbt vom Entwurf und überschreibt drei Felder. Überschreibt es den Namen
+/// nicht, steht im Satz zweimal `draft_email` – einmal mit der Entwurfs- und
+/// einmal mit der Versandbeschreibung –, und `send_email` fehlt ganz. Das Modell
+/// kann dann nur noch entwerfen; das Schema, das die Oberfläche als Versand
+/// erkennt, erreicht es nie.
+#[test]
+fn der_postfachumfang_bietet_alle_fuenf_werkzeuge() {
+    let toolset = mail_toolset_for(&[], &["Privat".to_string()]);
+    let namen: Vec<&str> = toolset
+        .tools
+        .iter()
+        .filter_map(|werkzeug| werkzeug["function"]["name"].as_str())
+        .collect();
+
+    assert_eq!(namen.len(), 5, "{namen:?}");
+    for erwartet in werkzeug::ALLE {
+        assert!(namen.contains(erwartet), "fehlt: {erwartet} ({namen:?})");
+    }
+
+    let mut eigene = namen.clone();
+    eigene.sort_unstable();
+    eigene.dedup();
+    assert_eq!(
+        eigene.len(),
+        namen.len(),
+        "ein Name kommt mehrfach vor: {namen:?}"
+    );
+}
+
+/// **Das Versandschema trägt seinen Namen – und nicht den des Entwurfs.**
+/// Siehe `der_postfachumfang_bietet_alle_fuenf_werkzeuge`: Genau an dieser
+/// Stelle ist der Name verlorengegangen.
+#[test]
+fn das_versandschema_heisst_send_email() {
+    assert_eq!(send_email_schema()["function"]["name"], werkzeug::SENDEN);
+}
+
+/// **Das Löschschema verlangt die Nummer.** Ohne sie ginge nichts löschbar: Die
+/// Nummer ist die einzige Angabe, die eine Nachricht eindeutig macht – der
+/// Betreff ändert sich beim Antworten, und zwei Nachrichten teilen ihn sich.
+#[test]
+fn das_loeschen_verlangt_die_nummer_der_nachricht() {
+    let schema = delete_email_schema();
+
+    assert_eq!(schema["function"]["name"], werkzeug::LOESCHEN);
+    let parameter = &schema["function"]["parameters"];
+    assert_eq!(parameter["required"], serde_json::json!(["nummer"]));
+    assert_eq!(parameter["properties"]["nummer"]["type"], "integer");
+    // **Kein Betreff, kein Absender.** Was nicht im Aufruf steht, kann das Diff
+    // im Bestätigungsfenster nicht zeigen – und der Benutzer soll dort genau das
+    // sehen, was gelöscht wird, nicht das, was das Modell über es behauptet.
+    assert!(
+        parameter["properties"].get("betreff").is_none(),
+        "der Betreff gehört nicht ins Löschen: {}",
+        parameter["properties"]
+    );
+}
+
+/// **Der Papierkorb steht im Schema, nicht nur in der Anweisung.** Das Schema
+/// ist die Stelle, an der das Modell unmittelbar vor dem Aufruf nachliest – und
+/// eine Warnung, die nur in der Anweisung steht, fehlt genau dann, wenn es
+/// ohnehin hinschaut: wenn es gerade vor dem gefährlichen Werkzeug steht.
+#[test]
+fn das_loeschen_sagt_im_schema_dass_es_endgueltig_ist() {
+    let beschreibung = delete_email_schema()["function"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    assert!(beschreibung.contains("endgültig"), "{beschreibung}");
+    assert!(beschreibung.contains("Papierkorb"), "{beschreibung}");
+    // Und die Folge, die das Modell sonst erst nach dem Schaden lernt: Die
+    // Nummern verschieben sich.
+    assert!(
+        beschreibung.contains("Nummern") && beschreibung.contains("neu"),
+        "das Verschieben der Nummern steht nicht dabei: {beschreibung}"
+    );
+}
+
+/// **Löschen ist ein Schreibvorgang, und zwar einer, der endgültig ist.** Es geht
+/// nichts nach außen – die Mail war schon da – aber es nimmt etwas weg, das
+/// nicht wiederkommt. Deshalb steht es auf derselben Seite wie das Senden.
+#[test]
+fn loeschen_ist_ein_schreibvorgang() {
+    assert!(crate::is_write_tool(werkzeug::LOESCHEN));
+    assert!(werkzeug::vernichtet(werkzeug::LOESCHEN));
+    // **Und es geht nicht nach aussen**, sonst hätte man es mit dem Entwurf
+    // verwechseln können, der nur im Chat erscheint.
+    assert!(!werkzeug::schreibt_nach_aussen(werkzeug::LOESCHEN));
+    assert!(!werkzeug::vernichtet(werkzeug::SENDEN));
+    assert!(!werkzeug::schreibt_nach_aussen(werkzeug::ENTWURF));
+}
+
+/// **Die Anweisung sagt, dass das Löschen endgültig ist, und wann es erlaubt
+/// ist.** Ohne den zweiten Satz läse sich das Werkzeug als Erledigung eines
+/// Ärgers – und das ist genau der Aufruf, bei dem etwas endgültig verschwindet,
+/// das man noch braucht.
+#[test]
+fn die_anweisung_waegt_das_loeschen_ab() {
+    let anweisung = mail_anweisung(&["Privat".to_string()]);
+
+    assert!(anweisung.contains(werkzeug::LOESCHEN), "{anweisung}");
+    assert!(anweisung.contains("Papierkorb"), "{anweisung}");
+    assert!(
+        anweisung.contains("ausdrücklich"),
+        "es steht nicht da, wann gelöscht werden darf: {anweisung}"
+    );
 }
 
 /// Die Anweisung nennt die Konten. **Ohne Namen kann das Modell eines raten.**

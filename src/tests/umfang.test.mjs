@@ -190,6 +190,38 @@ gleich(
   /\/scope agent/.test(postfachtext) && /\/scope termine/.test(postfachtext),
   true,
 );
+// **Und das Löschen steht nicht als Nebensatz da.** Der Umfang nennt jetzt fünf
+// Werkzeuge, und eines davon nimmt etwas endgültig weg. Ein Text, der es
+// verschweigt, wäre nicht vollständig – der Benutzer erfährt erst am
+// Bestätigungsfenster davon, und bis dahin hat er das Modell gefragt, sein Postfach
+// zu räumen.
+gleich(
+  'und nennt das Löschen',
+  /löschen/.test(postfachtext),
+  true,
+);
+gleich(
+  'und sagt, dass das Löschen endgültig ist',
+  /endgültig/.test(postfachtext) && /keinen Papierkorb/.test(postfachtext),
+  true,
+);
+
+// **Und die Oberfläche weiss, dass es das Werkzeug gibt.** Steht es nicht in
+// `WRITE_TOOL_NAMES`, erscheint `delete_email` als lesendes Werkzeug mit einem
+// kleinen Bestätigungsfenster, in dem nur `nummer` steht – der Benutzer
+// bestätigt dann das Löschen einer Mail, deren Betreff er nie gesehen hat.
+const listen = ['MAIL_TOOL_NAMES', 'WRITE_TOOL_NAMES']
+  .map((name) => {
+    const treffer = src.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
+    return treffer ? treffer[0] : '';
+  })
+  .join('\n');
+gleich('das Löschwerkzeug steht in beiden Listen', /DELETE_EMAIL_TOOL/.test(listen), true);
+gleich(
+  'und DELETE_EMAIL_TOOL ist der echte Werkzeugname',
+  /const DELETE_EMAIL_TOOL = 'delete_email';/.test(src),
+  true,
+);
 
 // **Und es steht in der Hilfe.** Ein Umfang, den man nicht benennen kann, ist
 // einer, den man nicht abschalten kann, wenn er gerade im Weg ist.

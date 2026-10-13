@@ -47,7 +47,13 @@ Neben dem Sitzungsschalter gibt es den **Umfang**, der angibt, welche Werkzeuge 
 |---|---|---|
 | `agent` (Vorgabe) | die drei lesenden, dazu die freigegebenen schreibenden, dazu der Kalender bei Anmeldung | nötig |
 | `termine` | ausschließlich die vier Kalenderwerkzeuge | nicht nötig |
-| `mail` | ausschließlich die Mailwerkzeuge | nicht nötig |
+| `mail` | ausschließlich die fünf Mailwerkzeuge | nicht nötig |
+
+**In `termine` und `mail` gibt es keinen Schalter.** Der Umfang selbst gibt die
+Werkzeuge frei, und ein Schalter, der hier nichts ändern würde, wäre eine Anzeige
+ohne Wirkung. Das heißt auch: `send_email` und `delete_email` sind **nicht**
+hinter `/agent-write` versteckt – sie stehen hinter ihrer eigenen Bestätigung, im
+selben Fenster wie ein Termin und eine Datei.
 
 **Ein Umfang schließt die anderen aus.** Das ist der Punkt: Wer Dateiwerkzeuge
 haben will, bekommt **keine** Mailwerkzeuge, und umgekehrt. Der Grund ist der

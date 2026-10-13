@@ -469,6 +469,20 @@ Geprüft wird nicht die Anzeige, sondern diese drei Zusagen: Der Abruf läuft **
 
 Zwei Fehler, die erst dadurch sichtbar wurden, sind im Rust-Teil festgehalten: Eine schweigende Leitung bricht nach einer Frist ab (`ein_server_der_schweigt_bricht_ab_statt_zu_warten`), und der Text einer Nachricht wird erst **nach** der Ordnerauswahl geholt (`der_text_wird_erst_nach_der_ordnerauswahl_geholt`). Letzteres war die Ursache für „Der Mailserver hat den Befehl nicht verstanden": Die Verbindung war angemeldet, aber es war kein Ordner ausgewählt, und genau diesen Zustand prüft kein Test, der nur den Abruf am Ende betrachtet.
 
+## Einen gescheiterten Werkzeugaufruf prüfen
+
+Weil ein Fehler, den niemand sieht, zu einem Erfolg wird, von dem niemand weiß, dass er keiner ist:
+
+```bash
+node src/tests/werkzeugfehler.test.mjs
+```
+
+Der Fehler, den das verhindert, ist beim Löschen einer Mail passiert. `delete_email` schlug fehl – sehr wahrscheinlich aus dem einfachen Grund, dass Mimir nach dem Neustart am Mailserver **nicht angemeldet** war, denn `MailSession` hält die Passwörter nur im Speicher (`mail.rs`) – und im Chat stand ein **zugeklappter** Schritt in blassem Grau. Der Benutzer sah ein Werkzeug, das nichts getan hatte. Das Modell bekam den Fehlertext korrekt zurück, schrieb aber trotzdem „Die E-Mail kann nun gelöscht werden“ und legte den Aufruf als JSON hin.
+
+Geprüft werden drei Zusagen, alle drei an derselben Stelle: Ein gescheiterter Schritt klappt **auf** und bekommt die Fehlermarke (nicht die blasse `agent-step-failed` eines abgelehnten Vorgangs) — das gilt für den Fehler **vor** und den **nach** dem Bestätigen. Der Text, den das Modell bekommt, sagt **unmissverständlich**, dass nichts ausgeführt und nichts verändert wurde, und verbietet ihm ausdrücklich, dem Benutzer einen Erfolg zu melden; die Meldung des Backends bleibt dabei erhalten, weil das Modell sie dem Benutzer weitergeben soll.
+
+Und derselbe Fehler hat eine Schwester in Rust: `MailSession` überlebt keinen Neustart, jeder Mailaufruf scheitert also bis zur Anmeldung. Die Meldung dafür steht in `imap_text` und nicht in der Oberfläche — sie ist der Grund, warum das Skript auf den Text schaut und nicht auf eine Farbe.
+
 ## Die Darstellung einer Mail prüfen
 
 Wie der Rumpf einer Mail im Fenster erscheint, ist eine reine Textverarbeitung – Absätze erkennen, Zitate zurücktreten lassen, Signaturen trennen:
@@ -513,8 +527,8 @@ Fehler melden, den es nicht gibt.
 - SSH verwendet `StrictHostKeyChecking=yes`; unbekannte oder geänderte Host-Keys werden abgelehnt. Der SSH-Prozess selbst hat 30 Sekunden Zeit.
 - Chat-, Modell-, Stream- und Markdown-Daten sowie SSH-Antworten besitzen harte Größen-, Zeit- und Mengenlimits: 2 KiB für die Server-URL, 256 Byte je Modellname, 1000 Modelle, 1 MiB Modelllistenantwort, 4 MiB Verlaufsdatei, 64 KiB je Nachricht, 512 KiB je Anfrage, 4 MiB Antwortstrom, 256 KiB Zeile, 100 000 Zeilen, 256 KiB Denktext je Nachricht, 512 KiB Markdown-Eingabe, 2 MiB bereinigtes HTML und 4 KiB je SSH-Fehlertext. Das Werkzeugangebot ist auf 16 Schemata und 64 KiB begrenzt.
 - Der Agentenmodus arbeitet nur unterhalb eines festen Arbeitsverzeichnisses und nur nach Bestätigung pro Aufruf; die Werkzeugauswahl ist eine feste Liste im Backend.
-- Der Umfang (`agent.scope` in `ollama.json`) legt fest, welche Werkzeuge das Modell bekommt: `agent` wie bisher mit den Dateiwerkzeugen, `termine` ausschließlich die vier Kalenderwerkzeuge. Er ist im Backend durchgesetzt, nicht in der Oberfläche: Im Terminumfang entsteht das Werkzeugangebot ohne die Dateiwerkzeuge und ohne das Arbeitsverzeichnis, und ein gespeichertes Arbeitsverzeichnis wird dort weder geprüft noch genannt. Der Umfang kann den Zugriff nur verkleinern, nicht vergrößern; ein unbekannter Wert aus einer von Hand bearbeiteten Datei bricht den Start ab, statt stillschweigend als breiter Umfang gelesen zu werden.
-- Schreibende Werkzeuge sind standardmäßig gesperrt, gelten nur für die laufende Sitzung und werden nie gespeichert. Sie legen neue Dateien an oder ersetzen genau eine eindeutig auffindbare Stelle; Löschen, Umbenennen und Ausführen gibt es nicht. Vor jedem Schreibvorgang wird der Unterschied gezeigt, geschrieben wird atomar, und bei Dateien lässt sich der Vorgang im Chat zurücknehmen – bei Terminen nicht, siehe [Termine anlegen](#termine-anlegen).
+- Der Umfang (`agent.scope` in `ollama.json`) legt fest, welche Werkzeuge das Modell bekommt: `agent` wie bisher mit den Dateiwerkzeugen, `termine` ausschließlich die vier Kalenderwerkzeuge, `mail` ausschließlich die fünf Mailwerkzeuge. Er ist im Backend durchgesetzt, nicht in der Oberfläche: Im Terminumfang entsteht das Werkzeugangebot ohne die Dateiwerkzeuge und ohne das Arbeitsverzeichnis, und ein gespeichertes Arbeitsverzeichnis wird dort weder geprüft noch genannt. Der Umfang kann den Zugriff nur verkleinern, nicht vergrößern; ein unbekannter Wert aus einer von Hand bearbeiteten Datei bricht den Start ab, statt stillschweigend als breiter Umfang gelesen zu werden.
+- Schreibende Werkzeuge sind standardmäßig gesperrt, gelten nur für die laufende Sitzung und werden nie gespeichert. Sie legen neue Dateien an oder ersetzen genau eine eindeutig auffindbare Stelle; Löschen, Umbenennen und Ausführen gibt es nicht. Vor jedem Schreibvorgang wird der Unterschied gezeigt, geschrieben wird atomar, und bei Dateien lässt sich der Vorgang im Chat zurücknehmen – bei Terminen nicht, siehe [Termine anlegen](#termine-anlegen). Dasselbe Fenster nutzt `delete_email`: Es zeigt vor dem Löschen den vollständigen Brief und löscht danach endgültig, ohne Papierkorb und ohne Rückgängig-Knopf.
 - Die Ollama-Verbindung verwendet standardmäßig unverschlüsseltes HTTP; sie sollte nur in einem vertrauenswürdigen privaten Netzwerk betrieben werden.
 - Für einen produktiven Einsatz sollten TLS und gegebenenfalls Authentifizierung ergänzt werden.
 

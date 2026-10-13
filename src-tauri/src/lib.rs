@@ -2362,6 +2362,7 @@ fn is_write_tool(name: &str) -> bool {
             | crate::calendar::edit::UPDATE_TOOL
             | crate::calendar::edit::DELETE_TOOL
             | crate::mail::werkzeug::SENDEN
+            | crate::mail::werkzeug::LOESCHEN
     )
 }
 
@@ -5544,6 +5545,44 @@ fn preview_mail(vorhaben: &crate::mail::smtp::Sendevorhaben) -> ToolPreview {
     }
 }
 
+/// Die Vorschau eines Mail-Löschvorgangs.
+///
+/// **Der ganze Brief steht drin, Kopf und Text.** Es ist die einzige Gelegenheit,
+/// die der Benutzer bekommt: Danach ist er nicht nur im Postfach, sondern beim
+/// Anbieter nirgends mehr. Die Anzeige ist deshalb dieselbe, die `lies` an das
+/// Modell schickt – was er bestätigt, ist wörtlich das, was verschwindet.
+///
+/// **`next` ist leer.** Wie beim Löschen eines Termins: Es gibt nichts, was
+/// danach da ist. Das Diff-Fenster zeigt darum nur die entfernten Zeilen.
+fn preview_mail_loeschen(
+    nachricht: &crate::mail::imap::NachrichtVoll,
+    nummer: u32,
+) -> ToolPreview {
+    let (text, truncated) = bounded_preview(&nachricht.text);
+    let betreff = nachricht.kopf.betreff.trim();
+
+    ToolPreview {
+        relative_path: format!("Nachricht {nummer} – {}", nachricht.kopf.absender),
+        current: Some(format!(
+            "Von: {}\nAn: {}\nBetreff: {}\nDatum: {}\n\n{}",
+            nachricht.kopf.absender,
+            nachricht.an,
+            nachricht.kopf.betreff,
+            nachricht.kopf.datum,
+            text
+        )),
+        next: String::new(),
+        summary: if betreff.is_empty() {
+            format!("Nachricht {nummer} von {}", nachricht.kopf.absender)
+        } else {
+            format!("Nachricht {nummer} – {betreff}")
+        },
+        lines_before: nachricht.text.lines().count(),
+        lines_after: 0,
+        truncated,
+    }
+}
+
 fn preview_write(
     root: &Path,
     name: &str,
@@ -6414,6 +6453,7 @@ async fn preview_tool_call(
     settings: State<'_, OllamaSettings>,
     session: State<'_, crate::calendar::CalendarSession>,
     state: State<'_, AgentState>,
+    mail_session: State<'_, crate::mail::MailSession>,
 ) -> Result<ToolPreview, String> {
     let config = settings.get_config().await;
     let scope = wirksamer_umfang(&config);
@@ -6462,6 +6502,27 @@ async fn preview_tool_call(
         }
 
         return Ok(preview_mail(&vorhaben));
+    }
+
+    // **Das Löschen hat dieselbe Form wie der Termin.** Wie dort gibt es keinen
+    // neuen Inhalt, `next` bleibt leer, und das Fenster zeigt genau das, was
+    // verschwindet – die vollständige Nachricht, Kopf und Text. Eine Nummer
+    // allein wäre kein Beweis, dass die richtige Mail gemeint ist; der Benutzer
+    // bestätigt etwas, dessen Text er gesehen hat.
+    if name == crate::mail::werkzeug::LOESCHEN {
+        let config = settings.get_config().await.mail;
+
+        // **Dasselbe Konto wie beim Löschen.** Sonst zeigte die Vorschau eine
+        // Nachricht, die bestätigt wird, und Mimir löschte eine andere.
+        let konto = crate::mail::konto_aus_argumenten(&config, &arguments)?;
+
+        let nummer = crate::mail::nummer_aus_argumenten(&arguments).ok_or_else(|| {
+            "Welche Nachricht soll gelöscht werden? Nenne ihre Nummer.".to_string()
+        })?;
+
+        let nachricht = crate::mail::imap_text(konto, &mail_session, nummer).await?;
+
+        return Ok(preview_mail_loeschen(&nachricht, nummer));
     }
 
     if name == crate::calendar::edit::UPDATE_TOOL || name == crate::calendar::edit::DELETE_TOOL {
@@ -7791,6 +7852,7 @@ mod tests {
         prepare_attachment,
         preview_change,
         preview_event,
+        preview_mail_loeschen,
         preview_write,
         render_markdown,
         should_retry_chat,
@@ -10206,6 +10268,105 @@ SUMMARY:Teammeeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         // deshalb hinter dieselbe Freigabe wie eine Datei.
         assert!(is_write_tool(crate::calendar::write::EVENT_TOOL));
         assert!(!is_write_tool("read_file"));
+    }
+
+    /// **Das Löschen einer Mail braucht dieselbe Freigabe wie ein Termin.**
+    ///
+    /// Ohne diesen Eintrag stünde es nicht in `is_write_tool`, und die
+    /// Vorschau – die vor jedem Schreibvorgang verlangt wird – fiele für
+    /// `delete_email` aus: Der Aufruf scheiterte mit „der Schreibvorgang ist
+    /// nicht durchführbar", und die Mail wäre gewichen, ohne dass der Benutzer
+    /// etwas bestätigt hätte. Und weil es nicht in der Liste steht, wäre es
+    /// auch im Aufruf der Oberfläche kein Schreibvorgang: Es erschiene als
+    /// lesendes Werkzeug mit einem kleinen Bestätigungsfenster.
+    #[test]
+    fn mail_loeschen_ist_ein_schreibvorgang_mit_bestaetigung() {
+        assert!(is_write_tool(crate::mail::werkzeug::LOESCHEN));
+        // **Lesen und Entwurf bleiben lesend.** Sonst verlöre der Entwurf
+        // seinen Sonderstatus: Er entsteht im Chat und geht nirgendwohin.
+        assert!(!is_write_tool(crate::mail::werkzeug::LESEN));
+        assert!(!is_write_tool(crate::mail::werkzeug::LISTEN));
+        assert!(!is_write_tool(crate::mail::werkzeug::ENTWURF));
+    }
+
+    /// **Die Vorschau zeigt den ganzen Brief, und danach ist nichts.**
+    ///
+    /// Das ist die Form, die der Terminlöschung schon hat: `current` trägt, was
+    /// verschwindet, `next` ist leer. Beim Löschen einer Mail ist das wichtiger
+    /// als beim Termin – nachher ist die Nachricht weder hier noch beim
+    /// Anbieter auffindbar, und eine Nummer allein sagt dem Benutzer nicht,
+    /// welcher Brief das ist.
+    #[test]
+    fn die_vorschau_eines_mail_loeschvorgangs_zeigt_was_verschwindet() {
+        let nachricht = crate::mail::imap::NachrichtVoll {
+            kopf: crate::mail::imap::NachrichtKopf {
+                nummer: 4,
+                absender: "diggingthegreats@creator.patreon.com".to_string(),
+                betreff: "Were the 90s Actually Better?".to_string(),
+                datum: "Mi, 01 Okt 2026".to_string(),
+                gelesen: false,
+                bytes: 812,
+                vorschau: String::new(),
+            },
+            an: "bilandal.dev@gmail.com".to_string(),
+            cc: String::new(),
+            text: "Die E-Mail stammt von Digging The Greats.\nViel Dank für die Info."
+                .to_string(),
+            anhaenge: Vec::new(),
+            message_id: String::new(),
+            markierungsfehler: None,
+        };
+
+        let vorschau = preview_mail_loeschen(&nachricht, 4);
+
+        let current = vorschau.current.as_deref().expect("ohne Inhalt wäre nichts sichtbar");
+        // **Der ganze Brief, Kopf und Text.** Genau das, was `lies` an das
+        // Modell schickt: Was bestätigt wird, ist wörtlich das, was
+        // verschwindet.
+        assert!(current.contains("Were the 90s Actually Better?"), "{current}");
+        assert!(current.contains("diggingthegreats@creator.patreon.com"), "{current}");
+        assert!(current.contains("Viel Dank für die Info."), "{current}");
+
+        // Und danach ist nichts.
+        assert_eq!(vorschau.next, "");
+        assert_eq!(vorschau.lines_after, 0);
+        assert!(vorschau.lines_before > 1, "{}", vorschau.lines_before);
+        assert!(
+            vorschau.summary.contains("Were the 90s Actually Better?"),
+            "{}",
+            vorschau.summary
+        );
+    }
+
+    /// **Ohne Betreff nennt die Zusammenfassung wenigstens den Absender.** Sonst
+    /// stünde im Fenster „Nachricht 4" – und eine Nummer ist keine Beschreibung.
+    #[test]
+    fn die_vorschau_eines_loeschvorgangs_nennt_auch_ohne_betreff_den_absender() {
+        let nachricht = crate::mail::imap::NachrichtVoll {
+            kopf: crate::mail::imap::NachrichtKopf {
+                nummer: 2,
+                absender: "noreply@example.org".to_string(),
+                betreff: "   ".to_string(),
+                datum: String::new(),
+                gelesen: true,
+                bytes: 0,
+                vorschau: String::new(),
+            },
+            an: String::new(),
+            cc: String::new(),
+            text: "Text".to_string(),
+            anhaenge: Vec::new(),
+            message_id: String::new(),
+            markierungsfehler: None,
+        };
+
+        let vorschau = preview_mail_loeschen(&nachricht, 2);
+
+        assert!(
+            vorschau.summary.contains("noreply@example.org"),
+            "{}",
+            vorschau.summary
+        );
     }
 
     #[test]

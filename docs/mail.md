@@ -251,6 +251,11 @@ gelöschten Nachricht um eine Nummer nach vorn. Eine Liste, in der man bloss die
 Zeile streicht, hätte danach an jeder folgenden Zeile die falsche Nummer – und
 der nächste Klick auf „als gelesen markieren" träfe die Nachricht daneben.
 
+**Denselben Weg nimmt das Modell**, siehe [Das Modell löscht](#das-modell-löscht):
+`delete_email` schickt dieselben zwei Befehle. Nur die Bestätigung ist eine
+andere – dort ein Fenster mit dem vollständigen Brief, weil das Modell den
+Benutzer nicht zweimal klicken lassen kann und er den Brief vorher sehen muss.
+
 ### Zusammenfassen
 
 Der Knopf legt den Text in den Chat und stellt die Frage. Die Antwort landet als
@@ -395,16 +400,106 @@ tatsächlich Schaden anrichten kann, ohne dass es jemand bemerkt.
 Eine verschickte Mail lässt sich nicht zurücknehmen – nicht durch Löschen in
 Mimir, nicht durch eine zweite Mail.
 
-## Was das Modell darf
+## Das Modell löscht
 
-Der Umfang **Postfach** gibt vier Werkzeuge: zwei zum Lesen, eines für den
-Entwurf, eines zum Senden. **Keine Dateiwerkzeuge** – ein Postfach braucht
-keine Dateien, und eine Datei mit Empfängerlisten wäre der Ort, an dem Adressen
-versehentlich landen.
+- **`delete_email`** – löscht eine Nachricht. **Nie ohne Bestätigung, und ohne
+  Möglichkeit danach.**
+
+Der Umfang **Postfach** gibt fünf Werkzeuge: zwei zum Lesen, eines für den
+Entwurf, eines zum Senden, eines zum Löschen. **Keine Dateiwerkzeuge** – ein
+Postfach braucht keine Dateien, und eine Datei mit Empfängerlisten wäre der Ort,
+an dem Adressen versehentlich landen.
+
+### Wie das Löschen läuft
+
+**Endgültig, über denselben Weg wie der Knopf im Nachrichtenfenster:** `\Deleted`
+setzen und `EXPUNGE`. Es gibt **keinen Papierkorb** – weder in Mimir noch beim
+Anbieter. Das ist dieselbe Wirkung wie in der Leiste, und zwar deshalb
+*dieselbe*: Ein zweiter Löschweg wäre einer, an dem sich die beiden unterscheiden
+könnten; der Benutzer soll nicht merken müssen, welchen von beiden er benutzt.
+
+**Es ist ein Schreibvorgang und steht hinter derselben Freigabe wie eine Datei.**
+Vor dem Löschen zeigt Mimir dasselbe Fenster wie beim Terminlöschen: **der
+vollständige Brief, Kopf und Text**, danach ist im Fenster nichts. Das ist die
+einzige Gelegenheit, die der Benutzer bekommt – eine Nummer allein sagt ihm
+nicht, welcher Brief das ist.
+
+**Kein Rückgängig-Knopf.** Es gibt nichts zurückzuholen, und ein Knopf, der es
+verspräche, wäre eine Lüge. Was danach noch passiert, ist etwas anderes: **Die
+Leiste wird neu geholt, nicht um eine Zeile gekürzt.** `EXPUNGE` rückt alles
+hinter der gelöschten Nachricht um eine Nummer nach vorn – eine Liste, in der
+man nur die Zeile streicht, hätte danach an jeder folgenden Zeile die falsche
+Nummer stehen, und der nächste Klick auf „als gelesen markieren" träfe die
+Nachricht daneben.
+
+### Woher die Nummer kommt – und woher sie nicht kommt
+
+**Die Nummer zählt alle Nachrichten im Ordner, nicht die angezeigten.** IMAP
+nummeriert je Ordner ab 1, und die höchsten Nummern sind die neuesten. `Nr. 1`
+ist deshalb **die älteste Nachricht im Postfach** – bei einem gefüllten Ordner
+eine von vor Jahren. Das ist keine Eigenheit von Mimir, sondern von IMAP, und es
+gilt für `read_email` genauso wie für `delete_email`.
+
+**Und: Das Modell erfährt die Nummer erst beim Lesen.** Genau daran ist es
+gescheitert. Das Modell hatte eine Mail gelesen und zusammengefasst – ihre
+Nummer stand in der *Zusammenfassung*, und die sieht nur die Oberfläche. Es
+hatte also eine Mail vor sich und **keine Ahnung, welche es war**, und hat die
+vertrauteste Zahl geraten: die 1.
+
+Darum steht die Nummer jetzt **im Inhalt**, den das Modell bekommt, und zwar in
+der ersten Zeile: „Nachricht Nr. 1187." – nicht als Fußnote unter einem langen
+Brief, wo sie zu nichts mehr gehört. Der Test heißt
+`eine_gelesene_nachricht_nennt_ihre_nummer`.
+
+**Eine geratene Nummer trifft eine fremde Nachricht.** Das war der eigentliche
+Schaden, und er war nur durch das Bestätigungsfenster abgewendet worden: Der
+Benutzer sah eine Mail, die er nie bestellt hatte, und hat abgelehnt. Ohne dieses
+Fenster wäre eine Nachricht von vor Jahren verschwunden.
+
+  **Warum das Schema und die Anweisung beide davon sprechen:** Das Schema ist die
+  Stelle, an der das Modell unmittelbar vor dem Aufruf nachliest – aber nur,
+  wenn es dort auch hinschaut. Für eine Regel, die einen ganzen Zug über-spannt
+  („Nummern sind keine Positionen"), ist die Anweisung die richtige Stelle.
+  Beide sagen dasselbe, und `das_loeschschema_warnt_vor_geratenen_nummern`
+  prüft, dass sie es auch weiterhin tun.
+
+### Warum überhaupt ein Konto
+
+**Weil eine Nummer ohne Postfach nichts bedeutet.** Nummer 1 in Gmail und
+Nummer 1 in einem zweiten Konto sind zwei verschiedene Nachrichten. Bei
+mehreren Konten muss deshalb dazustehen, welches gemeint ist – genau wie bei
+`list_emails` und `read_email`.
+
+**Bei einem einzigen Konto ist die Angabe überflüssig – und trotzdem hat das
+Modell sie gefüllt.** Es erfand `default`, bekam eine Fehlermeldung, die das
+richtige Konto nannte, **zitierte diese Meldung im nächsten Schritt wortgetreu
+und schrieb trotzdem wieder `default`**. Ein Feld mit einem Namen sieht für ein
+Modell nach etwas aus, das man füllt; wenn keine Namen zur Wahl stehen, füllt es
+erfundene.
+
+Drei Antworten darauf, von der billigsten zur wirksamsten:
+
+- **Das Schema sagt, dass das Feld wegzulassen ist** – und dass ein erfundener
+  Name schlimmer ist als gar keiner.
+- **Die Fehlermeldung antwortet bei genau einem Konto anders.** Statt nur zu
+  sagen, welches Konto es gibt, sagt sie: *Lass `konto` weg.* Bei zwei Konten
+  bleibt die alte Meldung, denn dort wäre der Rat falsch.
+- **`nach_bezeichnung` findet ein Konto auch über seine Absenderadresse.** Die
+  steht in jeder Zeile von `list_emails`; sobald du deinem Konto einen Namen
+  gibst, war sie sonst nirgends mehr auffindbar.
+
+  **Und der Sonderrat steht hinter der Suche, nicht davor.** Zuerst stand er
+  davor, und damit wurde bei genau einem Konto *jedes* Argument abgelehnt – auch
+  das richtige. Die Meldung las sich dann wie eine Kette: *„Es gibt kein
+  Mailkonto mit dem Namen ‚bilandal.dev@gmail.com'. Eingerichtet ist genau
+  eines: ‚bilandal.dev@gmail.com'."* **Die Antwort auf die Frage stand in der
+  Antwort.** Das ist der Fehler, den `ein_einzelnes_konto_nimmt_seinen_eigenen_namen_an`
+  festhält – er prüft das *richtige* Konto, denn der Test für den *falschen* Namen
+  war grün, während das richtige danebenlag.
 
 ### Welches Konto
 
-Alle vier Werkzeuge nehmen ein Feld **`konto`** entgegen – den Namen eines der
+Alle fünf Werkzeuge nehmen ein Feld **`konto`** entgegen – den Namen eines der
 eingetragenen Postfächer. **Ohne diese Angabe** arbeitet das Modell auf dem
 Postfach, das der Benutzer gerade in der Leiste gewählt hat.
 
@@ -419,7 +514,32 @@ Namen erfinden, den es nicht genannt bekommen hat.
 
 **Nummern sind je Postfach vergeben.** IMAP zählt Nachrichten je Ordner neu:
 Nummer 3 aus dem einen Postfach und Nummer 3 aus dem anderen sind zwei
-verschiedene Nachrichten. Deshalb gehört zu jedem Leseaufruf das Konto.
+verschiedene Nachrichten. Deshalb gehört zu jedem Leseaufruf das Konto – und
+**nach einem Löschen verschieben sie sich**, weshalb das Modell für den nächsten
+Vorgang eine neue Liste braucht.
+
+## Ein Fehler, der das Versenden unerreichbar machte
+
+`send_email` erbt seine Felder vom Schema des Entwurfs und überschreibt drei
+davon: den Empfänger als Pflichtfeld, die Beschreibung – und, seit kurzem, **den
+Namen**. Die ersten beiden waren gesetzt, der Name nicht.
+
+**Folge:** Im Werkzeugsatz stand zweimal `draft_email`, einmal mit der
+Entwurfsbeschreibung und einmal mit der Versandbeschreibung. `send_email` kam
+überhaupt nicht vor. Das Modell konnte also nichts versenden – es konnte nur
+entwerfen. Und das, was die Oberfläche für den Versand hielt, war eine Anzeige,
+die an einem Namen erkannte, den das Modell gar nicht wählen konnte.
+
+**Der Test, der das fängt**, ist `der_postfachumfang_bietet_alle_fuenf_werkzeuge`.
+Er prüft beides: dass jedes Schema im Satz vorkommt **und dass keiner zweimal
+vorkommt**. Ein Name, der doppelt im Satz steht, ist kein Schönheitsfehler –
+er ist ein Werkzeug, das es nicht gibt, und eines, von dem niemand weiß, dass es
+gibt.
+
+  **Warum es so lange unentdeckt blieb:** `send_email` funktionierte trotzdem. Das
+  Backend nimmt jeden Mailwerkzeugnamen an, den es kennt – also nahm es auch
+  einen Aufruf entgegen, den das Modell frei erfunden hatte. Nur über den
+  offiziellen Weg, also über die Liste der Schemata, war der Versand tot.
 
 Die Anweisung sagt dem Modell ausdrücklich:
 
