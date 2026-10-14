@@ -150,6 +150,12 @@
         <textarea id="prompt-input" maxlength="524288" placeholder="Nachricht eingeben oder /help für Befehle ... (Enter zum Senden)" rows="1"></textarea>
         <input type="file" id="attachment-input" class="visually-hidden" multiple>
         <button type="button" id="attach-btn" class="attach-button" title="Textdatei an diese Nachricht anhängen">Datei</button>
+        <!-- Ein Knopf, kein zweiter. „Kontext leeren" und „Verdichtung von Hand"
+             wären zwei Schaltflächen an einer Reihe, die schon zwei Umschalter,
+             das Eingabefeld und drei Knöpfe trägt. Und die Verdichtung braucht
+             keinen eigenen Weg: Sie geschieht von selbst, sobald der Kontext
+             zu voll wird. -->
+        <button type="button" id="verlauf-btn" class="attach-button" title="Chatverlauf und Kontext leeren">Verlauf</button>
         <button id="send-btn" disabled>Senden</button>
         <button id="cancel-chat-btn" type="button" hidden disabled>Abbrechen</button>
     </div>
@@ -546,6 +552,26 @@
                 <button type="button" id="system-cancel">Abbrechen</button>
                 <button type="button" id="system-clear">Leeren</button>
                 <button type="submit">Speichern</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="verlauf-dialog">
+        <form id="verlauf-form">
+            <h3>Chatverlauf leeren</h3>
+            <p id="verlauf-stand">…</p>
+            <p>Beim Leeren verschwindet der Kontext, den das Modell sieht: Die
+                Nachrichten aus diesem Fenster, die gespeicherte Verlaufsdatei und
+                alles, was das Modell daraus behalten hat. Die Zusammenfassungen
+                aus vorherigen Verdichtungen fallen mit weg.</p>
+            <!-- Die Systemanweisung bleibt, und deshalb steht hier, dass sie
+                 bleibt. Sie ist eine Einstellung dieses Geräts und keine
+                 Sitzung – sie zu löschen hieße, eine Einstellung zu ändern, nach
+                 der nicht gefragt wurde. -->
+            <p id="verlauf-system" class="dialog-hinweis"></p>
+            <div class="dialog-actions">
+                <button type="button" id="verlauf-cancel">Abbrechen</button>
+                <button type="button" id="verlauf-leeren" class="warn-button">Alles leeren</button>
             </div>
         </form>
     </dialog>

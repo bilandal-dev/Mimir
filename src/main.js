@@ -76,6 +76,12 @@ const eventError = document.getElementById('event-error');
 const eventCancel = document.getElementById('event-cancel');
 const eventSave = document.getElementById('event-save');
 const attachBtn = document.getElementById('attach-btn');
+const verlaufBtn = document.getElementById('verlauf-btn');
+const verlaufDialog = document.getElementById('verlauf-dialog');
+const verlaufStand = document.getElementById('verlauf-stand');
+const verlaufSystem = document.getElementById('verlauf-system');
+const verlaufLeeren = document.getElementById('verlauf-leeren');
+const verlaufCancel = document.getElementById('verlauf-cancel');
 const attachmentInput = document.getElementById('attachment-input');
 const calendarPanel = document.getElementById('calendar-panel');
 const calendarList = document.getElementById('calendar-list');
@@ -274,6 +280,95 @@ function umfangstext(scope, config = agent) {
         + 'Mit /scope termine beschränkst du es auf den Kalender, mit /scope mail auf das Postfach.';
 }
 
+// ------------------------------------------------------- Dateifrage ohne Werkzeug
+// Das Modell rät. Es nennt Dateinamen, die es nicht kennt, und beschreibt eine
+// Ausgabe, die es nie gesehen hat – ein erfundenes `ls -R` mit einer
+// requirements.txt, von der niemand weiß. Das ist kein Fehler des Modells,
+// sondern ein **fehlendes Werkzeug**, und das kann nur Mimir sehen.
+//
+// Deshalb wird die Frage nicht gestellt, sondern beantwortet. Mimir sagt selbst,
+// was in diesem Umfang geht, statt das Modell raten zu lassen: Eine erfundene
+// Dateiliste sieht aus wie ein Treffer und ist wertlos.
+//
+// **Ausgelöst wird nur, wenn es wirklich fehlt.** Steht der Umfang auf `agent` und
+// ist der Schalter an, greift hier nichts – sonst würde jede gewöhnliche Frage
+// unterbrochen, und eine Unterbrechung ohne Grund ist schlimmer als keine.
+
+// Fragen nach Dateien und Verzeichnissen. **Absichtlich eng gefasst:** „datei"
+// und „verzeichnis" sind die Wörter, die jemand benutzt, der auf den Inhalt eines
+// Verzeichnisses zeigt. Alles Breitere – „Baum", „Struktur", „auflisten" – trifft
+// auch Kalender und Postfach und würde eine gültige Frage verschlucken.
+const PFAD_FRAGE = /(^|[\s(])(~?\/|\.\/|\.\.\/)\S+/;
+const DATEI_FRAGE = /\b(verzeichnis|verzeichnisse|ordner|ordnerstruktur|unterordner|datei|dateien|dateinamen|dateiliste)\b/i;
+
+// Der einzige Umfang mit Dateiwerkzeugen – und **alle drei** Bedingungen, weil
+// jede einzeln fehlen kann. Ein anderer Umfang; der ausgeschaltete Schalter; und
+// ein fehlendes Arbeitsverzeichnis, bei dem das Backend das ganze Angebot
+// verweigert (`toolset_for`, Scope::Agent). Mit leerem `root` stünde sonst der
+// Agentenmodus aktiv da, hätte aber keine Dateiwerkzeuge – dieselbe Lage wie im
+// Postfach, nur ohne die Ausrede des Umfangs.
+function dateiwerkzueuge() {
+    return agent.scope === 'agent' && agent.enabled && Boolean(agent.root);
+}
+
+// Ob die Nachricht ohne Dateiwerkzeuge nicht zu beantworten ist.
+function fragtNachDateien(text) {
+    if (dateiwerkzueuge()) {
+        return false;
+    }
+
+    // Das Arbeitsverzeichnis des Benutzens kommt in kaum einer Frage vor und ist
+    // deshalb der zuverlässigste Hinweis: Wer es ausschreibt, meint es.
+    // **Nur der volle Pfad, nicht sein letztes Segment** – ein Wurzelverzeichnis
+    // wie `/home/bernd` würde sonst jedes Wort „bernd" in jeder Frage treffen.
+    if (agent.root && text.includes(agent.root)) {
+        return true;
+    }
+
+    return PFAD_FRAGE.test(text) || DATEI_FRAGE.test(text);
+}
+
+// Was Mimir selbst sagt. **Die Worte sind aus `umfangstext` entlehnt**, damit der
+// Benutzer nicht zwei Beschreibungen desselben Zustands bekommt – und damit die
+// Antwort nach dem Einstellen des Umfangs stimmt, statt daneben zu liegen.
+function dateiwerkzueugAntwort() {
+    const teile = [];
+
+    if (agent.scope === 'agent' && !agent.enabled) {
+        // Der Schalter ist aus. Das ist der Fall ohne jeden Umfang, und hier gäbe
+        // es ohne den Schalter überhaupt keine Werkzeuge.
+        teile.push('Der Agentenmodus ist ausgeschaltet, und ohne ihn bekommt das Modell gar keine '
+            + 'Werkzeuge. Die Frage kann es also nicht beantworten und würde sich stattdessen etwas ausdenken.');
+        teile.push('Mit /agent schaltest du ihn ein. /agent-dir zeigt das Arbeitsverzeichnis.');
+        return teile.join(' ');
+    }
+
+    if (agent.scope === 'agent' && !agent.root) {
+        teile.push('Der Agentenmodus ist an, aber ohne Arbeitsverzeichnis gibt es keine Dateiwerkzeuge – '
+            + 'das Backend verweigert sie dann ganz. Die Frage kann das Modell also nicht beantworten.');
+        teile.push('Mit /agent-dir <pfad> legst du fest, wo gelesen werden darf; /agent-dir zeigt das '
+            + 'eingestellte.');
+        return teile.join(' ');
+    }
+
+    teile.push(`Umfang ${umfangsname(agent.scope)}: Das Modell hat in diesem Umfang keine Dateiwerkzeuge`);
+
+    // Die Fortsetzungen tragen **kein führendes Leerzeichen** – `join(' ')` setzt
+    // eines, und zwei hintereinander liest sich im Chat wie ein Absatzumbruch.
+    if (agent.scope === 'mail') {
+        teile.push('– nur die Mailwerkzeuge für Postfach auflisten, Nachricht lesen, Entwurf schreiben, '
+            + 'Nachricht senden und Nachricht löschen. Termine kommen dazu, wenn ein Kalender angemeldet ist.');
+    } else if (agent.scope === 'termine') {
+        teile.push('– nur die vier Kalenderwerkzeuge für Termine.');
+    }
+
+    teile.push('Auf die Frage hätte es keinen Inhalt, sondern einen erfundenen Dateinamen gegeben – '
+        + 'das liest sich wie ein Treffer und ist keiner.');
+    teile.push('Für Dateien und Verzeichnisse: /scope agent und dann /agent. '
+        + 'Mit /scope termine kommst du zu den Kalenderwerkzeugen, mit /scope mail zurück zum Postfach.');
+    return teile.join(' ');
+}
+
 // Wie der laufende Zug im Chat heißt. Im Terminumfang gibt es kein
 // Arbeitsverzeichnis, und ein Text, der davon spricht, wäre dort falsch.
 function zugname(termine) {
@@ -355,6 +450,12 @@ function setGenerating(active) {
     cancelChatBtn.hidden = !active;
     cancelChatBtn.disabled = !active;
     checkServerBtn.disabled = active;
+    // **Während eines Zugs nicht.** Eine Verdichtung läuft als eigener Auftrag
+    // durch `setGenerating(true)`; ohne das Sperren könnte ein zweiter Verdichtung
+    // anlaufen, während der erste noch schreibt, und beide griffen in denselben
+    // `messageHistory` – am Ende stünde eine Zusammenfassung im Verlauf, deren
+    // Grundlage selbst schon verdichtet war.
+    verlaufBtnAktualisieren();
 }
 
 function setServerStatus(state, label) {
@@ -1052,8 +1153,13 @@ async function wechsleProvider(art, { fragen = true } = {}) {
         // Antworten, die es nicht gab.
         if (vorher !== provider) {
             messageHistory = [];
+            // Die Sperre für die nächste Verdichtung gehört zum Verlauf: Eine Zahl
+            // aus dem Verlauf des alten Servers würde auf dem neuen einen zu frühen
+            // Verdichtungszeitpunkt setzen.
+            verdichtungBoden = 0;
             await invoke('delete_chat_history').catch(() => {});
             updateContextUsage();
+            verlaufBtnAktualisieren();
         }
 
         // Die Modelle des anderen Servers dürfen keinen Moment lang auswählbar
@@ -3228,6 +3334,15 @@ const COMMAND_HELP = [
                 usage: '/context <token>',
             },
             {
+                name: 'Verlauf (Knopf neben der Eingabe)',
+                text: 'Leert den Kontext: Die Nachrichten aus diesem Fenster und die gespeicherte '
+                    + 'Verlaufsdatei verschwinden, und das Modell behält nichts davon. Die Systemanweisung '
+                    + 'aus /system bleibt – sie ist eine Einstellung dieses Geräts und keine Teil des '
+                    + 'Gesprächs. Erst wenn der Kontext zu voll wird, verdichtet Mimir ihn von selbst, statt '
+                    + 'ihn zu leeren: Der Verlauf wird zu einer Zusammenfassung, die im Chat ausklappbar '
+                    + 'steht, und die letzten Nachrichten bleiben wörtlich erhalten.',
+            },
+            {
                 name: '/history',
                 text: 'Verlauf auf der Platte halten oder löschen, nur nach Rückfrage',
                 usage: '/history [an|aus|löschen]',
@@ -4303,7 +4418,67 @@ function ensureReasoningBlock(bubble) {
 // Bytes – deshalb ist der Wert „Zeichen je Token“. Mehrsprachiger Text braucht
 // mehr Zeichen je Token, die Schätzung fällt also eher zu niedrig aus.
 const ZEICHEN_PRO_TOKEN = 3.2;
+// Ab hier färbt sich die Anzeige orange: Das Fenster ist nahezu voll und das Modell
+// verliert den Anfang der Unterhaltung. Diese Grenze gilt auch **nach** einer
+// Verdichtung – bleibt es danach so voll, ist die Verdichtung nicht gelungen, und
+// genau das soll der Benutzer an der Farbe sehen.
 const CONTEXT_WARNING_RATIO = 0.9;
+
+// Ab hier verdichtet Mimir von selbst.
+//
+// **Vor 0.9, nicht bei 0.9.** Die Schätzung zählt Zeichen, keine Token, und fällt
+// bei mehrsprachigem Text zu niedrig aus (das steht bei `ZEICHEN_PRO_TOKEN`).
+// Bei 0.75 der eingestellten Größe liegt die wirkliche Belegung erfahrungsgemäß
+// schon um 0.85 – also genau auf der Warnschwelle, an der das Modell anfängt,
+// den Anfang der Unterhaltung zu verlieren. Wer erst bei der Warnung verdichtet,
+// verdichtet nach dem Verlust.
+const VERDICHTUNG_SCHWELLE = 0.75;
+
+// Ohne `/context` kennt Mimir das Fenster des Modells nicht – und ohne Fenster
+// gibt es keine 75 Prozent. 4096 ist Ollamas klassische Vorgabe und liegt
+// absichtlich niedrig: Lieber einmal zu früh verdichten als eine Anfrage, die das
+// Modell gar nicht mehr beantworten kann. Der Wert steht hier und nicht im
+// Backend, weil er eine **Anzeige- und Auslösegrenze** ist, keine gesendete Größe:
+// Er geht nie in einen Auftrag an Ollama. Gesendet wird weiterhin `num_ctx` aus
+// `ChatConfig::context_option`, und dort ist 0 weiterhin „die Vorgabe des
+// Modells" – der Wert 4096 ändert daran nichts.
+const ANGENOMMENES_FENSTER = 4096;
+
+// Unterhalb dieser Größe lohnt das Verdichten nicht: Die Zusammenfassung eines
+// kurzen Verlaufs ist in aller Regel länger als der Verlauf. Sie würde den Kontext
+// vergrößern statt ihn zu entlasten.
+const VERDICHTUNG_MIN_TOKEN = 1500;
+
+// Die letzten Nachrichten bleiben wörtlich stehen und werden **nicht** mit
+// zusammengefasst. Ohne sie verlöre das Modell den genauen Wortlaut des letzten
+// Turnus – der Verweis auf „diese Datei", „diese Zahl" oder „so wie eben" hinge an
+// einer Formulierung, die in keiner Zusammenfassung auftaucht.
+const VERDICHTUNG_REZENZ = 4;
+
+// Wie weit eine Zusammenfassung laufen darf, bevor sie gekürzt wird. Weit unter
+// `MAX_MESSAGE_BYTES` (64 KiB im Backend), weil eine ausführliche Zusammenfassung
+// den Zweck verfehlt: Sie soll den Kontext verkleinern, nicht neu füllen. Für den
+// lokalen Provider gilt zusätzlich `MAX_FENSTER` (16384) für das ganze Fenster.
+const VERDICHTUNG_MAX_ZEICHEN = 12000;
+
+// Wie viel Text während des Laufs in der Blase steht. Die Zusammenfassung wird
+// danach ohnehin gekürzt; ungekürzt stünde ein dreitausend Zeichen langer
+// Systemeintrag da, während das Modell noch gar nicht fertig ist.
+const VERDICHTUNG_ANZEIGE_ZEICHEN = 600;
+
+// Nach einer Verdichtung wird **nicht sofort wieder verdichtet**. Der Wert merkt
+// sich, wie viel Kontext danach da war; verdichtet wird erst wieder, wenn der
+// Verlauf um ein Viertel darüber hinausgewachsen ist. Ohne diese Sperre verdichtete
+// ein ausführlich schreibendes Modell bei *jeder* Nachricht – und der Auftrag
+// kostete dann mehr als das Gespräch, das er retten soll.
+let verdichtungBoden = 0;
+
+// Die Größe, gegen die gerechnet wird. Ohne eingestelltes `/context` ist das keine
+// bekannte Größe, sondern eine Annahme – und die Anzeige sagt das auch, statt eine
+// Zahl zu behaupten, die niemand kennt.
+function kontextgrenze() {
+    return chat.contextTokens > 0 ? chat.contextTokens : ANGENOMMENES_FENSTER;
+}
 
 function estimateTokens(messages) {
     let zeichen = 0;
@@ -4332,17 +4507,24 @@ function formatTokenCount(value) {
 function updateContextUsage(extraMessages = []) {
     const tokens = estimateTokens([...messageHistory, ...extraMessages]);
     const limit = chat.contextTokens;
-    const ratio = limit > 0 ? tokens / limit : 0;
+    // **Immer gegen die angenommene Größe rechnen, auch wenn keine eingestellt
+    // ist.** Sonst wäre die Anzeige die einzige Stelle, die die Annahme nicht
+    // kennt – und ausgerechnet dort würde der Benutzer sie nicht erwarten. Die
+    // Farbe folgt derselben Zahl wie das Verdichten, sonst färbte sich die Anzeige
+    // nach einer Verdichtung orange, obwohl nichts mehr zu tun ist.
+    const ratio = tokens / kontextgrenze();
 
     contextUsage.textContent = limit > 0
         ? `Kontext: ~${formatTokenCount(tokens)} / ${formatTokenCount(limit)} Token`
-        : `Kontext: ~${formatTokenCount(tokens)} Token (Modellvorgabe)`;
+        : `Kontext: ~${formatTokenCount(tokens)} Token (Fenster ~${formatTokenCount(kontextgrenze())} angenommen)`;
     contextUsage.classList.toggle('context-warning', ratio >= CONTEXT_WARNING_RATIO);
     contextUsage.title = limit > 0
         ? `Grobe Schätzung aus der Textlänge, etwa ${ZEICHEN_PRO_TOKEN} Zeichen je Token. `
+            + `Ab ${Math.round(VERDICHTUNG_SCHWELLE * 100)} Prozent verdichtet Mimir den Verlauf selbst. `
             + `Ab ${Math.round(CONTEXT_WARNING_RATIO * 100)} Prozent kann das Modell den Anfang der Unterhaltung verlieren.`
-        : 'Grobe Schätzung aus der Textlänge. Das Fenster des Modells ist nicht bekannt; '
-            + 'mit /context lässt es sich festlegen.';
+        : `Grobe Schätzung aus der Textlänge. Das Fenster des Modells ist nicht bekannt – `
+            + `gerechnet wird mit ${formatTokenCount(kontextgrenze())} Token als Annahme. `
+            + `Mit /context lässt sich die echte Größe festlegen.`;
 }
 
 async function refreshChatConfig() {
@@ -4353,6 +4535,283 @@ async function refreshChatConfig() {
     updateContextUsage();
     return config;
 }
+
+// ---------------------------------------------------- Kontext verdichten
+// Sobald die Belegung die Schwelle überschreitet, fasst Mimir den bisherigen
+// Verlauf zusammen und macht mit der Zusammenfassung weiter. Die Schwelle steht
+// bei `VERDICHTUNG_SCHWELLE`, das Verdichten selbst hier.
+
+// Ab hier lohnt das Verdichten – und ab hier verdichtet nicht wieder der Boden
+// aus der letzten Verdichtung.
+function verdichtungsfaellig(nachrichten) {
+    // Ohne mindestens eine Nachricht, die **ersetzt** wird, gäbe es nichts zu
+    // verdichten: Die Rezenz bleibt immer stehen, eine Verdichtung darüber wäre
+    // nur ein Umweg durchs Modell zurück zum selben Verlauf.
+    if (nachrichten.length <= VERDICHTUNG_REZENZ + 1) {
+        return false;
+    }
+
+    const tokens = estimateTokens(nachrichten);
+    const schwelle = Math.max(kontextgrenze() * VERDICHTUNG_SCHWELLE, verdichtungBoden * 1.25);
+
+    return tokens >= schwelle && tokens >= VERDICHTUNG_MIN_TOKEN;
+}
+
+// Eine Zusammenfassung, die länger ist als sie sollte, verfehlt ihren Zweck: Sie
+// soll den Kontext verkleinern und nicht neu füllen. Abgeschnitten wird an einer
+// Absatzgrenze – mitten in einem Satz läse sich der Rest wie ein Fehler –, und der
+// Schnitt ist sichtbar, damit das Modell nicht über Inhalte schreibt, die es gar
+// nicht bekommen hat. Dasselbe gilt für angehängte Dateien, dort im Backend.
+function kuerzeVerdichtung(text) {
+    if (text.length <= VERDICHTUNG_MAX_ZEICHEN) {
+        return text;
+    }
+
+    let schnitt = text.lastIndexOf('\n\n', VERDICHTUNG_MAX_ZEICHEN);
+
+    if (schnitt < VERDICHTUNG_MAX_ZEICHEN / 2) {
+        schnitt = text.lastIndexOf('\n', VERDICHTUNG_MAX_ZEICHEN);
+    }
+
+    if (schnitt < VERDICHTUNG_MAX_ZEICHEN / 2) {
+        schnitt = VERDICHTUNG_MAX_ZEICHEN;
+    }
+
+    return `${text.slice(0, schnitt).trimEnd()}\n\n[gekürzt – die Zusammenfassung war länger als ${VERDICHTUNG_MAX_ZEICHEN} Zeichen]`;
+}
+
+// Der Eintrag, der eine Verdichtung im Chat sichtbar macht. Er sagt, wie viel weg
+// ist und wohin der Kontext gekommen ist – und **zeigt die Zusammenfassung**.
+//
+// Das Ausklappbare ist der eigentliche Grund für diese Funktion: Ein Modell, das
+// den Wortlaut verloren hat, ist von außen nicht von einem zu unterscheiden, das
+// ihn nie bekommen hat. Der Benutzer kann der Zusammenfassung nicht widersprechen,
+// wenn er sie nicht lesen kann. Ohne Zusammenfassung bliebe am Ende nur die
+// Zahlenspalte.
+function verdichtungseintrag(vorher, nachher, vorherAnzahl, nachherAnzahl, zusammenfassung) {
+    const div = document.createElement('div');
+    div.className = 'message system verdichtung';
+
+    const kopf = document.createElement('p');
+    kopf.className = 'verdichtung-kopf';
+    kopf.textContent = `Kontext verdichtet: ${vorherAnzahl} Nachrichten `
+        + `(~${formatTokenCount(vorher)} Token) wurden zu ${nachherAnzahl} `
+        + `(~${formatTokenCount(nachher)} Token).`;
+
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Zusammenfassung ansehen';
+
+    const text = document.createElement('pre');
+    text.className = 'verdichtung-text';
+    // `textContent`, nicht `innerHTML`: Das hier ist Modelltext aus einem Auftrag,
+    // den der Benutzer nicht gestellt hat, und er geht damit über denselben Weg
+    // wie eine Mail. Die einzige Stelle, die HTML setzt, ist `render_markdown` –
+    // und dort wird der Text gerendert, nicht eingefügt.
+    text.textContent = zusammenfassung;
+
+    details.append(summary, text);
+    div.append(kopf, details);
+    return div;
+}
+
+// **Zwei Wege sind hier ausgeschlossen, und beide aus guten Gründen.**
+//
+// `performChat` schreibt das Ergebnis nach `messageHistory` – die Zusammenfassung
+// läge dann in dem Verlauf, aus dem sie entstanden ist, und das Modell bekäme sie
+// im nächsten Zug noch einmal als Ergebnis.
+//
+// `runChatAttempt` rendert in eine Chatblase. Eine Zusammenfassung ist aber keine
+// Antwort auf eine Frage, sondern ein Werkzeug des Verlaufs; als Antwort dargestellt
+// läse sie sich wie etwas, das der Benutzer gefragt hat.
+async function verdichteVerlauf(nachrichten, modell) {
+    // Die letzten Nachrichten gehen **nicht** in die Verdichtung: Sie bleiben
+    // ohnehin wörtlich stehen (VERDICHTUNG_REZENZ). Das Modell soll nicht
+    // zusammenfassen, was gleich wieder im Klartext folgt.
+    const zuVerdichten = nachrichten.slice(0, -VERDICHTUNG_REZENZ);
+    const bleibt = nachrichten.slice(-VERDICHTUNG_REZENZ);
+
+    if (!zuVerdichten.length) {
+        return false;
+    }
+
+    const vorher = estimateTokens(nachrichten);
+
+    setGenerating(true);
+    cancelRequested = false;
+    setEngineStatus('Kontext wird verdichtet ...');
+
+    // Sichtbar während des Laufs. Ohne das stünde die Oberfläche bei einem
+    // langsamen lokalen Modell minutenlang still, und ein stiller Bildschirm sieht
+    // aus wie ein Fehler – nicht wie ein Auftrag, der arbeitet.
+    const blase = appendMessageToUI('system', 'Kontext wird verdichtet ...');
+
+    let text = '';
+
+    try {
+        const anweisung = await invoke('get_compact_prompt');
+        const onChunk = new Channel();
+        onChunk.onmessage = (chunk) => {
+            if (!chunk.content) {
+                return;
+            }
+
+            text += chunk.content;
+            blase.textContent = text.length > VERDICHTUNG_ANZEIGE_ZEICHEN
+                ? `${text.slice(0, VERDICHTUNG_ANZEIGE_ZEICHEN)} ...`
+                : text;
+            scrollToBottom();
+        };
+
+        await invoke('send_chat_message', {
+            model: modell,
+            messages: zuVerdichten,
+            onChunk: onChunk,
+            tools: null,
+            // **Nicht `systemPromptForRequest()`.** Die Systemanweisung des
+            // Benutzers gehörte sonst in den Auftrag, und „Antworte immer in drei
+            // Wörtern" ergäbe eine Drei-Wort-Zusammenfassung – und der Verlauf wäre
+            // danach wertlos, obwohl er vorher voll war. Nur die
+            // Verdichtungsanweisung geht raus, sonst nichts; nicht einmal das
+            // Datum, denn eine Zusammenfassung datiert sich nicht.
+            system: anweisung,
+        });
+
+        const zusammenfassung = kuerzeVerdichtung(text.trim());
+
+        if (!zusammenfassung) {
+            blase.remove();
+            appendMessageToUI('system', 'Kontext wurde nicht verdichtet: Das Modell hat keine Zusammenfassung geliefert. Der Verlauf bleibt unverändert.');
+            return false;
+        }
+
+        // Die Nachricht baut das Backend, weil der Kopf unter dem die verdichtete
+        // Unterhaltung geht, und die Anweisung, nach der sie entstanden ist, dort
+        // nebeneinander stehen. Beides aus dem Frontend zu holen hieße, sie an zwei
+        // Stellen getrennt zu pflegen – und getrennt pflegen sie auseinander.
+        const verdichtet = await invoke('verdichtungsnachricht', { zusammenfassung });
+
+        messageHistory = [verdichtet, ...bleibt];
+
+        const nachher = estimateTokens(messageHistory);
+        verdichtungBoden = nachher;
+
+        blase.replaceWith(verdichtungseintrag(
+            vorher,
+            nachher,
+            nachrichten.length,
+            messageHistory.length,
+            zusammenfassung,
+        ));
+
+        updateContextUsage();
+        await persistHistory();
+        scrollToBottom();
+        return true;
+    } catch (error) {
+        console.error('Kontext nicht verdichtet:', error);
+        blase.remove();
+        appendMessageToUI('system', `Kontext wurde nicht verdichtet: ${error} Der Verlauf bleibt unverändert.`);
+        return false;
+    } finally {
+        setGenerating(false);
+        setEngineStatus('');
+    }
+}
+
+// ------------------------------------------------------- Kontext leeren
+// Drei Dinge, die zusammenpassen müssen: der Kontext (`messageHistory`), das
+// sichtbare Fenster (`chatContainer`) und die Datei (`chat-history.json`).
+// Ließe man eines davon stehen, zeigte die Oberfläche etwas, das nicht stimmt – ein
+// leeres Fenster, in dem das Modell alles weiß, oder ein gefülltes Fenster, dessen
+// Kontext leer ist.
+async function leereVerlauf() {
+    messageHistory = [];
+    verdichtungBoden = 0;
+    chatContainer.replaceChildren();
+    updateContextUsage();
+
+    // **Nicht `persistHistory()`.** Das Backend weist eine leere Nachrichtenliste
+    // ab – `save_chat_history` prüft über `validate_chat_input`, und dort ist eine
+    // leere Liste ein Fehler. Ein leerer Verlauf ist keine Datei, sondern das
+    // Fehlen einer Datei, und dafür gibt es `delete_chat_history`.
+    try {
+        await invoke('delete_chat_history');
+    } catch (error) {
+        console.error('Verlaufsdatei nicht gelöscht:', error);
+        appendMessageToUI('system', `Kontext geleert. Die Verlaufsdatei ließ sich nicht löschen (${error}) – beim nächsten Start kann sie wieder da sein.`);
+        return;
+    }
+
+    // **Die Systemanweisung bleibt.** Sie ist eine Einstellung dieses Geräts und
+    // keine Sitzung (siehe `docs/konfiguration.md`); sie zu löschen hieße, eine
+    // Einstellung zu ändern, nach der nicht gefragt wurde. Der Dialog sagt das
+    // vorher, damit es hier keinerlei Überraschung gibt.
+    appendMessageToUI('system', chat.systemPrompt
+        ? 'Kontext geleert. Die Systemanweisung bleibt erhalten.'
+        : 'Kontext geleert.');
+}
+
+// Das Fenster zum Leeren. Es nennt erst den Stand und dann die Folge – ein
+// bestätigender Knopf ohne Angabe darüber, **wieviel** verschwindet, ist eine
+// Rückfrage nach dem Umfang, nicht nach der Absicht.
+function frageVerlaufLeeren() {
+    return new Promise((resolve) => {
+        let bestaetigt = false;
+        const grenze = kontextgrenze();
+        const tokens = estimateTokens(messageHistory);
+
+        verlaufStand.textContent = messageHistory.length
+            ? `Im Kontext stehen ${messageHistory.length} Nachrichten mit rund `
+                + `${formatTokenCount(tokens)} Token`
+                + (chat.contextTokens > 0 ? '.' : ` – gerechnet mit einem Fenster von etwa ${formatTokenCount(grenze)} Token.`)
+            : 'Der Kontext ist bereits leer.';
+        verlaufSystem.textContent = chat.systemPrompt
+            ? 'Die Systemanweisung bleibt erhalten – sie ist eine Einstellung dieses Geräts und keine Teil des Gesprächs.'
+            : 'Es ist keine Systemanweisung gesetzt.';
+
+        verlaufDialog.returnValue = '';
+
+        const handleClose = () => {
+            verlaufLeeren.removeEventListener('click', handleLeeren);
+            verlaufCancel.removeEventListener('click', handleCancel);
+            resolve(bestaetigt);
+        };
+        const handleLeeren = () => {
+            bestaetigt = true;
+            verlaufDialog.close('cleared');
+        };
+        const handleCancel = () => verlaufDialog.close('cancelled');
+
+        verlaufLeeren.addEventListener('click', handleLeeren);
+        verlaufCancel.addEventListener('click', handleCancel);
+        verlaufDialog.addEventListener('close', handleClose, { once: true });
+        verlaufDialog.showModal();
+        verlaufLeeren.focus();
+    });
+}
+
+// Nur während eines Zugs gesperrt – nicht bei leerem Verlauf. Der Knopf räumt auch
+// das Fenster ab, und darin steht zu Beginn die Ersteinrichtung; das ist ein
+// gültiger Gebrauch und kein Grund, den Knopf wegzulassen. Die Anzeige sagt dem
+// Benutzer ohnehin, dass der Kontext schon leer ist.
+function verlaufBtnAktualisieren() {
+    verlaufBtn.disabled = isGenerating;
+    verlaufBtn.title = isGenerating
+        ? 'Geht erst, wenn die laufende Antwort fertig ist'
+        : 'Chatverlauf und Kontext leeren';
+}
+
+verlaufBtn.addEventListener('click', async () => {
+    if (isGenerating) {
+        return;
+    }
+
+    if (await frageVerlaufLeeren()) {
+        await leereVerlauf();
+        verlaufBtnAktualisieren();
+    }
+});
 
 // Die Systemanweisung geht als eigenes Feld an Ollama und landet nicht als
 // Nachricht im Verlauf. Im Agentenmodus steht sie gemeinsam mit der
@@ -6736,13 +7195,55 @@ async function handleSendMessage() {
         return;
     }
 
-    // Eingabe zurücksetzen & UI sperren
-    resetPromptInput();
-    setGenerating(true);
+    // **Bevor die Frage rausgeht und vor der Verdichtung.** Das Modell rät keine
+    // Dateinamen: Es hat sie nicht gelesen, und eine erfundene Antwort ist
+    // schlimmer als keine. Steht die Frage vor der Verdichtung, weil ein Auftrag,
+    // dessen Ergebnis gar nicht gebraucht wird, den Verlauf nicht kosten darf.
+    if (fragtNachDateien(text)) {
+        resetPromptInput();
+        appendMessageToUI('user', text);
+        // **Nicht in `messageHistory`.** Das Modell hat die Frage nie bekommen,
+        // und eine Nachricht ohne Antwort darin ließe es auf eine Erwiderung
+        // reagieren, die es nicht gab. Der Verlauf bleibt, wie er war.
+        appendMessageToUI('system', dateiwerkzueugAntwort());
+        promptInput.focus();
+        return;
+    }
 
     // Angehängte Dateien stehen als eigene Nachrichten vor der Eingabe.
     const attachments = attachmentMessages();
     const userMessage = { role: 'user', content: text };
+
+    // **Verdichtet wird vor dem Senden und vor der Anzeige der Frage.** Wäre der
+    // Eintrag erst nach `appendMessageToUI('user', …)`, stünde „Kontext verdichtet"
+    // zwischen der Frage des Benutzers und seiner Antwort, und der Bezug ginge
+    // verloren: Die Frage hätte den Zustand ausgelöst, von dem sie selbst nichts
+    // wüsste.
+    //
+    // Geprüft wird gegen den Verlauf **einschließlich** der neuen Nachricht und
+    // der Anhänge. Sonst wartete die Verdichtung eine Nachricht zu spät – genau an
+    // der Nachricht, für die das Fenster dann zu klein ist.
+    //
+    // Verdichtet wird nur `messageHistory`, nicht die neue Nachricht: Die Frage
+    // ist der Grund für die Verdichtung und gehört unverändert in den Verlauf.
+    if (verdichtungsfaellig([...messageHistory, ...attachments, userMessage])) {
+        await verdichteVerlauf(messageHistory, model);
+
+        // **Nach einem Abbruch geht die Frage nicht raus.** Der Benutzer hat die
+        // laufende Arbeit gestoppt, und es wäre widersinnig, sie jetzt doch noch zu
+        // senden. Die Eingabe steht zu diesem Zeitpunkt noch im Feld – deshalb
+        // kommt `resetPromptInput()` erst danach –, sonst wäre die Frage mit einem
+        // Klick auf „Abbrechen" verloren.
+        if (cancelRequested) {
+            cancelRequested = false;
+            return;
+        }
+    }
+
+    // Eingabe zurücksetzen & UI sperren
+    resetPromptInput();
+    setGenerating(true);
+
     // Dieselbe Grenze wie in der Verlaufsdatei (MAX_GESPEICHERTE_NACHRICHTEN): auch
     // die Anfrage selbst bleibt bei den letzten 100 Nachrichten.
     const requestMessages = [...messageHistory, ...attachments, userMessage].slice(-100);
@@ -7003,8 +7504,10 @@ serverUrlForm.addEventListener('submit', async (ereignis) => {
         // beim nächsten Start wieder auftauchen.
         if (vorher && vorher !== neue) {
             messageHistory = [];
+            verdichtungBoden = 0;
             await invoke('delete_chat_history').catch(() => {});
             updateContextUsage();
+            verlaufBtnAktualisieren();
         }
 
         setServerUrlStatus(`${neue} – ${modelle.length} Modell(e) gefunden.`, true);

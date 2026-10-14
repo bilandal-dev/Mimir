@@ -266,6 +266,39 @@ steht: Das Modell läuft dann auf diesem Rechner und bekommt dort keine
 Dateiwerkzeuge. Gespeichert wird trotzdem, was eingestellt war, damit der gespeicherte
 Umfang über einen Providerwechsel hinweg erhalten bleibt.
 
+### Eine Frage nach Dateien wird beantwortet, nicht geraten
+
+Kein Umfang außer `agent` gibt dem Modell Dateiwerkzeuge. Das ist Absicht und im
+Backend durchgesetzt – `mail_toolset_for` baut eine feste Liste aus fünf
+Mailwerkzeugen, und ein Rust-Test prüft ausdrücklich, dass `read_file`, `list_files`
+und `search_files` darin **nicht** vorkommen.
+
+Ohne ein passendes Werkzeug **erfindet** ein Modell die Antwort. Im Betrieb äußerte
+sich das so: Auf die Frage nach einem Verzeichnis hin nannte das Modell ein
+`ls -R`, dazu eine `requirements.txt`, und beschrieb eine Ausgabe, die es nie
+gesehen hatte. Ein Fehler des Modells ist das nicht, sondern ein fehlendes
+Werkzeug – und das kann nur Mimir sehen.
+
+Deshalb wird eine solche Frage **nicht gestellt, sondern beantwortet**. Erkannt wird
+sie an einem Pfad im Text (`/…`, `~/…`, `./…`) oder an einem der Wörter
+*Verzeichnis*, *Ordner*, *Datei*. Mimir sagt dann selbst, welcher Umfang eingestellt
+ist, was das Modell stattdessen kann, und welcher Weg zu den Dateiwerkzeugen führt –
+mit dem Hinweis, dass es sonst einen Dateinamen nennen würde, den es nicht kennt.
+
+**Nur wenn es wirklich fehlt.** Sind Umfang `agent`, Schalter und Arbeitsverzeichnis
+alle gesetzt, greift nichts: Jede gewöhnliche Frage ginge unverändert durch. Alle
+drei Bedingungen werden geprüft, weil jede einzeln fehlen kann — ohne
+Arbeitsverzeichnis verweigert `toolset_for` das ganze Werkzeugangebot, und der
+Agentenmodus stünde an und da, hätte aber keine Dateiwerkzeuge.
+
+**Die Frage kommt nicht in den Verlauf.** Das Modell hat sie nie bekommen, und eine
+Nachricht ohne Antwort darin ließe es auf eine Erwiderung reagieren, die es nicht gab.
+
+Die Muster sind absichtlich eng gefasst: „Baum“, „Struktur“ und „auflisten“ treffen
+auch Kalender und Postfach und würden eine gültige Frage verschlucken. Ein
+verschluckter Postfach- oder Terminauftrag wäre genauso schlimm wie eine
+durchgelassene Dateifrage.
+
 
 ## Schema: hell oder dunkel
 
@@ -303,6 +336,40 @@ An das Modell gehen vier getrennte Felder: die Nachrichten (`messages`), eine op
 Die Anweisung aus `/system` liegt in `ollama.json` neben der Server-URL und gilt damit für alle Sitzungen auf diesem Gerät. Sie ist auf 8 KiB begrenzt, Steuerzeichen außer Newline, Tab und Wagenrücklauf werden abgelehnt. Im Agentenmodus steht die Werkzeuganweisung vorn, die eigene Anweisung dahinter. Ein Wechsel der Server-URL oder ein Neustart ändert daran nichts.
 
 Ollamas Vorgabe für das Kontextfenster kennt Mimir nicht. Deshalb wird die Belegung aus der Textlänge geschätzt, etwa 3,2 Zeichen je Token, und oben rechts angezeigt (ab tausend Token gekürzt auf `1.2k`, ab zehntausend auf `12k`). Mit `/context <token>` lässt sich die Größe festlegen; der Wert wird auf ein Vielfaches von 256 gerundet und muss zwischen 2048 und 262144 liegen, 0 steht für die Modellvorgabe. Ab 90 Prozent der eingestellten Größe färbt sich die Anzeige orange. Die Anzeige ist eine Schätzung, keine Messung des Modells – und eher zu niedrig als zu hoch, weil mehrsprachiger Text mehr Zeichen je Token braucht.
+
+### Verdichten: der Verlauf wird von selbst zusammengefasst
+
+Ein volles Fenster ist das eigentliche Problem: Das Modell beginnt, den Anfang der Unterhaltung zu verlieren, und antwortet auf eine Frage, die drei Absätze zurück gestellt wurde. Deshalb verdichtet Mimir den Verlauf **von selbst**, bevor das passiert.
+
+**Ab 75 Prozent der Fenstergröße.** Nicht bei 90 – das ist die Warnschwelle und damit bereits der Schaden. Die Belegung wird aus Zeichen geschätzt, und die Schätzung fällt bei mehrsprachigem Text zu niedrig aus; bei 75 Prozent der eingestellten Größe liegt die wirkliche Belegung erfahrungsgemäß schon um 85 Prozent. Wer erst bei der Warnung verdichtet, verdichtet nach dem Verlust.
+
+**Ohne `/context` wird mit 4096 Token gerechnet.** Dann kennt Mimir das Fenster nicht, und ohne Fenster gibt es keine 75 Prozent. 4096 ist Ollamas klassische Vorgabe und liegt absichtlich niedrig: Lieber einmal zu früh verdichten als eine Anfrage, die das Modell gar nicht mehr beantworten kann. Die Anzeige nennt die Annahme ausdrücklich („Fenster ~4k angenommen"). Der Wert ist **eine Anzeige- und Auslösegrenze** und geht nie an Ollama – gesendet wird weiterhin `context_tokens`, und dort ist 0 weiterhin „die Vorgabe des Modells".
+
+**Unter 1500 geschätzten Token wird nicht verdichtet.** Die Zusammenfassung eines kurzen Verlaufs ist in aller Regel länger als der Verlauf; sie würde den Kontext vergrößern statt ihn zu entlasten.
+
+**Was verdichtet wird.** Der Verlauf ohne seine letzten vier Nachrichten geht als eigener Auftrag an das Modell, mit einer Anweisung, die Fakten, Entscheidungen, Namen, Zahlen, Termine, Dateipfade, Werkzeugergebnisse und offene Punkte zum Behalten nennt und Höflichkeiten, Wiederholungen und Denktext zum Weglassen. Es geht **nur diese Anweisung** an das Modell: Eine Systemanweisung wie „Antworte immer in drei Wörtern" ergäbe sonst eine Drei-Wort-Zusammenfassung, und der Verlauf wäre danach wertlos, obwohl er vorher voll war.
+
+**Die letzten vier Nachrichten bleiben wörtlich stehen** und werden nicht mit zusammengefasst. Ohne sie verlöre das Modell den genauen Wortlaut des letzten Turnus – der Verweis auf „diese Datei", „diese Zahl" oder „so wie eben" hinge an einer Formulierung, die in keiner Zusammenfassung auftaucht.
+
+**Der neue Verlauf** besteht aus der Zusammenfassung und den letzten vier Nachrichten. Die Zusammenfassung geht als `user` in den Verlauf und bekommt im Backend einen Kopf, der dem Modell sagt, dass sie keine Nachricht des Benutzers ist und den Wortlaut der früheren Nachrichten ersetzt. Sie steht im Chat als **ausklappbarer Eintrag** mit den Token-Zahlen vorher und nachher – ein Modell, das den Wortlaut verloren hat, ist von außen nicht von einem zu unterscheiden, das ihn nie bekommen hat, und der Benutzer kann der Zusammenfassung nicht widersprechen, wenn er sie nicht lesen kann.
+
+**Nach einer Verdichtung wird nicht sofort wieder verdichtet.** Erst wenn der Verlauf um ein Viertel über den Wert danach hinausgewachsen ist, wird erneut verdichtet. Ohne diese Sperre verdichtete ein ausführlich schreibendes Modell bei *jeder* Nachricht – und der Auftrag kostete dann mehr als das Gespräch, das er retten soll.
+
+**Eine zu lange Zusammenfassung wird gekürzt**, an einer Absatzgrenze und mit sichtbarem Hinweis – mitten in einem Satz sähe der Rest sich wie ein Fehler aus, und das Modell schriebe über Inhalte, die es nicht bekommen hat. Die Grenze liegt bei 12000 Zeichen, weit unter `MAX_MESSAGE_BYTES` (64 KiB): Eine ausführliche Zusammenfassung verfehlt ihren Zweck.
+
+**Ein Fehler lässt den Verlauf unverändert.** Eine halb verdichtete Unterhaltung – zusammengefasst und trotzdem lückenhaft – wäre das Schlimmste, was hier passieren kann; der Verlauf bliebe lieber voll und zu groß.
+
+### Leeren: der Verlauf auf einen Knopfdruck weg
+
+Der Knopf **Verlauf** neben der Eingabe leert den Kontext. Nach Rückfrage in einem Fenster verschwinden dabei drei Dinge zusammen: die Nachrichten im sichtbaren Fenster, der Kontext, den das Modell sieht, und die gespeicherte Datei `chat-history.json`. Zusammenfassungen aus vorherigen Verdichtungen fallen mit weg.
+
+**Ließe man eines davon stehen, zeigte die Oberfläche etwas, das nicht stimmt** – ein leeres Fenster, in dem das Modell alles weiß, oder ein gefülltes Fenster, dessen Kontext leer ist.
+
+**Nicht über `/history`, sondern über `delete_chat_history`.** Das Backend weist eine leere Nachrichtenliste ab – `save_chat_history` prüft über `validate_chat_input`, und dort ist eine leere Liste ein Fehler. Ein leerer Verlauf ist keine Datei, sondern das Fehlen einer Datei.
+
+**Die Systemanweisung aus `/system` bleibt.** Sie ist eine Einstellung dieses Geräts und keine Teil des Gesprächs; sie zu löschen hieße, eine Einstellung zu ändern, nach der nicht gefragt wurde. Das Fenster sagt das vorher.
+
+**Angehängte Dateien bleiben.** Sie gehören zur *nächsten* Nachricht und nicht zum Verlauf; sie gingen sonst still verloren.
 
 ### Verlauf nur nach Rückfrage
 

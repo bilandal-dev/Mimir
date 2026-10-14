@@ -96,6 +96,16 @@ const gleich = (name, ist, erwartet) => {
   }
 };
 
+/** Schneidet eine Funktion samt Rumpf aus `main.js` heraus. */
+function funktion(name) {
+  const start = src.indexOf(`function ${name}`);
+  if (start < 0) return '';
+  const ende = [src.indexOf('\nfunction ', start), src.indexOf('\nasync function ', start)]
+    .filter((i) => i > start)
+    .sort((x, y) => x - y)[0];
+  return ende ? src.slice(start, ende) : '';
+}
+
 console.log('— Wann läuft die Werkzeugschleife —');
 // Im Terminumfang läuft sie ohne Schalter: Der Umfang bringt die Werkzeuge mit.
 // Andernfalls wäre `/scope termine` nur eine Anzeige, und ein zweiter Schalter
@@ -230,6 +240,107 @@ gleich(
   /\/scope \[agent\|termine\|mail\]/.test(src) && /name: '\/scope mail'/.test(src),
   true,
 );
+
+console.log();
+console.log('— Eine Frage nach Dateien wird beantwortet, nicht geraten —');
+// Der Befund, aus dem das gekommen ist: Im Postfachumfang bekommt das Modell nur
+// Mailwerkzeuge. Auf die Frage nach einem Verzeichnis hin **erfand** es ein
+// `ls -R` samt `requirements.txt` und beschrieb eine Ausgabe, die es nie gesehen
+// hatte. Kein Modellfehler, sondern ein fehlendes Werkzeug – und das sieht nur
+// Mimir.
+
+/** Zustand der Oberfläche und Antwort auf eine Frage. */
+function dateifrage(scope, enabled, root, text) {
+  const teil = src.slice(a, b).replace(
+    /const agent = \{[^}]*\};/,
+    `const agent = { scope: '${scope}', enabled: ${enabled}, root: '${root}' };`,
+  );
+  return new Function(
+    `${teil}\nreturn { faellig: fragtNachDateien(${JSON.stringify(text)}), antwort: dateiwerkzueugAntwort() };`,
+  )();
+}
+
+// **Der Fall aus dem Chat.** Genau der Satz, an dem es auffiel.
+const imPostfach = dateifrage('mail', false, '', 'ich meine das verzeichnis aus dem agent-dir');
+gleich('im Postfachumfang wird die Frage erkannt', imPostfach.faellig, true);
+gleich(
+  'und der Antworttext nennt den Umfang',
+  /Umfang Postfach/.test(imPostfach.antwort) && /keine Dateiwerkzeuge/.test(imPostfach.antwort),
+  true,
+);
+gleich('nennt, was es stattdessen kann', /Mailwerkzeuge/.test(imPostfach.antwort), true);
+gleich('nennt den Weg zu den Dateiwerkzeugen', /\/scope agent/.test(imPostfach.antwort), true);
+// **Und sagt, warum.** Ohne diesen Satz wirkt die Antwort wie eine Ausrede: Der
+// Benutzer fragt, warum nicht einfach gefragt wird, und bekommt keine Antwort.
+gleich('und sagt, warum nicht einfach gefragt wird', /erfunden|ausdenken/.test(imPostfach.antwort), true);
+
+// **Im vollen Betrieb greift nichts.** Sonst würde jede gewöhnliche Frage
+// unterbrochen – und eine Unterbrechung ohne Grund ist schlimmer als keine.
+const imBetrieb = dateifrage('agent', true, '/srv/daten', 'welche Ordner gibt es unter /srv/daten');
+gleich('mit Dateiwerkzeugen wird nicht unterbrochen', imBetrieb.faellig, false);
+
+// **Alle drei Bedingungen, weil jede einzeln fehlen kann.** Besonders die dritte:
+// Mit leerem `root` stünde der Agentenmodus an und da, hätte aber keine Dateiwerkzeuge
+// – dieselbe Lage wie im Postfach, nur ohne die Ausrede des Umfangs.
+gleich('ohne Schalter wird unterbrochen', dateifrage('agent', false, '/srv', 'liste die Dateien').faellig, true);
+gleich('ohne Arbeitsverzeichnis wird unterbrochen', dateifrage('agent', true, '', 'liste die Dateien').faellig, true);
+gleich(
+  'und ohne Verzeichnis nennt die Antwort /agent-dir',
+  /\/agent-dir/.test(dateifrage('agent', true, '', 'liste die Dateien').antwort),
+  true,
+);
+gleich(
+  'ohne Schalter nennt die Antwort /agent',
+  /\/agent\b/.test(dateifrage('agent', false, '/srv', 'liste die Dateien').antwort),
+  true,
+);
+
+// **Was durchgehen muss.** Ein verschluckter Postfach- oder Terminauftrag wäre
+// genauso schlimm wie eine durchgelassene Dateifrage: Der Benutzer hätte eine
+// Mail verschickt oder einen Termin angelegt, den er nicht wollte.
+for (const text of [
+  'Wie war dein Tag',
+  'zeig mir die ungelesenen Mails',
+  'welche Termine habe ich morgen',
+  'schreib mir eine Mail',
+  'was steht in 5/10 der Notiz',
+  'am 5. / 6. Mai war ich im Urlaub',
+  'http://example.com/ls',
+]) {
+  gleich(`geht durch: ${JSON.stringify(text)}`, dateifrage('mail', false, '', text).faellig, false);
+}
+
+// **Der volle Pfad zählt, sein letztes Segment nicht.** Eine Wurzel wie
+// `/home/bernd` würde sonst jedes Wort „bernd" in jeder Frage treffen.
+gleich(
+  'das Arbeitsverzeichnis als Wort trifft nicht',
+  dateifrage('agent', true, '/home/bernd', 'was macht bernd').faellig,
+  false,
+);
+gleich(
+  'der volle Pfad dagegen schon',
+  dateifrage('agent', false, '/srv/daten', 'was liegt in /srv/daten').faellig,
+  true,
+);
+
+// **Die Frage kommt nicht ins Modell und nicht in den Verlauf.** Sie als Nachricht
+// im Verlauf ließe das Modell auf eine Erwiderung reagieren, die es nie gab.
+const senden = funktion('handleSendMessage');
+const einstieg = senden.indexOf('fragtNachDateien(text)');
+gleich('die Frage wird abgefangen', einstieg > 0, true);
+gleich(
+  'und geht nicht an das Modell',
+  /if \(fragtNachDateien\(text\)\)[\s\S]*?return;/.test(senden) &&
+    senden.indexOf('performChat', einstieg) > senden.indexOf('return;', einstieg),
+  true,
+);
+const abgriff = senden.slice(einstieg, senden.indexOf('return;', einstieg));
+// **Nur die Zuweisung**, nicht das Wort: Der Kommentar im Rumpf sagt ausdrücklich,
+// dass die Frage nicht in den Verlauf gehört, und nennt ihn dabei.
+gleich('und landet nicht im Verlauf', /messageHistory\s*=|messageHistory\.push/.test(abgriff), false);
+// **Vor der Verdichtung.** Ein Auftrag, dessen Ergebnis nicht gebraucht wird, darf
+// den Verlauf nicht kosten.
+gleich('und vor der Verdichtung', senden.indexOf('verdichtungsfaellig') > einstieg, true);
 
 console.log();
 console.log('— Der Provider zieht den Umfang mit —');

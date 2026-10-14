@@ -70,7 +70,9 @@ Rahmen und Knöpfe folgen einer gemeinsamen Regel, damit die Anwendung an jeder 
 
 Die Oberfläche gibt es in zwei Schemata, und beide sind vollständig über dieselben Variablen definiert: `:root` trägt das dunkle, `[data-theme='hell']` das helle. Das Attribut sitzt am `<html>`, weil die Farben für alles im Fenster gelten, auch für die Fenster, die währenddessen geöffnet werden; dunkel ist das, was ohne Attribut erscheint, damit eine alte Installation unverändert startet. Die Wahl steht als `theme` in `ollama.json` und wird über `get_theme` und `set_theme` gelesen und geschrieben. Der Umschalter oben links wechselt erst dann die Anzeige, wenn das Backend die Wahl bestätigt hat: Ein Schema anzuzeigen, das nicht gespeichert werden konnte, wäre eine Zusage ohne Deckung. Beim Start erscheint deshalb für einen Moment das dunkle Schema, bis das Backend geantwortet hat.
 
-Ein Knopf hat immer einen Rahmen. Die Füllung unterscheidet nur die Bedeutung, nicht die Form: ausführend gefüllt (Senden, „Anmelden", „Verbinden", „Speichern", „Ausführen", „Schreiben", „Zertifikat bestätigen"), zurückhaltend mit Rahmen (Abbrechen, Umschalter im Ruhezustand), Rot nur für den SSH-Neustart und Bernstein für alles, was schreibt oder ändert (Schreibmodus, Schreibschritt, Unterschiedszusammenfassung). Fokus ist über die Tastatur sichtbar, und der Abstand zwischen Bedienelement und Text bleibt überall gleich.
+Ein Knopf hat immer einen Rahmen. Die Füllung unterscheidet nur die Bedeutung, nicht die Form: ausführend gefüllt (Senden, „Anmelden", „Verbinden", „Speichern", „Ausführen", „Schreiben", „Zertifikat bestätigen"), zurückhaltend mit Rahmen (Abbrechen, Umschalter im Ruhezustand, „Verlauf", „Datei"), Rot nur für den SSH-Neustart und Bernstein für alles, was schreibt oder ändert (Schreibmodus, Schreibschritt, Unterschiedszusammenfassung, „Alles leeren"). Fokus ist über die Tastatur sichtbar, und der Abstand zwischen Bedienelement und Text bleibt überall gleich.
+
+Die Eingabeleihe trägt **einen** Knopf für den Verlauf, nicht zwei. „Kontext leeren" und „Verdichtung von Hand" wären zwei Schaltflächen an einer Reihe, die schon zwei Umschalter, das Eingabefeld und drei Knöpfe trägt – und die Reihe umbricht sonst. Die Verdichtung braucht keinen eigenen Weg: Sie geschieht von selbst, sobald der Kontext zu voll wird. Das Leeren bleibt ein Knopf, weil es unwiederbringlich ist und deshalb eine Rückfrage braucht, die eine eigene Fläche verdient.
 
 Die Kalenderleiste nimmt 260 px am rechten Rand ein. Ihre drei Knöpfe teilen sich eine eigene Reihe unter der Überschrift „Kalender", weil sie in dieser Breite sonst umbrechen und die Leiste unruhig wirkt. Unter 720 px Fensterbreite startet die Leiste eingeklappt, damit die Unterhaltung nicht auf einen Rest reduziert wird; der Knopf **Kalender: an** im Kopf holt sie zurück. Die Entscheidung fällt nur beim Start: Ein späteres Verbreitern des Fensters holt die Leiste nicht von selbst zurück. Eingeklappt pausiert die automatische Aktualisierung, damit der Server im LAN nicht umsonst angesprochen wird – ein ausdrückliches `/termine` holt dagegen weiterhin Termine. Das Fenster startet deshalb mit 1080 px Breite.
 
@@ -138,7 +140,7 @@ Der Provider wirkt auf den Umfang: `wirksamer_umfang` gibt im lokalen Provider d
 
 ### Chatnachricht
 
-1. Das Frontend erstellt aus dem aktuellen Verlauf und der neuen User-Nachricht eine begrenzte Anfrage.
+1. Das Frontend erstellt aus dem aktuellen Verlauf und der neuen User-Nachricht eine begrenzte Anfrage. Liegt die geschätzte Belegung über der Verdichtungsschwelle, wird der Verlauf **vor** dem Senden zusammengefasst – siehe [Verdichten und Leeren](#verdichten-und-leeren).
 2. `send_chat_message` validiert Prompt, Rollen, Historiengröße und Gesamtbytes vor dem Netzwerkzugriff.
 3. Die Anfrage wird per `POST /api/chat` mit aktiviertem Streaming gesendet; Redirects werden nicht verfolgt. Auf die Antwortköpfe wartet Mimir bis zu zwei Minuten: Bei lokaler Inferenz mit langem Prompt oder ausgelastetem Rechner braucht schon der erste Token deutlich länger (gemessen 2,6 s bei freier Maschine).
 4. Verbindungsfehler werden nicht als englischer Rohtext weitergegeben, sondern mit einer Handlungsanweisung. Die Fälle werden getrennt, weil sie verschiedene Ursachen haben: Läuft unter der Adresse **kein Dienst**, verweist Mimir auf `/server-start`. Kam die **Verbindung nicht zustande** – etwa weil ein Funkloch den Verbindungsaufbau verschluckt –, nennt Mimir den Port, die möglichen Ursachen (Funklast, Firewall, ein nur lokal lauschendes Ollama mit `OLLAMA_HOST="0.0.0.0"`) und, wenn mehrere Versuche liefen, wie oft neu versucht wurde. Hat der Server die Anfrage **angenommen, aber nicht geantwortet**, ist es eine andere Meldung. Die technische Angabe bleibt als zweite Zeile erhalten.
@@ -163,6 +165,20 @@ Der Provider wirkt auf den Umfang: `wirksamer_umfang` gibt im lokalen Provider d
 11. Nach Abschluss der Antwort wird der vollständige Text an `render_markdown` übergeben.
 12. Das Backend erzeugt HTML mit `pulldown-cmark`, begrenzt die Eingabe und bereinigt das Ergebnis mit `ammonia`.
 13. Das sichere HTML wird in der AI-Chat-Blase dargestellt; die History wird erst nach erfolgreicher Antwort committed. Bei Fehlern bleibt der bereits empfangene Text sichtbar und die Blase erhält einen Knopf für einen manuellen Neuversuch.
+
+### Verdichten und Leeren
+
+Beide fassen in den Verlauf ein, der hier ein reines Modul-`let` ohne Store ist (`messageHistory` in `src/main.js`). Das verletzt hier nichts, weil es nur eine Quelle gibt: Beide Wege setzen dasselbe Feld, und das Backend sieht nichts davon.
+
+**Verdichten** läuft als **eigener Auftrag** durch `send_chat_message`, nicht durch `performChat`. `performChat` schreibt sein Ergebnis nach `messageHistory` – die Zusammenfassung läge dann in dem Verlauf, aus dem sie entstanden ist – und `runChatAttempt` rendert in eine Chatblase, während eine Zusammenfassung keine Antwort auf eine Frage ist. Der Auftrag geht mit `tools: null` und **ohne** `systemPromptForRequest()`: Die Systemanweisung des Benutzens gehörte sonst im Auftrag, und „Antworte immer in drei Wörtern" ergäbe eine Drei-Wort-Zusammenfassung.
+
+**Anweisung und Kopf stehen im Backend, nebeneinander** (`VERDICHTUNGSANWEISUNG`, `VERDICHTUNG_MARKER`). Sie behaupten dasselbe und gehören zusammen: Der Kopf sagt dem Modell, dass die Zusammenfassung den Wortlaut der früheren Nachrichten ersetzt, die Anweisung sagt, was hineingehört. Aus dem Frontend geholt wären sie getrennt gepflegt – und getrennt gepflegt laufen sie auseinander.
+
+**Die verdichtete Unterhaltung geht als `user` in den Verlauf, nicht als `system`.** Das Backend lässt keine eigene Rolle zu (`validate_chat_message`), und `toChatHistory` behält nur `user` und `assistant`: Eine Systemnachricht im Verlauf fiele beim nächsten Agentenzug still weg, und der Benutzer hätte danach eine Unterhaltung ohne Anfang. Beides fällt erst viel später auf.
+
+**Die Schätzung ist absichtlich zu niedrig, die Schwelle passt dazu.** `ZEICHEN_PRO_TOKEN` zählt Zeichen statt Token und fällt bei mehrsprachigem Text zu niedrig aus; deshalb verdichtet Mimir bei 75 Prozent und warnt erst bei 90. Ohne `/context` wird mit 4096 Token gerechnet – als **Anzeige- und Auslösegrenze**, die nie in einen Auftrag geht. Gesendet wird weiterhin `num_ctx` aus `ChatConfig::context_option`, wo 0 unverändert „die Vorgabe des Modells" heißt.
+
+**Leeren** räumt Kontext, Fenster und Datei zusammen. Der leere Verlauf geht über `delete_chat_history`, nicht über `persistHistory()`: `save_chat_history` prüft über `validate_chat_input`, und dort ist eine leere Liste ein Fehler. Die Systemanweisung bleibt, weil sie eine Einstellung des Geräts und keine Sitzung ist.
 
 ### Denktext von Reasoning-Modellen
 

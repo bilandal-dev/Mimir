@@ -495,9 +495,23 @@ Geprüft wird, was aus einer Antwortmail wird: Zeilen mit `>` und die Zitatköpf
 
 Der wichtigste Teil des Skripts prüft die Zusage, die dabei leicht verloren geht: Fremder Mailtext ist Angriffseingabe. Die Darstellung baut Absätze als eigene Elemente auf, und deshalb wird nachgesehen, dass kein `innerHTML`, kein `insertAdjacentHTML` und kein `outerHTML` im Spiel ist – jeder Text aus einer Mail wird über `textContent` gesetzt.
 
+## Verdichten und Leeren prüfen
+
+Weil vier Fehler hier nicht beim Ausprobieren auffallen, sondern erst Wochen später:
+
+```bash
+node src/tests/verdichtung.test.mjs
+```
+
+**Der Verlauf kommt beim Start zurück, obwohl er geleert wurde** – deshalb geht das Leeren über `delete_chat_history` und nicht über `persistHistory()`. `save_chat_history` prüft über `validate_chat_input`, und dort ist eine leere Liste ein Fehler; ein leerer Verlauf ist keine Datei, sondern das Fehlen einer Datei. **Die Verdichtung schreibt sich selbst in den Verlauf**, wenn sie über `performChat` läuft – die schreibt ihr Ergebnis nach `messageHistory`, und die Zusammenfassung läge dann in dem Verlauf, aus dem sie entstanden ist. **Die Verdichtung nimmt die Systemanweisung des Benutzers mit**, wenn sie über `systemPromptForRequest()` gebaut wird, und „Antworte immer in drei Wörtern" ergäbe eine Drei-Wort-Zusammenfassung: Der Verlauf wäre danach wertlos, obwohl er vorher voll war. **Ein ausführlich schreibendes Modell verdichtet bei jedem Zug**, wenn nichts den Boden nach der letzten Verdichtung anhebt – und der Auftrag kostete mehr als das Gespräch, das er retten soll.
+
+Geprüft wird deshalb nicht das Verhalten im Fenster, sondern die Zusagen an den Stellen: die drei Dinge, die das Leeren zusammen räumt (Kontext, Fenster, Datei), und dass die Systemanweisung *nicht* mitverschwindet; dass die Verdichtung weder über `performChat` noch über `runChatAttempt` geht, `tools: null` schickt und **kein** Datum mitschickt; dass die letzten vier Nachrichten wörtlich bleiben und **nicht** mitverdichtet werden – ein `slice(0, -VERDICHTUNG_REZENZ)` ohne zweiten Durchgang würde die gerade getippte Frage abschneiden; dass ein Fehler den Verlauf unverändert lässt, weil eine halb verdichtete Unterhaltung das Schlimmste ist, was hier passieren kann.
+
+Und dass die Zusammenfassung **ausklappbar** im Chat steht und über `textContent` gesetzt wird. Sie ist Modelltext aus einem Auftrag, den der Benutzer nicht gestellt hat – dasselbe Argument wie bei einer Mail.
+
 ## Stand der Prüfungen
 
-563 bestandene Rust-Tests, dazu neun Skripte ohne Fenster. Kein Test fällt durch.
+586 bestandene Rust-Tests, dazu zehn Skripte ohne Fenster. Kein Test fällt durch.
 
 **An einer Zahl ist gut zu sehen, wie leicht so etwas schiefgeht.** Bis vor
 kurzem stand hier, drei Tests seien rot – und begründet war das mit Kalenderdaten,

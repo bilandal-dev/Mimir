@@ -452,6 +452,91 @@ pub fn normalize_system_prompt(value: &str) -> Result<String, String> {
     Ok(prompt.to_string())
 }
 
+// ------------------------------------------------------ Kontext verdichten
+// Ab einer bestimmten Belegung fasst Mimir den bisherigen Verlauf zusammen und
+// arbeitet mit der Zusammenfassung weiter. Zwei Dinge stehen hier und nicht im
+// Frontend: die Anweisung an das Modell und der Kopf, unter dem die verdichtete
+// Unterhaltung in den Verlauf geht. Sie gehören zusammen – stünde im Kopf etwas
+// anderes als in der Anweisung beschrieben, hielte das Modell die Zusammenfassung
+// für eine Nachricht, die tatsächlich gesagt wurde.
+
+/// Der Kopf, unter dem die verdichtete Unterhaltung in den Verlauf geht.
+///
+/// **Ohne diesen Kopf ist die Verdichtung schädlich.** Das Modell kann nicht
+/// unterscheiden, was der Benutzer wirklich gesagt hat und was Mimir selbst
+/// zusammengefasst hat. Es hielte die Zusammenfassung für eine Nachricht und
+/// bezöge sich in seinen Antworten auf Formulierungen, die niemand gesagt hat.
+pub const VERDICHTUNG_MARKER: &str = "\
+Zusammenfassung des bisherigen Gesprächs, von Mimir automatisch erstellt. \
+Das ist keine neue Nachricht des Benutzers und beantwortet keine Frage. \
+Sie ersetzt den Wortlaut der früheren Nachrichten. Bezieht sich deine Antwort \
+darauf, halte dich an diese Zusammenfassung und rate nicht, was genau gesagt wurde.";
+
+/// Die Anweisung für den einen Aufruf, der die Zusammenfassung erstellt.
+///
+/// **Nicht die Systemanweisung des Benutzers.** „Antworte immer in drei Wörtern\"
+/// ergäbe eine Drei-Wort-Zusammenfassung, und der Verlauf wäre danach wertlos.
+/// Deshalb geht nur diese Anweisung an das Modell, sonst nichts – nicht einmal
+/// das Datum.
+pub const VERDICHTUNGSANWEISUNG: &str = "\
+Du bekommst unten den bisherigen Verlauf eines Gesprächs, das in einen neuen \
+Abschnitt geht. Fasse ihn so zusammen, dass das Gespräch ohne den Wortlaut \
+weitergeführt werden kann.
+
+Halte fest:
+- worum es geht und was bereits entschieden, vereinbart oder ausgeschlossen ist,
+- Fakten, Namen, Zahlen, Termine, Dateipfade und Werkzeugergebnisse, die noch eine Rolle spielen,
+- offene Punkte und die Absicht des Benutzers, soweit sie über die einzelnen Nachrichten hinausgeht.
+
+Lass weg:
+- Höflichkeiten, Wiederholungen und ausprobierte Wege, die nicht weiterhelfen,
+- Denktext und Zwischenschritte,
+- alles, was im neuen Abschnitt nicht mehr gebraucht wird.
+
+Schreibe zusammenfassend, nicht als Dialog: keine Rollen, keine Zeilen mit \
+\"Benutzer:\" oder \"Assistent:\", keine Einleitung und keinen Abschlusssatz wie \
+\"Hier ist die Zusammenfassung\". Fließtext mit kurzen Absätzen, eine kurze \
+Aufzählung für die offenen Punkte. Bleibe knapp – die Zusammenfassung soll Platz \
+freimachen, nicht das Fenster füllen.
+
+Antworte nur mit der Zusammenfassung.";
+
+/// Baut aus dem Text des Modells die Nachricht, die an die Stelle des verdichteten
+/// Verlaufs tritt.
+///
+/// **Sie geht als `user` und nicht als `system`.** Das Backend lässt nur
+/// `system`, `user`, `assistant` und `tool` zu (`validate_chat_message`), und das
+/// Frontend behält in `toChatHistory` nur `user` und `assistant` übrig – eine
+/// Systemnachricht im Verlauf fiele beim nächsten Agentenzug still weg, und der
+/// Benutzer hätte danach eine Unterhaltung ohne Anfang.
+///
+/// Der Marker und die Anweisung stehen nebeneinander, weil sie dasselbe
+/// behaupten. Auch hier wird geprüft, denn die Grenze aus `MAX_MESSAGE_BYTES`
+/// gilt für jede Nachricht und eine zu lange Zusammenfassung fiele erst viel
+/// später, beim Senden, auf.
+#[tauri::command]
+fn verdichtungsnachricht(zusammenfassung: String) -> Result<ChatMessage, String> {
+    let text = zusammenfassung.trim();
+
+    if text.is_empty() {
+        return Err("Das Modell hat keine Zusammenfassung geliefert".to_string());
+    }
+
+    let nachricht = ChatMessage {
+        role: "user".to_string(),
+        content: format!("{VERDICHTUNG_MARKER}\n\n{text}"),
+        ..ChatMessage::default()
+    };
+
+    validate_chat_message(&nachricht)?;
+    Ok(nachricht)
+}
+
+#[tauri::command]
+fn get_compact_prompt() -> &'static str {
+    VERDICHTUNGSANWEISUNG
+}
+
 /// Prüft die Kontextgröße und rundet sie auf ein Vielfaches von 256. Eine
 /// Obergrenze ist hier keine Formsache: Ollama reserviert den Speicher für das
 /// angeforderte Fenster, eine manipulierte Anfrage dürfte den Server nicht
@@ -7768,6 +7853,8 @@ pub fn run() {
             get_chat_config,
             prepare_attachment,
             set_chat_config,
+            get_compact_prompt,
+            verdichtungsnachricht,
             get_calendar_config,
             get_mail_config,
             set_mail_account,
@@ -7868,8 +7955,11 @@ mod tests {
         validate_context_tokens,
         validate_history,
         validate_tool_schemas,
+        verdichtungsnachricht,
         wirksamer_umfang,
         without_thinking,
+        VERDICHTUNGSANWEISUNG,
+        VERDICHTUNG_MARKER,
         AgentConfig,
         AgentState,
         ChatConfig,
@@ -9771,6 +9861,73 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("system"), "{json}");
         assert!(json.contains(r#""options":{"num_ctx":8192}"#), "{json}");
+    }
+
+    // ------------------------------------------------------- Kontext verdichten
+
+    /// Die verdichtete Unterhaltung geht als `user` in den Verlauf.
+    ///
+    /// **Nicht als `system`, und nicht als eigene Rolle.** Das Backend ließe eine
+    /// eigene Rolle nicht zu (`validate_chat_message`), und `toChatHistory` im
+    /// Frontend behält nur `user` und `assistant`: Eine Systemnachricht im Verlauf
+    /// fiele beim nächsten Agentenzug still weg, und der Benutzer hätte danach eine
+    /// Unterhaltung ohne Anfang. Beides fällt erst viel später auf, deshalb steht es
+    /// hier.
+    #[test]
+    fn die_verdichtung_geht_als_user_in_den_verlauf() {
+        let nachricht = verdichtungsnachricht("Es geht um die Dose.".to_string()).unwrap();
+
+        assert_eq!(nachricht.role, "user");
+        assert!(validate_chat_message(&nachricht).is_ok());
+        assert!(nachricht.content.starts_with(VERDICHTUNG_MARKER));
+        assert!(nachricht.content.ends_with("Es geht um die Dose."));
+    }
+
+    /// Der Marker ist der ganze Unterschied zwischen einer Zusammenfassung und
+    /// dem, was der Benutzer wirklich gesagt hat. Fehlt er, hält das Modell die
+    /// Zusammenfassung für eine Nachricht und redet über Formulierungen, die
+    /// niemand gesagt hat.
+    #[test]
+    fn die_verdichtung_sagt_dem_modell_dass_sie_keine_nachricht_ist() {
+        let nachricht = verdichtungsnachricht("Text".to_string()).unwrap();
+
+        for erwartet in ["keine neue Nachricht", "ersetzt den Wortlaut"] {
+            assert!(
+                nachricht.content.contains(erwartet),
+                "{erwartet} fehlt: {}",
+                nachricht.content
+            );
+        }
+    }
+
+    /// Eine leere Zusammenfassung darf nicht zu einer Nachricht mit nur dem Marker
+    /// werden: Das Modell bekäme eine leere Unterhaltung mit der Behauptung, sie
+    /// sei eine Zusammenfassung.
+    #[test]
+    fn eine_leere_zusammenfassung_wird_abgewiesen() {
+        assert!(verdichtungsnachricht(String::new()).is_err());
+        assert!(verdichtungsnachricht("   \n\t ".to_string()).is_err());
+    }
+
+    /// Die Grenze aus `MAX_MESSAGE_BYTES` gilt auch hier. Sie fällt sonst erst beim
+    /// Senden auf – als „Der Chatverlauf ist zu groß", ohne jeden Bezug zur
+    /// Verdichtung, aus der die Nachricht kam.
+    #[test]
+    fn eine_zu_lange_zusammenfassung_wird_abgewiesen() {
+        let zu_lang = "a".repeat(MAX_MESSAGE_BYTES + 1);
+        assert!(verdichtungsnachricht(zu_lang).is_err());
+    }
+
+    /// Die Anweisung wird gebraucht, weil eine Zusammenfassung ohne sie ein Roman
+    /// wird. Ohne Wörter zu Offenem und zum Weglassen käme hier „alles" heraus, und
+    /// alles zusammenzufassen ist keine Verdichtung.
+    #[test]
+    fn die_verdichtungsanweisung_nennt_beides() {
+        assert!(VERDICHTUNGSANWEISUNG.contains("Halte fest"));
+        assert!(VERDICHTUNGSANWEISUNG.contains("Lass weg"));
+        assert!(VERDICHTUNGSANWEISUNG.contains("offene Punkte"));
+        // Der Aufruf geht über `normalize_system_prompt`, also gelten dessen Grenzen.
+        assert!(normalize_system_prompt(VERDICHTUNGSANWEISUNG).is_ok());
     }
 
     #[tokio::test]

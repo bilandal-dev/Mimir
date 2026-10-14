@@ -308,6 +308,23 @@ Alles im Chat, mit `/` beginnend. `/help` zeigt dieselbe Liste in der Anwendung.
 `/ssh-target` und `/ssh-key` setzen das SSH-Ziel und den Schlüssel für
 `/server-start`. Details in [docs/konfiguration.md](docs/konfiguration.md).
 
+## Der Kontext
+
+Ollamas Vorgabe für das Kontextfenster kennt Mimir nicht; die Belegung wird aus
+der Textlänge geschätzt und oben rechts angezeigt. Mit `/context <token>` lässt
+sich die echte Größe festlegen.
+
+**Ab 75 Prozent verdichtet Mimir den Verlauf von selbst.** Er fasst ihn zu einer
+Zusammenfassung zusammen und macht damit weiter – die letzten Nachrichten bleiben
+wörtlich stehen. Das Verdichtungsergebnis steht als ausklappbarer Eintrag im Chat,
+mit den Token-Zahlen vorher und nachher. Ohne `/context` wird mit 4096 Token
+gerechnet; die Anzeige sagt diese Annahme auch.
+
+**Der Knopf „Verlauf" neben der Eingabe leert den Kontext** – nach Rückfrage
+verschwinden die Nachrichten aus dem Fenster, der Kontext, den das Modell sieht,
+und die gespeicherte Verlaufsdatei. Die Systemanweisung aus `/system` bleibt:
+Sie ist eine Einstellung dieses Geräts und keine Teil des Gesprächs.
+
 ## Wo die Einstellungen liegen
 
 ```

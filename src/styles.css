@@ -404,6 +404,46 @@ header option {
     font-size: 0.9em;
 }
 
+/* --- Verdichtung im Chat ------------------------------------------------------
+   Linksbündig und in der Leseschrift, wie die Agenda: Der Eintrag ist ein
+   Absatz mit einem aufklappbaren Text und keine einzeilige Statusmeldung. Ohne
+   das stehen die Zahlen mittig in Monospace, und die Zusammenfassung – ein
+   Fließtext, den man lesen soll – in einem 0,9-fach gesetzten Festbreiten-Typ. */
+.message.system.verdichtung {
+    align-self: center;
+    flex: 0 0 auto;
+    width: min(560px, 92%);
+    max-width: 92%;
+    margin: 10px 0;
+    padding: 8px 10px;
+    border: var(--border-width) solid var(--border-color);
+    border-radius: var(--radius-lg);
+    text-align: left;
+    font-family: inherit;
+    font-size: 0.92em;
+}
+
+.verdichtung-kopf {
+    margin: 0 0 6px;
+}
+
+.verdichtung summary {
+    color: var(--accent-hover);
+    cursor: pointer;
+}
+
+/* Der Modelltext als `pre`, damit Absätze und Listen stehen bleiben, die das
+   Modell geschrieben hat. `white-space: pre-wrap` bricht lange Zeilen um –
+   eine Zusammenfassung ohne Umbruch liefe über den Rand hinaus, und abgeschnittene
+   Sätze wären ein Grund, sie nicht zu lesen. */
+.verdichtung-text {
+    margin: 8px 0 0;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.88em;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 /* Die Agenda im Chat ist linksbündig und in der Leseschrift: Sie ist eine
    Liste zum Überfliegen, kein Protokoll. Ohne das Erben von .message.system
    stünden die Tage mittig und in Monospace. */
@@ -2383,6 +2423,27 @@ dialog button[type='submit']:hover:not(:disabled) {
     color: var(--on-danger);
     background: var(--danger);
     border-color: var(--danger);
+}
+
+/* **Bernstein für alles, was schreibt oder ändert.** Das Leeren des Verlaufs
+   ist kein SSH-Neustart – es passiert nichts Technisches, es verschwindet nur
+   etwas, das man nicht wiederbekommt. Rot bliebe dem Neustart vorbehalten. */
+.warn-button {
+    color: var(--warn);
+    border-color: var(--warn-border);
+}
+
+.warn-button:hover:not(:disabled) {
+    color: var(--on-warn);
+    background: var(--warn);
+    border-color: var(--warn);
+}
+
+/* Ein Hinweis im Fenster, der keine Anweisung ist, sondern eine Angabe: kleiner
+   als der übrige Text und in der Akzentfarbe, damit er gelesen und nicht
+   übersehen wird. */
+.dialog-hinweis {
+    font-size: 0.9em;
 }
 
 /* --- Fenster für einen Termin ------------------------------------------------
